@@ -66,7 +66,9 @@ crates/
   kara-ops/    Cola de operaciones, progreso con velocidad/ETA, resolución de
                conflictos, pila de deshacer/rehacer.
   kara-ui/     Puente cxx-qt + binario principal. Expone modelos a QML.
-qml/           Main.qml, FolderTree.qml, Theme.qml — migrados del spike.
+    qml/       La UI. Vive dentro del crate, no en la raíz: cxx-qt escribe las
+               rutas del `qmldir` tal cual se le dan, y un `../..` sale del
+               módulo y rompe la carga en tiempo de ejecución.
 ```
 
 Regla de capas: `ui → ops → {fs, index} → core`. Nunca al revés.
@@ -84,7 +86,7 @@ Para revisar el QML hace falta apuntar a la ruta del módulo que genera cxx-qt, 
 `qmllint` no está en el `PATH` (vive en `/usr/lib/qt6/bin`):
 
 ```bash
-/usr/lib/qt6/bin/qmllint -I target/cxxqt/qml_modules qml/Main.qml
+/usr/lib/qt6/bin/qmllint -I target/cxxqt/qml_modules crates/kara-ui/qml/*.qml
 ```
 
 Sin el `-I` falla con "Failed to import com.kara.ui", que es un falso positivo.
@@ -137,20 +139,24 @@ liberar bloquea el árbol hasta que caduque el TTL.
 
 ## Estado
 
-Andamiaje montado y verificado: repositorio git inicializado (rama `main`), workspace
-Cargo con los cinco crates, puente `cxx-qt` 0.10 funcionando y binario que arranca y
-carga QML. Sin funcionalidad todavía: `qml/Main.qml` es una ventana placeholder y los
-crates de backend están vacíos.
+**Backend: los cuatro pilares en pie.** `kara-core` (ordenación con collation,
+filtros, historial, breadcrumb, autocompletado, typeahead), `kara-fs` (listado,
+papelera FreeDesktop, copiar/mover/renombrar), `kara-ops` (cola con progreso,
+velocidad y ETA, pila de deshacer, resolución de conflictos) y `kara-index`
+(travesía paralela, búsqueda, vigilancia inotify).
 
-Siguiente paso: migrar la UI del spike (`ground/Main.qml`, `FolderTree.qml`,
-`Theme.qml`, `util.js`) a `qml/`, quitando el fondo flotante y los `anchors.margins`
-que lo hacen parecer una captura, y sustituir los datos falsos por un modelo real
-alimentado desde `kara-fs`.
+**UI: el chrome montado sobre datos reales.** Ventana sin marco con barra de
+título propia, barra de comandos con atrás/adelante/subir/refrescar, migas de
+pan navegables con desbordamiento, edición de ruta con Ctrl+L, filtro por nombre
+y barra de estado. El listado sale de `kara-fs`, no de datos falsos.
+
+**Lo que falta de la vista:** panel lateral de navegación, iconos y miniaturas,
+los cuatro modos de vista con zoom, ordenar pulsando en la cabecera, selección
+múltiple, y enchufar a la UI lo que el backend ya ofrece y nadie consume todavía
+(vigilancia, cola, deshacer).
 
 ### Cabos sueltos conocidos
 
-- **Identidad de git sin configurar** (`user.name` / `user.email`): no se puede hacer
-  commit hasta que el usuario la fije.
 - **Enlazado con `ld.bfd`**: el build avisa de que no hay `mold`, `lld` ni `gold`.
   Funciona, pero un `sudo apt install mold` acorta bastante el ciclo de compilación.
 - **El binario `qml` de Qt no está**: `qt6-declarative-dev-tools` trae `qmllint`,
