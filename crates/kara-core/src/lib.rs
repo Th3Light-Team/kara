@@ -12,6 +12,7 @@ pub mod sort;
 pub use entry::{EntryKind, FileEntry, MetadataBag, MetadataKey, MetadataValue};
 pub use sort::{
     Collation, CollationKey, ColumnId, DirectoryGrouping, SortError, SortKey, SortOrder, SortSpec,
-    available_keys, collation_key, compare_entries, compare_names, insertion_index,
-    invert_permutation, remap_selection, sort_entries, sort_key_for_column, sort_permutation,
+    available_keys, collation_key, column_for_sort_key, compare_entries, compare_names,
+    insertion_index, invert_permutation, remap_selection, sort_entries, sort_key_for_column,
+    sort_permutation,
 };

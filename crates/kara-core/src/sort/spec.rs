@@ -227,6 +227,44 @@ pub fn sort_key_for_column(column: &ColumnId) -> Result<SortKey, SortError> {
     }
 }
 
+/// Maps a sort key back to the column that represents it.
+///
+/// Inverse of [`sort_key_for_column`]. The Details view needs it to draw the
+/// active-header arrow (spec 03-vistas.md:68 "la flecha (▲/▼) lo indica" and
+/// :92 "Se muestra una flecha ▲/▼ en la columna activa") without walking every
+/// visible column asking which one matches: that walk would put sorting logic
+/// in the presentation layer, which the project rules forbid.
+///
+/// Returns `None` when no column can represent the key:
+///
+/// - [`SortKey::Unsorted`] is a state, not a column: nothing is highlighted and
+///   no arrow is drawn.
+/// - `Metadata(Custom(""))` would render as the column id `meta/`, which
+///   [`sort_key_for_column`] rejects as unknown. Returning `None` keeps the
+///   round-trip total: every id this function yields maps back to its own key.
+pub fn column_for_sort_key(key: &SortKey) -> Option<ColumnId> {
+    let id: Cow<'static, str> = match key {
+        SortKey::Name => Cow::Borrowed("name"),
+        SortKey::Extension => Cow::Borrowed("extension"),
+        SortKey::Size => Cow::Borrowed("size"),
+        SortKey::Modified => Cow::Borrowed("modified"),
+        SortKey::Created => Cow::Borrowed("created"),
+        SortKey::Accessed => Cow::Borrowed("accessed"),
+        SortKey::Kind => Cow::Borrowed("kind"),
+        SortKey::Location => Cow::Borrowed("location"),
+        SortKey::Metadata(MetadataKey::Dimensions) => Cow::Borrowed("dimensions"),
+        SortKey::Metadata(MetadataKey::Duration) => Cow::Borrowed("duration"),
+        SortKey::Metadata(MetadataKey::Album) => Cow::Borrowed("album"),
+        SortKey::Metadata(MetadataKey::Artist) => Cow::Borrowed("artist"),
+        SortKey::Metadata(MetadataKey::Tags) => Cow::Borrowed("tags"),
+        SortKey::Metadata(MetadataKey::Rating) => Cow::Borrowed("rating"),
+        SortKey::Metadata(MetadataKey::Custom(custom)) if custom.is_empty() => return None,
+        SortKey::Metadata(MetadataKey::Custom(custom)) => Cow::Owned(format!("meta/{custom}")),
+        SortKey::Unsorted => return None,
+    };
+    Some(ColumnId(id))
+}
+
 /// Serialización textual estable de un [`SortSpec`].
 ///
 /// Formato: `criterio:sentido:agrupacion:banderas`, por ejemplo

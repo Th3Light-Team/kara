@@ -76,7 +76,10 @@ pub fn remap_selection(
     let mut result = BTreeSet::new();
     for &old_index in selection {
         if old_index >= len {
-            return Err(SortError::SelectionOutOfRange { index: old_index, len });
+            return Err(SortError::SelectionOutOfRange {
+                index: old_index,
+                len,
+            });
         }
         result.insert(inverse[old_index]);
     }

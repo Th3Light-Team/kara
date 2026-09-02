@@ -77,7 +77,11 @@ enum CollationAtom {
     /// Tramo maximal de dígitos ASCII: `start`/`len` delimitan el tramo completo en
     /// `original`; `zeros` es el número de ceros a la izquierda (acotado a `len - 1`
     /// para que siempre quede al menos un dígito significativo).
-    Digits { start: usize, len: usize, zeros: usize },
+    Digits {
+        start: usize,
+        len: usize,
+        zeros: usize,
+    },
 }
 
 /// Compara dos átomos, usando `a_src`/`b_src` (los `original` de cada clave) para

@@ -34,7 +34,10 @@ mod spec;
 
 pub use collation::{Collation, CollationKey, collation_key, compare_names};
 pub use permutation::{invert_permutation, remap_selection, sort_permutation};
-pub use spec::{ColumnId, DirectoryGrouping, SortKey, SortOrder, SortSpec, sort_key_for_column};
+pub use spec::{
+    ColumnId, DirectoryGrouping, SortKey, SortOrder, SortSpec, column_for_sort_key,
+    sort_key_for_column,
+};
 
 use core::cmp::Ordering;
 use std::time::SystemTime;
@@ -194,7 +197,15 @@ fn extract_value(entry: &FileEntry, key: &SortKey, collation: &Collation) -> Opt
     match key {
         SortKey::Name | SortKey::Unsorted => None,
         SortKey::Extension => Some(ValueSlot::Text(collation_key(
-            extension_of(&entry.display),
+            // Directories have no extension: `My.folder` is not a `.folder`
+            // file. They get the empty string, which is a *value* and not an
+            // absent one, so they group with the extensionless files instead of
+            // falling to the end under the availability rule.
+            if entry.kind == EntryKind::Directory {
+                ""
+            } else {
+                extension_of(&entry.display)
+            },
             collation,
         ))),
         SortKey::Size => entry.size.map(ValueSlot::Number),
@@ -205,9 +216,10 @@ fn extract_value(entry: &FileEntry, key: &SortKey, collation: &Collation) -> Opt
             .type_label
             .as_deref()
             .map(|label| ValueSlot::Text(collation_key(label, collation))),
-        SortKey::Location => entry.location.as_ref().map(|path| {
-            ValueSlot::Text(collation_key(&path.to_string_lossy(), collation))
-        }),
+        SortKey::Location => entry
+            .location
+            .as_ref()
+            .map(|path| ValueSlot::Text(collation_key(&path.to_string_lossy(), collation))),
         SortKey::Metadata(key) => entry
             .extra
             .get(key)
@@ -261,7 +273,10 @@ fn decorate_one<'a>(entry: &'a FileEntry, spec: &SortSpec) -> Decoration<'a> {
 }
 
 fn decorate<'a>(entries: &'a [FileEntry], spec: &SortSpec) -> Vec<Decoration<'a>> {
-    entries.iter().map(|entry| decorate_one(entry, spec)).collect()
+    entries
+        .iter()
+        .map(|entry| decorate_one(entry, spec))
+        .collect()
 }
 
 /// La cadena de comparación normativa, operando sobre datos ya precomputados.
