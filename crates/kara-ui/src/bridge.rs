@@ -22,6 +22,7 @@ use kara_core::breadcrumb;
 use kara_core::entry::EntryKind;
 use kara_core::filter::{NameFilter, Visibility};
 use kara_core::history::History;
+use kara_core::selection::Selection;
 use kara_core::sort::{ColumnId, SortOverrides, SortSpec, column_for_sort_key};
 use kara_core::tree::{Branch, Expandable, RowKind, Section, SectionId, Tree};
 use kara_core::view::{ViewMemory, ViewMode, ViewSettings};
@@ -62,6 +63,14 @@ pub mod qobject {
         /// dónde pintar la flecha.
         #[qproperty(QString, sort_column)]
         #[qproperty(bool, sort_ascending)]
+        /// Qué entradas están seleccionadas, en 1 y 0.
+        #[qproperty(QList_i32, entry_selected)]
+        /// Cuántas hay seleccionadas y cuál tiene el cursor, o -1.
+        #[qproperty(i32, selected_count)]
+        #[qproperty(i32, focused_index)]
+        /// Suma de los tamaños seleccionados, ya legible. Vacía si no hay
+        /// selección o si ninguna entrada aporta tamaño.
+        #[qproperty(QString, selected_size)]
         /// Qué entradas son carpetas, en 1 y 0.
         ///
         /// La vista necesita saberlo para entrar al hacer doble clic, y no
@@ -125,6 +134,19 @@ pub mod qobject {
         #[qinvokable]
         fn up(self: Pin<&mut App>);
 
+        /// Envía a la papelera **todo lo seleccionado**.
+        ///
+        /// Un fallo no aborta el lote: se intenta cada uno y se resume al
+        /// final, que es la regla del proyecto para cualquier operación por
+        /// lotes.
+        #[qinvokable]
+        fn trash_selected(self: Pin<&mut App>);
+
+        /// El nombre de la entrada con el cursor, o vacío. Lo necesita el
+        /// editor de renombrado, que trabaja sobre una sola.
+        #[qinvokable]
+        fn focused_name(self: Pin<&mut App>) -> QString;
+
         /// Envia una entrada de la carpeta actual a la papelera y refresca.
         #[qinvokable]
         fn trash(self: Pin<&mut App>, name: &QString);
@@ -171,6 +193,24 @@ pub mod qobject {
         /// Enseña u oculta el panel de navegación (F9).
         #[qinvokable]
         fn toggle_sidebar(self: Pin<&mut App>);
+
+        /// Un clic sobre una fila, con sus modificadores. La semántica de
+        /// Ctrl y Mayúsculas vive en `kara_core::selection`, no aquí.
+        #[qinvokable]
+        fn click_entry(self: Pin<&mut App>, row: i32, ctrl: bool, shift: bool);
+
+        #[qinvokable]
+        fn select_all(self: Pin<&mut App>);
+
+        #[qinvokable]
+        fn deselect_all(self: Pin<&mut App>);
+
+        #[qinvokable]
+        fn invert_selection(self: Pin<&mut App>);
+
+        /// Marco elástico: la vista dice qué filas cubre, el dominio decide.
+        #[qinvokable]
+        fn rubber_band(self: Pin<&mut App>, from: i32, to: i32, additive: bool);
 
         /// Deshace la última operación reversible.
         #[qinvokable]
@@ -250,6 +290,10 @@ pub struct AppRust {
     entry_thumbs: QStringList,
     entry_dirs: cxx_qt_lib::QList<i32>,
     entry_dates: QStringList,
+    entry_selected: cxx_qt_lib::QList<i32>,
+    selected_count: i32,
+    focused_index: i32,
+    selected_size: QString,
     sort_column: QString,
     sort_ascending: bool,
     entry_count: i32,
@@ -289,6 +333,15 @@ pub struct AppRust {
     icons: Icons,
     /// Descripciones de los tipos, para la columna «Tipo».
     descriptions: MimeDescriptions,
+    /// Qué está seleccionado y qué tiene el cursor.
+    selection: Selection,
+    /// Las entradas que se están enseñando, en su orden. Se guardan para poder
+    /// traducir la selección **por nombre** cuando la lista se rehace: al
+    /// reordenar o filtrar los índices cambian, y una selección por índice
+    /// señalaría a otros ficheros.
+    visible: Vec<kara_core::FileEntry>,
+    /// De qué carpeta son `visible` y la selección.
+    visible_path: Option<PathBuf>,
     /// Pila de deshacer/rehacer. Toda operación destructiva pasa por aquí:
     /// es la red de seguridad que la spec pone por encima de todo lo demás.
     undo: UndoStack,
@@ -331,6 +384,10 @@ impl Default for AppRust {
             entry_thumbs: QStringList::default(),
             entry_dirs: cxx_qt_lib::QList::<i32>::default(),
             entry_dates: QStringList::default(),
+            entry_selected: cxx_qt_lib::QList::<i32>::default(),
+            selected_count: 0,
+            focused_index: -1,
+            selected_size: QString::default(),
             sort_column: QString::from("name"),
             sort_ascending: true,
             entry_count: 0,
@@ -369,6 +426,9 @@ impl Default for AppRust {
             // tema sale el fichero, no la nitidez.
             icons: Icons::load(ICON_SIZE),
             descriptions: MimeDescriptions::new(TYPE_LANGUAGES.iter().map(|l| (*l).to_string()).collect()),
+            selection: Selection::new(),
+            visible: Vec::new(),
+            visible_path: None,
             undo: UndoStack::new(),
             sort_defaults: SortSpec::default(),
             views: ViewMemory::default(),
@@ -479,6 +539,10 @@ struct Snapshot {
     icons: QStringList,
     dirs: cxx_qt_lib::QList<i32>,
     dates: QStringList,
+    selected: cxx_qt_lib::QList<i32>,
+    selected_count: i32,
+    focused_index: i32,
+    selected_size: QString,
     count: i32,
     /// Qué entradas pueden tener miniatura, para el hilo de fondo.
     jobs: Vec<ThumbnailJob>,
@@ -511,6 +575,33 @@ impl AppRust {
         // resto.
         let sort = self.views.sort_for(target).resolve(&self.sort_defaults);
         kara_core::sort::sort_entries(&mut entries, &sort);
+
+        // La selección se traduce **por nombre**, no por índice: reordenar,
+        // filtrar o refrescar cambia los índices, y una selección por índice
+        // acabaría señalando a otros ficheros. Cambiar de carpeta la vacía: los
+        // nombres pueden coincidir y arrastrarla sería seleccionar a ciegas.
+        if self.visible_path.as_deref() == Some(target) {
+            let previous = self.selection.to_view_state(&self.visible, 0.0);
+            self.selection = Selection::from_view_state(&previous, &entries);
+        } else {
+            self.selection = Selection::new();
+        }
+        self.visible_path = Some(target.to_path_buf());
+        self.visible = entries.clone();
+
+        let selected = ints(
+            (0..entries.len()).map(|index| i32::from(self.selection.is_selected(index))),
+        );
+        // Tamaño total de lo seleccionado, que es lo que la spec pide en la
+        // barra de estado junto al conteo. Las carpetas no aportan: su tamaño
+        // es recursivo y no se conoce.
+        let bytes: u64 = self
+            .selection
+            .selected()
+            .iter()
+            .filter_map(|index| entries.get(*index))
+            .filter_map(|entry| entry.size)
+            .sum();
 
         let names = entries.iter().map(|e| QString::from(&e.display)).collect();
         let sizes = entries
@@ -560,6 +651,17 @@ impl AppRust {
             sizes,
             kinds,
             icons,
+            selected,
+            selected_count: clamp_count(self.selection.len()),
+            focused_index: self
+                .selection
+                .focused()
+                .map_or(-1, clamp_count),
+            selected_size: QString::from(&if bytes > 0 {
+                present::format_size(bytes)
+            } else {
+                String::new()
+            }),
             dates: entries
                 .iter()
                 .map(|e| QString::from(&present::modified_label(e.modified)))
@@ -808,6 +910,10 @@ impl qobject::App {
         self.as_mut().set_entry_icons(view.icons);
         self.as_mut().set_entry_dirs(view.dirs);
         self.as_mut().set_entry_dates(view.dates);
+        self.as_mut().set_entry_selected(view.selected);
+        self.as_mut().set_selected_count(view.selected_count);
+        self.as_mut().set_focused_index(view.focused_index);
+        self.as_mut().set_selected_size(view.selected_size);
         self.as_mut().publish_sort(target);
 
         // La carpeta manda sobre la vista: se restaura como se dejó antes de
@@ -1001,6 +1107,90 @@ impl qobject::App {
         self.as_mut().set_entry_thumbs(list);
     }
 
+    /// Vuelca la selección a las propiedades sin releer la carpeta.
+    ///
+    /// Un clic no puede costar un `scandir`: la lista visible ya está en
+    /// memoria y lo único que cambia son las marcas.
+    fn publish_selection(mut self: Pin<&mut Self>) {
+        let (marks, count, focused, bytes) = {
+            let state = self.rust();
+            let marks = ints(
+                (0..state.visible.len())
+                    .map(|index| i32::from(state.selection.is_selected(index))),
+            );
+            let bytes: u64 = state
+                .selection
+                .selected()
+                .iter()
+                .filter_map(|index| state.visible.get(*index))
+                .filter_map(|entry| entry.size)
+                .sum();
+            (
+                marks,
+                clamp_count(state.selection.len()),
+                state.selection.focused().map_or(-1, clamp_count),
+                bytes,
+            )
+        };
+
+        self.as_mut().set_entry_selected(marks);
+        self.as_mut().set_selected_count(count);
+        self.as_mut().set_focused_index(focused);
+        self.as_mut().set_selected_size(QString::from(&if bytes > 0 {
+            present::format_size(bytes)
+        } else {
+            String::new()
+        }));
+    }
+
+    fn click_entry(mut self: Pin<&mut Self>, row: i32, ctrl: bool, shift: bool) {
+        let Ok(index) = usize::try_from(row) else {
+            return;
+        };
+        {
+            let state = self.as_mut().rust_mut().get_mut();
+            let len = state.visible.len();
+            // Mayúsculas manda sobre Ctrl, como en el Explorador: Ctrl+May+clic
+            // añade el rango a lo que ya había.
+            match (shift, ctrl) {
+                (true, true) => state.selection.add_range(index, len),
+                (true, false) => state.selection.select_range(index, len),
+                (false, true) => state.selection.ctrl_click(index, len),
+                (false, false) => state.selection.click(index, len),
+            }
+        }
+        self.as_mut().publish_selection();
+    }
+
+    fn select_all(mut self: Pin<&mut Self>) {
+        let len = self.rust().visible.len();
+        self.as_mut().rust_mut().get_mut().selection.select_all(len);
+        self.as_mut().publish_selection();
+    }
+
+    fn deselect_all(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().get_mut().selection.deselect_all();
+        self.as_mut().publish_selection();
+    }
+
+    fn invert_selection(mut self: Pin<&mut Self>) {
+        let len = self.rust().visible.len();
+        self.as_mut().rust_mut().get_mut().selection.invert(len);
+        self.as_mut().publish_selection();
+    }
+
+    fn rubber_band(mut self: Pin<&mut Self>, from: i32, to: i32, additive: bool) {
+        let (Ok(from), Ok(to)) = (usize::try_from(from), usize::try_from(to)) else {
+            return;
+        };
+        {
+            let state = self.as_mut().rust_mut().get_mut();
+            let len = state.visible.len();
+            state.selection.apply_rubber_band(from, to, len, additive);
+        }
+        self.as_mut().publish_selection();
+    }
+
     /// Refleja el estado de la pila de deshacer, con la etiqueta de qué se
     /// deshace: la spec pide decir «Deshacer mover», no solo ofrecer deshacer.
     fn publish_undo(mut self: Pin<&mut Self>) {
@@ -1087,6 +1277,69 @@ impl qobject::App {
                 QString::default()
             }
         }
+    }
+
+    fn focused_name(self: Pin<&mut Self>) -> QString {
+        let state = self.rust();
+        let name = state
+            .selection
+            .focused()
+            .and_then(|index| state.visible.get(index))
+            .map(|entry| entry.display.clone())
+            .unwrap_or_default();
+        QString::from(&name)
+    }
+
+    fn trash_selected(mut self: Pin<&mut Self>) {
+        let current = PathBuf::from(self.path().to_string());
+        let victims: Vec<PathBuf> = {
+            let state = self.rust();
+            state
+                .selection
+                .selected()
+                .iter()
+                .filter_map(|index| state.visible.get(*index))
+                .map(|entry| current.join(&entry.name))
+                .collect()
+        };
+        if victims.is_empty() {
+            return;
+        }
+
+        let policy = kara_ops::trash_policy();
+        let mut failures = Vec::new();
+        let mut done = Vec::new();
+        for victim in &victims {
+            match kara_fs::trash::trash_one(victim, &policy) {
+                Ok(item) => done.push(item),
+                Err(error) => failures.push(format!("{}: {error}", victim.display())),
+            }
+        }
+
+        // Cada elemento entra por separado en la pila: `UndoStack` no agrupa
+        // todavía, así que deshacer un lote de tres son tres Ctrl+Z. Es honesto
+        // y reversible; agruparlo es trabajo de la cola de operaciones.
+        for item in done {
+            self.as_mut().rust_mut().get_mut().undo.push(Action::Trashed {
+                item: Box::new(item),
+            });
+        }
+
+        if failures.is_empty() {
+            self.as_mut().clear_error();
+        } else {
+            let resumen = format!(
+                "No se pudieron enviar a la papelera {} de {}: {}",
+                failures.len(),
+                victims.len(),
+                failures.join("; ")
+            );
+            self.as_mut().report(&resumen);
+        }
+
+        self.as_mut().rust_mut().get_mut().tree.forget(&current);
+        self.as_mut().publish_undo();
+        self.as_mut().render(&current);
     }
 
     fn base_name_length(self: Pin<&mut Self>, name: &QString) -> i32 {

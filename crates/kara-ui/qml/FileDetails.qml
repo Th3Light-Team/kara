@@ -19,10 +19,10 @@ Item {
     /// Fila cuyo nombre se está editando, o -1 si ninguna.
     property int renamingIndex: -1
 
-    /// Abre el editor sobre la fila que tenga el foco.
+    /// Abre el editor sobre la fila que tenga el cursor.
     function startRename() {
-        if (rows.currentIndex >= 0)
-            view.renamingIndex = rows.currentIndex;
+        if (view.app.focused_index >= 0)
+            view.renamingIndex = view.app.focused_index;
     }
 
     readonly property int dateWidth: 150
@@ -107,6 +107,8 @@ Item {
         clip: true
         focus: true
         model: view.app.entry_count
+        // El cursor lo lleva el modelo, no la vista: `focused_index` es la
+        // única fuente, para que la selección y el cursor no se contradigan.
         currentIndex: -1
         highlightMoveDuration: 0
         ScrollBar.vertical: ScrollBar {}
@@ -115,7 +117,11 @@ Item {
             id: row
 
             required property int index
-            readonly property bool current: rows.currentIndex === row.index
+            // Seleccionada y con el cursor son dos cosas distintas: Esc quita
+            // la selección y conserva el cursor, y Mayúsculas+clic extiende
+            // desde donde está el cursor aunque no esté seleccionado.
+            readonly property bool selected: (view.app.entry_selected[row.index] ?? 0) !== 0
+            readonly property bool current: view.app.focused_index === row.index
 
             width: rows.width
             height: Math.max(Theme.rowHeight, view.app.icon_size + 8)
@@ -126,10 +132,21 @@ Item {
                 anchors.rightMargin: 4
                 radius: Theme.radius
                 color: {
-                    if (row.current)
+                    if (row.selected)
                         return Theme.selection;
                     return mouse.containsMouse ? Theme.hover : "transparent";
                 }
+            }
+
+            Rectangle {
+                visible: row.current && !row.selected
+                anchors.fill: parent
+                anchors.leftMargin: 4
+                anchors.rightMargin: 4
+                radius: Theme.radius
+                color: "transparent"
+                border.width: 1
+                border.color: Theme.accent
             }
 
             RowLayout {
@@ -251,11 +268,7 @@ Item {
                 id: mouse
                 app: view.app
                 index: row.index
-                onPicked: rows.currentIndex = row.index
-                onRenameRequested: {
-                    rows.currentIndex = row.index;
-                    view.renamingIndex = row.index;
-                }
+                onRenameRequested: view.renamingIndex = row.index
             }
         }
     }

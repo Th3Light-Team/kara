@@ -14,8 +14,6 @@ MouseArea {
     required property var app
     required property int index
 
-    /// La vista marca esta entrada como la que tiene el foco.
-    signal picked
     /// La vista abre el editor de nombre sobre esta entrada.
     signal renameRequested
 
@@ -24,9 +22,20 @@ MouseArea {
     acceptedButtons: Qt.LeftButton | Qt.RightButton
 
     onClicked: mouse => {
-        control.picked();
-        if (mouse.button === Qt.RightButton)
+        const ctrl = (mouse.modifiers & Qt.ControlModifier) !== 0;
+        const shift = (mouse.modifiers & Qt.ShiftModifier) !== 0;
+
+        if (mouse.button === Qt.RightButton) {
+            // Pulsar con el derecho sobre algo que no está seleccionado lo
+            // selecciona antes de abrir el menú: si no, las acciones actuarían
+            // sobre otra cosa distinta de la que se acaba de señalar.
+            if ((control.app.entry_selected[control.index] ?? 0) === 0)
+                control.app.click_entry(control.index, false, false);
             entryMenu.popup();
+            return;
+        }
+
+        control.app.click_entry(control.index, ctrl, shift);
     }
 
     // Si es carpeta lo dice el modelo, no la columna «Tipo»: ese texto es una
@@ -41,11 +50,14 @@ MouseArea {
         id: entryMenu
         MenuItem {
             text: qsTr("Renombrar")
+            // Renombrar es de una en una: con varias seleccionadas hace falta
+            // el renombrado por lotes, que es otra conveniencia.
+            enabled: control.app.selected_count <= 1
             onTriggered: control.renameRequested()
         }
         MenuItem {
-            text: qsTr("Enviar a la papelera")
-            onTriggered: control.app.trash(control.app.entry_names[control.index])
+            text: control.app.selected_count > 1 ? qsTr("Enviar %1 elementos a la papelera").arg(control.app.selected_count) : qsTr("Enviar a la papelera")
+            onTriggered: control.app.trash_selected()
         }
         MenuSeparator {}
         MenuItem {

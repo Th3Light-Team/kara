@@ -59,7 +59,8 @@ GridView {
         id: cell
 
         required property int index
-        readonly property bool current: grid.currentIndex === cell.index
+        readonly property bool selected: (grid.app.entry_selected[cell.index] ?? 0) !== 0
+        readonly property bool current: grid.app.focused_index === cell.index
         readonly property string entryName: grid.app.entry_names[cell.index] ?? ""
 
         width: grid.cellWidth
@@ -70,10 +71,12 @@ GridView {
             anchors.margins: 3
             radius: Theme.radius
             color: {
-                if (cell.current)
+                if (cell.selected)
                     return Theme.selection;
                 return mouse.containsMouse ? Theme.hover : "transparent";
             }
+            border.width: cell.current && !cell.selected ? 1 : 0
+            border.color: Theme.accent
         }
 
         Loader {
@@ -204,7 +207,6 @@ GridView {
             id: mouse
             app: grid.app
             index: cell.index
-            onPicked: grid.currentIndex = cell.index
         }
     }
 }
