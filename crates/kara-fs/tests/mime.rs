@@ -143,3 +143,93 @@ fn la_base_del_sistema_reconoce_lo_corriente() {
     assert_eq!(db.of("package-lock.json"), Some("application/json"));
     assert_eq!(db.of("modulo.rs"), Some("text/rust"));
 }
+
+// --- Descripciones de tipo ------------------------------------------------
+
+use kara_fs::mime::{MimeDescriptions, parse_comment};
+
+const XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<mime-type xmlns="http://www.freedesktop.org/standards/shared-mime-info" type="application/json">
+  <!--Created automatically by update-mime-database. DO NOT EDIT!-->
+  <comment>JSON document</comment>
+  <comment xml:lang="pt-BR">Documento JSON</comment>
+  <comment xml:lang="es">documento JSON</comment>
+  <glob pattern="*.json"/>
+</mime-type>
+"#;
+
+fn langs(list: &[&str]) -> Vec<String> {
+    list.iter().map(|l| (*l).to_string()).collect()
+}
+
+#[test]
+fn se_coge_la_traduccion_pedida() {
+    assert_eq!(
+        parse_comment(XML, &langs(&["es"])),
+        Some("documento JSON".to_string())
+    );
+}
+
+#[test]
+fn manda_el_orden_de_preferencia() {
+    assert_eq!(
+        parse_comment(XML, &langs(&["pt-BR", "es"])),
+        Some("Documento JSON".to_string())
+    );
+}
+
+#[test]
+fn sin_traduccion_utilizable_queda_el_original() {
+    assert_eq!(
+        parse_comment(XML, &langs(&["fi", "eu"])),
+        Some("JSON document".to_string())
+    );
+    assert_eq!(parse_comment(XML, &[]), Some("JSON document".to_string()));
+}
+
+#[test]
+fn las_entidades_se_deshacen() {
+    let xml = "<comment>Copia &amp; pega &lt;etiqueta&gt;</comment>";
+    assert_eq!(
+        parse_comment(xml, &[]),
+        Some("Copia & pega <etiqueta>".to_string())
+    );
+}
+
+#[test]
+fn un_ampersand_escapado_no_se_deshace_dos_veces() {
+    // `&amp;lt;` es el texto literal «&lt;», no el caracter «<».
+    let xml = "<comment>&amp;lt;</comment>";
+    assert_eq!(parse_comment(xml, &[]), Some("&lt;".to_string()));
+}
+
+#[test]
+fn un_xml_sin_comentarios_no_describe_nada() {
+    assert_eq!(parse_comment("<mime-type type=\"a/b\"/>", &[]), None);
+}
+
+#[test]
+fn una_etiqueta_a_medias_no_cuelga_el_rascado() {
+    assert_eq!(parse_comment("<comment>sin cerrar", &[]), None);
+    assert_eq!(parse_comment("<comment", &[]), None);
+}
+
+#[test]
+fn un_tipo_con_recorrido_de_rutas_no_se_consulta() {
+    // El tipo compone la ruta del XML; uno con `..` saldria de la base de datos.
+    let mut descriptions = MimeDescriptions::new(langs(&["es"]));
+    assert_eq!(descriptions.of("../../etc/passwd"), None);
+    assert_eq!(descriptions.of("a/../../b"), None);
+    assert_eq!(descriptions.of("sin-barra"), None);
+}
+
+#[test]
+fn el_sistema_describe_los_tipos_corrientes() {
+    let mut descriptions = MimeDescriptions::new(langs(&["es"]));
+    let Some(json) = descriptions.of("application/json") else {
+        // Sin `shared-mime-info` instalada no hay nada que comprobar.
+        return;
+    };
+    assert!(json.to_lowercase().contains("json"), "descripcion: {json}");
+    assert!(descriptions.of("inode/directory").is_some());
+}

@@ -130,10 +130,20 @@ liberar bloquea el árbol hasta que caduque el TTL.
 - El estado se recuerda: vista, orden, columnas y zoom persisten **por carpeta**;
   Atrás restaura scroll y selección.
 
+**Language: English, from here on.**
+- All new source code — identifiers, comments and doc comments — and all new
+  documentation (this file, READMEs, commit messages) are written in English.
+- **Do not translate or rewrite what already exists.** A large part of the tree
+  was written in Spanish; it stays as it is. Touch a Spanish comment only when
+  the code under it changes anyway, and even then don't turn a working file into
+  a translation diff.
+- `ground/spec/` is frozen reference material and stays in Spanish.
+- User-facing strings in the UI are a separate matter from this rule: they are
+  Spanish today because there is no i18n yet.
+
 **Trabajo.**
 - Construye en el orden de `08-prioridades.md`. No empieces un `should` con `must`
   pendientes.
-- Documentación y spec en español; código, identificadores y comentarios en inglés.
 - El listado de un directorio nunca bloquea la UI, ni con 100 k entradas ni con un
   volumen de red colgado.
 
@@ -158,11 +168,15 @@ tipo con `/usr/share/mime/globs2` —la misma base que Dolphin y Nautilus— y
 tallas, `Fixed`/`Scalable`/`Threshold`). Lo que el usuario tenga puesto es lo que
 sale, incluidas las carpetas especiales del panel.
 
+La columna «Tipo» dice lo que dice el sistema («Documento JSON»), traducido por
+la propia base de FreeDesktop. El idioma está fijado a español porque el resto
+de la ventana lo está: cuando la UI tenga traducciones, esa constante pasa a ser
+la cadena de idiomas del entorno.
+
 **Lo que falta de la vista:** miniaturas, los cuatro modos de vista con zoom,
 ordenar pulsando en la cabecera, selección múltiple, anclar carpetas al panel
-(necesita dónde guardar ajustes), la columna «Tipo» con la descripción real del
-MIME en vez de «Archivo», y enchufar a la UI lo que el backend ya ofrece y nadie
-consume todavía (vigilancia, cola, deshacer).
+(necesita dónde guardar ajustes), y enchufar a la UI lo que el backend ya ofrece
+y nadie consume todavía (vigilancia, cola, deshacer).
 
 ### Cabos sueltos conocidos
 

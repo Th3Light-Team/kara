@@ -18,6 +18,7 @@
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Un patrón de la base con su tipo.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,4 +232,149 @@ pub fn glob_matches(pattern: &str, name: &str) -> bool {
     }
 
     pattern[p..].iter().all(|c| *c == '*')
+}
+
+/// La descripción legible de un tipo, de la base de FreeDesktop.
+///
+/// Cada tipo tiene su `/usr/share/mime/<medio>/<subtipo>.xml` con un `<comment>`
+/// y sus traducciones. Es lo que hace que la columna «Tipo» diga «documento
+/// JSON» y no «Archivo», y sale traducido sin que Kara traduzca nada.
+///
+/// Se recuerda lo ya leído: una carpeta con miles de ficheros tiene un puñado de
+/// tipos, y abrir un XML por entrada sería absurdo.
+#[derive(Debug, Clone)]
+pub struct MimeDescriptions {
+    languages: Vec<String>,
+    cache: HashMap<String, Option<String>>,
+}
+
+impl MimeDescriptions {
+    /// `languages` va en orden de preferencia y en la forma de `xml:lang`
+    /// (`es`, `pt-BR`), no en la del `locale` (`pt_BR`).
+    #[must_use]
+    pub fn new(languages: Vec<String>) -> Self {
+        Self {
+            languages,
+            cache: HashMap::new(),
+        }
+    }
+
+    /// La descripción de un tipo, o `None` si el sistema no lo describe.
+    pub fn of(&mut self, mime: &str) -> Option<&str> {
+        if !self.cache.contains_key(mime) {
+            let found = read_comment(mime, &self.languages);
+            self.cache.insert(mime.to_string(), found);
+        }
+        self.cache.get(mime).and_then(Option::as_deref)
+    }
+}
+
+/// Un tipo MIME solo puede llevar estos caracteres.
+///
+/// La ruta del XML se compone con el tipo, así que se comprueba antes de
+/// tocarla: un tipo con `..` construiría una ruta fuera de la base de datos.
+fn is_safe_mime(mime: &str) -> bool {
+    let Some((media, subtype)) = mime.split_once('/') else {
+        return false;
+    };
+    let ok = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+' | b'_'))
+    };
+    ok(media) && ok(subtype)
+}
+
+fn read_comment(mime: &str, languages: &[String]) -> Option<String> {
+    if !is_safe_mime(mime) {
+        return None;
+    }
+
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let data = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home.join(".local/share"));
+        bases.push(data.join("mime"));
+    }
+    let dirs =
+        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string());
+    bases.extend(
+        dirs.split(':')
+            .filter(|d| !d.is_empty())
+            .map(|d| PathBuf::from(d).join("mime")),
+    );
+
+    bases
+        .iter()
+        .map(|base| base.join(format!("{mime}.xml")))
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .and_then(|xml| parse_comment(&xml, languages))
+}
+
+/// Saca el `<comment>` de un XML de tipo, en el primer idioma disponible.
+///
+/// Se rasca el texto en vez de montar un analizador de XML: el fichero lo genera
+/// `update-mime-database` con una forma fija, y lo único que interesa es una
+/// etiqueta. Sin traducción utilizable queda el comentario sin idioma, que es el
+/// inglés original.
+#[must_use]
+pub fn parse_comment(xml: &str, languages: &[String]) -> Option<String> {
+    let mut untranslated: Option<String> = None;
+    let mut translations: HashMap<String, String> = HashMap::new();
+
+    let mut rest = xml;
+    while let Some(start) = rest.find("<comment") {
+        rest = &rest[start + "<comment".len()..];
+        let Some(attributes_end) = rest.find('>') else {
+            break;
+        };
+        let attributes = &rest[..attributes_end];
+        rest = &rest[attributes_end + 1..];
+
+        let Some(close) = rest.find("</comment>") else {
+            break;
+        };
+        let text = unescape_xml(&rest[..close]);
+        rest = &rest[close + "</comment>".len()..];
+
+        match attribute(attributes, "xml:lang") {
+            Some(lang) => {
+                translations.insert(lang.to_string(), text);
+            }
+            None => {
+                if untranslated.is_none() {
+                    untranslated = Some(text);
+                }
+            }
+        }
+    }
+
+    languages
+        .iter()
+        .find_map(|lang| translations.get(lang).cloned())
+        .or(untranslated)
+}
+
+/// El valor de un atributo entrecomillado con comillas dobles.
+fn attribute<'a>(attributes: &'a str, name: &str) -> Option<&'a str> {
+    let start = attributes.find(&format!("{name}=\""))? + name.len() + 2;
+    let rest = &attributes[start..];
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+/// Deshace las cinco entidades que XML define. La base no usa más.
+fn unescape_xml(text: &str) -> String {
+    if !text.contains('&') {
+        return text.to_string();
+    }
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        // La del ampersand va la última: al revés, `&amp;lt;` acabaría en `<`.
+        .replace("&amp;", "&")
 }

@@ -400,6 +400,14 @@ impl Icons {
         }
     }
 
+    /// El tipo MIME de un nombre, según la base que este resolutor ya tiene
+    /// cargada. Se ofrece aquí para que quien pinta la columna «Tipo» no tenga
+    /// que cargar una segunda copia de la base entera.
+    #[must_use]
+    pub fn mime_of(&self, name: &str) -> Option<&str> {
+        self.mime.of(name)
+    }
+
     /// El icono de una entrada de listado.
     pub fn of(&mut self, name: &str, kind: EntryKind) -> Option<PathBuf> {
         for candidate in self.names_for(name, kind) {

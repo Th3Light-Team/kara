@@ -24,6 +24,7 @@ use kara_core::history::History;
 use kara_core::sort::SortSpec;
 use kara_core::tree::{Branch, Expandable, RowKind, Section, SectionId, Tree};
 use kara_fs::icons::Icons;
+use kara_fs::mime::MimeDescriptions;
 use kara_fs::list_directory;
 use kara_fs::places::PlaceKind;
 use std::collections::HashMap;
@@ -171,6 +172,8 @@ pub struct AppRust {
     tree: Tree,
     /// Resuelve el icono de cada entrada y recuerda lo ya buscado.
     icons: Icons,
+    /// Descripciones de los tipos, para la columna «Tipo».
+    descriptions: MimeDescriptions,
     /// Qué ubicación es cada raíz del panel, para darle su icono propio: la
     /// carpeta de descargas no se enseña con la carpeta genérica.
     place_kinds: HashMap<PathBuf, PlaceKind>,
@@ -218,6 +221,7 @@ impl Default for AppRust {
             // modernos son SVG, así que la talla solo decide de qué carpeta del
             // tema sale el fichero, no la nitidez.
             icons: Icons::load(ICON_SIZE),
+            descriptions: MimeDescriptions::new(TYPE_LANGUAGES.iter().map(|l| (*l).to_string()).collect()),
             place_kinds: place_kinds(home.as_deref()),
         };
 
@@ -257,6 +261,14 @@ const DEFAULT_CRUMB_CAPACITY: usize = 6;
 
 /// Talla de icono que se pide al tema.
 const ICON_SIZE: u32 = 16;
+
+/// En qué idioma se piden las descripciones de tipo.
+///
+/// Se fija en español en vez de mirar el `locale` porque el resto de la ventana
+/// está en español a pelo: con un `locale` inglés saldría «JSON document» junto
+/// a «Carpeta de archivos», que se lee peor que traducirlo todo. Cuando la UI
+/// tenga traducciones, esto pasa a ser la cadena de idiomas del entorno.
+const TYPE_LANGUAGES: [&str; 1] = ["es"];
 
 /// La vista entera de una carpeta, ya formateada.
 struct Snapshot {
@@ -299,7 +311,7 @@ impl AppRust {
             .collect();
         let kinds = entries
             .iter()
-            .map(|e| QString::from(present::kind_label(e)))
+            .map(|e| QString::from(&self.type_label(e)))
             .collect();
         let icons = entries
             .iter()
@@ -448,6 +460,25 @@ impl AppRust {
             expandable: ints(expandable),
             expanded: ints(expanded),
         }
+    }
+
+    /// Cómo se lee el tipo de una entrada en la columna «Tipo».
+    ///
+    /// La descripción sale de la base de FreeDesktop, que ya viene traducida:
+    /// un `.json` se lee «documento JSON» sin que Kara traduzca nada. Lo que la
+    /// base no describa cae a la extensión, como hace el Explorador.
+    fn type_label(&mut self, entry: &kara_core::FileEntry) -> String {
+        if let Some(intrinsic) = present::intrinsic_type_label(entry) {
+            return intrinsic.to_string();
+        }
+
+        let described = self
+            .icons
+            .mime_of(&entry.display)
+            .and_then(|mime| self.descriptions.of(mime))
+            .map(present::capitalize_type);
+
+        described.unwrap_or_else(|| present::fallback_type_label(&entry.display))
     }
 
     /// Lee las subcarpetas de una rama y se las entrega al árbol.

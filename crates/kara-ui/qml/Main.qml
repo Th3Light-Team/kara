@@ -325,7 +325,7 @@ Window {
                         }
                         Text {
                             text: qsTr("Tipo")
-                            Layout.preferredWidth: 140
+                            Layout.preferredWidth: 210
                             color: Theme.headerText
                             font.family: Theme.family
                             font.pixelSize: Theme.sizeSmall
@@ -427,7 +427,7 @@ Window {
                             }
                             Text {
                                 text: app.entry_kinds[row.index] ?? ""
-                                Layout.preferredWidth: 140
+                                Layout.preferredWidth: 210
                                 color: Theme.textDim
                                 font.family: Theme.family
                                 font.pixelSize: Theme.sizeBase

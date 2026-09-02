@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use kara_core::FileEntry;
 use kara_core::breadcrumb::{Segment, SegmentKind};
 use kara_core::entry::EntryKind;
+use kara_core::filter::base_and_extension;
 use kara_core::tree::SectionId;
 use kara_fs::places::{Place, PlaceKind};
 
@@ -40,12 +41,55 @@ pub fn size_label(entry: &FileEntry) -> String {
     entry.size.map(format_size).unwrap_or_default()
 }
 
-/// Etiqueta de tipo. Provisional: la spec pide el tipo real por MIME.
+/// Pone en mayúscula la inicial de una descripción del sistema.
+///
+/// Hace falta porque la columna mezcla dos orígenes: «Carpeta de archivos» sale
+/// de aquí y «documento JSON» de la traducción de FreeDesktop, que va en
+/// minúscula. Verlas juntas parece un error.
+///
+/// No se toca lo que ya empieza por mayúscula ni los nombres cuya segunda letra
+/// lo es: «eDonkey» y «iPod» se escriben así a propósito y volverlos «EDonkey»
+/// sería peor que la inconsistencia que se quiere arreglar.
 #[must_use]
-pub fn kind_label(entry: &FileEntry) -> &'static str {
+pub fn capitalize_type(description: &str) -> String {
+    let mut chars = description.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    if !first.is_lowercase() || chars.next().is_some_and(char::is_uppercase) {
+        return description.to_string();
+    }
+    first.to_uppercase().collect::<String>() + &description[first.len_utf8()..]
+}
+
+/// Etiqueta de tipo cuando el sistema no describe el fichero.
+///
+/// Es lo que hace Windows con lo que no conoce: «Archivo JSON», con la
+/// extensión en mayúsculas. Sin extensión no queda nada que decir salvo que es
+/// un archivo.
+#[must_use]
+pub fn fallback_type_label(name: &str) -> String {
+    match base_and_extension(name) {
+        Some((_, extension)) => format!("Archivo {}", extension.to_uppercase()),
+        None => "Archivo".to_string(),
+    }
+}
+
+/// Etiqueta de tipo de una entrada que no necesita consultar la base de MIME.
+///
+/// Devuelve `None` para los ficheros corrientes, que sí la necesitan.
+#[must_use]
+pub fn intrinsic_type_label(entry: &FileEntry) -> Option<&'static str> {
+    // Un enlace roto no tiene tipo: el destino no existe, así que preguntarle a
+    // la base por su extensión describiría algo que no está.
+    if entry.symlink_broken {
+        return Some("Enlace roto");
+    }
     match entry.kind {
-        EntryKind::Directory => "Carpeta",
-        EntryKind::File => "Archivo",
+        // Como el Explorador. «Carpeta» a secas se confunde con la columna
+        // Nombre cuando la carpeta se llama, precisamente, «Carpeta».
+        EntryKind::Directory => Some("Carpeta de archivos"),
+        EntryKind::File => None,
     }
 }
 
@@ -354,6 +398,40 @@ mod tests {
     #[test]
     fn el_texto_vacio_no_es_ninguna_ruta() {
         assert_eq!(expand_path("   ", Some(&home()), Path::new("/tmp")), None);
+    }
+
+    #[test]
+    fn la_descripcion_del_sistema_arranca_en_mayuscula() {
+        assert_eq!(capitalize_type("documento JSON"), "Documento JSON");
+        assert_eq!(capitalize_type("Documento PDF"), "Documento PDF");
+    }
+
+    #[test]
+    fn un_nombre_que_empieza_en_minuscula_a_proposito_se_respeta() {
+        assert_eq!(capitalize_type("eDonkey link"), "eDonkey link");
+        assert_eq!(capitalize_type("iPod"), "iPod");
+    }
+
+    #[test]
+    fn una_descripcion_vacia_no_rompe_nada() {
+        assert_eq!(capitalize_type(""), "");
+    }
+
+    #[test]
+    fn una_inicial_acentuada_tambien_sube() {
+        assert_eq!(capitalize_type("índice de archivos"), "Índice de archivos");
+    }
+
+    #[test]
+    fn sin_tipo_conocido_la_extension_hace_de_etiqueta() {
+        assert_eq!(fallback_type_label("apuntes.qwerty"), "Archivo QWERTY");
+    }
+
+    #[test]
+    fn sin_extension_no_se_inventa_una_etiqueta() {
+        assert_eq!(fallback_type_label("LEEME"), "Archivo");
+        // Un fichero oculto no tiene extensión: `.bashrc` se llama así entero.
+        assert_eq!(fallback_type_label(".bashrc"), "Archivo");
     }
 
     #[test]

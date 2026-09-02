@@ -21,6 +21,8 @@ pub mod places;
 
 pub use listing::{EntryError, Listing, describe, list_directory, read_hidden_file};
 
+pub use mime::{MimeDatabase, MimeDescriptions};
+
 pub use places::{Place, PlaceKind, quick_access, this_computer};
 
 pub mod transfer;
