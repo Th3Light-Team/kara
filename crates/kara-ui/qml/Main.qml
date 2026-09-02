@@ -107,6 +107,31 @@ Window {
         onActivated: app.reset_zoom()
     }
 
+    Shortcut {
+        sequence: "Ctrl+Z"
+        onActivated: app.undo()
+    }
+    Shortcut {
+        sequences: ["Ctrl+Y", "Ctrl+Shift+Z"]
+        onActivated: app.redo()
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+N"
+        onActivated: app.create_folder(qsTr("Nueva carpeta"))
+    }
+    Shortcut {
+        sequence: "F2"
+        onActivated: {
+            // El editor en línea vive en la vista de detalles; en las rejillas
+            // todavía no hay dónde escribir. El molde falla y da null cuando lo
+            // cargado es la rejilla, que es justo la comprobación que hace
+            // falta.
+            const detalles = fileView.item as FileDetails;
+            if (detalles)
+                detalles.startRename();
+        }
+    }
+
     // Ancho del panel de navegación. La spec lo quiere persistente entre
     // sesiones; hoy no hay dónde guardarlo, así que vuelve a su sitio al
     // arrancar.
@@ -212,6 +237,19 @@ Window {
                     glyph: "↻"
                     tip: qsTr("Actualizar (F5)")
                     onClicked: app.reload()
+                }
+                NavButton {
+                    glyph: "↶"
+                    // La spec pide decir *qué* se deshace, no solo ofrecerlo.
+                    tip: app.can_undo ? qsTr("Deshacer %1 (Ctrl+Z)").arg(app.undo_label) : qsTr("Nada que deshacer")
+                    enabled: app.can_undo
+                    onClicked: app.undo()
+                }
+                NavButton {
+                    glyph: "↷"
+                    tip: app.can_redo ? qsTr("Rehacer %1 (Ctrl+Y)").arg(app.redo_label) : qsTr("Nada que rehacer")
+                    enabled: app.can_redo
+                    onClicked: app.redo()
                 }
 
                 // Conmutador de modo de vista. Windows lo esconde en un menú
@@ -414,6 +452,52 @@ Window {
                             app.zoom_in();
                         else if (event.angleDelta.y < 0)
                             app.zoom_out();
+                    }
+                }
+
+                // Aviso de lo último que salió mal. Va por encima de la vista y
+                // solo aparece cuando hay algo que contar: una operación que
+                // falla sin decirlo es indistinguible de un clic que no llegó.
+                Rectangle {
+                    id: errorBanner
+                    anchors.top: parent.top
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    height: visible ? 34 : 0
+                    visible: app.last_error !== ""
+                    color: Theme.danger
+                    z: 10
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 14
+                        anchors.rightMargin: 6
+                        spacing: 8
+
+                        Text {
+                            text: app.last_error
+                            Layout.fillWidth: true
+                            elide: Text.ElideRight
+                            color: Theme.dangerText
+                            font.family: Theme.family
+                            font.pixelSize: Theme.sizeBase
+                        }
+                        Item {
+                            implicitWidth: 26
+                            implicitHeight: 26
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "✕"
+                                color: Theme.dangerText
+                                font.pixelSize: Theme.sizeSmall
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: app.clear_error()
+                            }
+                        }
                     }
                 }
 

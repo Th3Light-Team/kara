@@ -13,6 +13,7 @@
 //! las migas acaban discrepando.
 
 use core::pin::Pin;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use cxx_qt::{CxxQtType, Threading};
@@ -28,6 +29,8 @@ use kara_fs::icons::Icons;
 use kara_fs::mime::MimeDescriptions;
 use kara_fs::list_directory;
 use kara_fs::places::PlaceKind;
+use kara_fs::trash::ConflictPolicy;
+use kara_ops::{Action, UndoStack};
 use kara_fs::thumbnails::{ThumbnailSize, Thumbnails};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -93,6 +96,15 @@ pub mod qobject {
         /// Fila de la carpeta que se está viendo, o -1 si no sale en el panel.
         #[qproperty(i32, nav_current)]
         #[qproperty(bool, sidebar_visible)]
+        /// Si hay algo que deshacer o rehacer, y **qué**: la spec pide decir
+        /// «Deshacer mover», no solo ofrecer deshacer.
+        #[qproperty(bool, can_undo)]
+        #[qproperty(bool, can_redo)]
+        #[qproperty(QString, undo_label)]
+        #[qproperty(QString, redo_label)]
+        /// Lo último que salió mal, para enseñarlo. Vacía si no hay nada
+        /// pendiente de contar: ninguna operación puede fallar en silencio.
+        #[qproperty(QString, last_error)]
         /// Modo de vista actual, como el ordinal de `kara_core::view::ViewMode`:
         /// 0 detalles, 1 lista, 2 mosaico, 3 iconos.
         #[qproperty(i32, view_mode)]
@@ -159,6 +171,36 @@ pub mod qobject {
         /// Enseña u oculta el panel de navegación (F9).
         #[qinvokable]
         fn toggle_sidebar(self: Pin<&mut App>);
+
+        /// Deshace la última operación reversible.
+        #[qinvokable]
+        fn undo(self: Pin<&mut App>);
+
+        /// Rehace la última que se deshizo.
+        #[qinvokable]
+        fn redo(self: Pin<&mut App>);
+
+        /// Crea una carpeta en la actual. Devuelve el nombre con el que quedó,
+        /// que puede no ser el pedido si ya existía uno igual.
+        #[qinvokable]
+        fn create_folder(self: Pin<&mut App>, name: &QString) -> QString;
+
+        /// Cuántos caracteres del nombre son el nombre base, sin la extensión.
+        ///
+        /// Lo necesita el editor de renombrado: la spec pide que al abrirlo
+        /// quede seleccionado solo el nombre base, para no borrar la extensión
+        /// sin querer. Se resuelve aquí y no en QML porque `kara_core` ya sabe
+        /// que `.tar.gz` es una sola extensión y QML no.
+        #[qinvokable]
+        fn base_name_length(self: Pin<&mut App>, name: &QString) -> i32;
+
+        /// Renombra una entrada de la carpeta actual.
+        #[qinvokable]
+        fn rename_entry(self: Pin<&mut App>, from: &QString, to: &QString);
+
+        /// Descarta el aviso de error que se esté enseñando.
+        #[qinvokable]
+        fn clear_error(self: Pin<&mut App>);
 
         /// Ordena por una columna de la vista de detalles. Un segundo clic en
         /// la misma invierte el sentido.
@@ -228,6 +270,11 @@ pub struct AppRust {
     nav_count: i32,
     nav_current: i32,
     sidebar_visible: bool,
+    can_undo: bool,
+    can_redo: bool,
+    undo_label: QString,
+    redo_label: QString,
+    last_error: QString,
     view_mode: i32,
     icon_size: i32,
     can_zoom_out: bool,
@@ -242,6 +289,9 @@ pub struct AppRust {
     icons: Icons,
     /// Descripciones de los tipos, para la columna «Tipo».
     descriptions: MimeDescriptions,
+    /// Pila de deshacer/rehacer. Toda operación destructiva pasa por aquí:
+    /// es la red de seguridad que la spec pone por encima de todo lo demás.
+    undo: UndoStack,
     /// Criterio de ordenación de las carpetas que no han elegido otro.
     sort_defaults: SortSpec,
     /// Modo y zoom de cada carpeta. Se pierde al cerrar: la spec lo quiere en
@@ -301,6 +351,11 @@ impl Default for AppRust {
             nav_count: 0,
             nav_current: -1,
             sidebar_visible: true,
+            can_undo: false,
+            can_redo: false,
+            undo_label: QString::default(),
+            redo_label: QString::default(),
+            last_error: QString::default(),
             view_mode: mode_ordinal(ViewSettings::default().mode),
             icon_size: clamp_count(ViewSettings::default().icon_size as usize),
             can_zoom_out: false,
@@ -314,6 +369,7 @@ impl Default for AppRust {
             // tema sale el fichero, no la nitidez.
             icons: Icons::load(ICON_SIZE),
             descriptions: MimeDescriptions::new(TYPE_LANGUAGES.iter().map(|l| (*l).to_string()).collect()),
+            undo: UndoStack::new(),
             sort_defaults: SortSpec::default(),
             views: ViewMemory::default(),
             thumbnail_jobs: Vec::new(),
@@ -945,6 +1001,128 @@ impl qobject::App {
         self.as_mut().set_entry_thumbs(list);
     }
 
+    /// Refleja el estado de la pila de deshacer, con la etiqueta de qué se
+    /// deshace: la spec pide decir «Deshacer mover», no solo ofrecer deshacer.
+    fn publish_undo(mut self: Pin<&mut Self>) {
+        let (can_undo, can_redo, undo_label, redo_label) = {
+            let stack = &self.rust().undo;
+            (
+                stack.can_undo(),
+                stack.can_redo(),
+                stack.undo_label().unwrap_or_default().to_string(),
+                stack.redo_label().unwrap_or_default().to_string(),
+            )
+        };
+        self.as_mut().set_can_undo(can_undo);
+        self.as_mut().set_can_redo(can_redo);
+        self.as_mut().set_undo_label(QString::from(&undo_label));
+        self.as_mut().set_redo_label(QString::from(&redo_label));
+    }
+
+    /// Deja constancia de un fallo para que la vista lo enseñe.
+    ///
+    /// Ninguna operación puede fallar en silencio: es una regla del proyecto, y
+    /// una carpeta que no se crea sin decir por qué es indistinguible de un
+    /// clic que no llegó.
+    fn report(mut self: Pin<&mut Self>, message: &str) {
+        self.as_mut().set_last_error(QString::from(&message.to_string()));
+    }
+
+    fn clear_error(mut self: Pin<&mut Self>) {
+        self.as_mut().set_last_error(QString::default());
+    }
+
+    /// Apunta una operación ya hecha y refresca la vista.
+    fn record(mut self: Pin<&mut Self>, action: Action) {
+        self.as_mut().rust_mut().get_mut().undo.push(action);
+        self.as_mut().publish_undo();
+        let current = PathBuf::from(self.path().to_string());
+        self.as_mut().render(&current);
+    }
+
+    fn undo(mut self: Pin<&mut Self>) {
+        // Un deshacer que falla no pierde el registro: `UndoStack` devuelve la
+        // acción a la pila, así que aquí basta con contarlo y no refrescar.
+        if let Err(error) = self.as_mut().rust_mut().get_mut().undo.undo() {
+            self.as_mut().report(&format!("No se pudo deshacer: {error}"));
+            return;
+        }
+        self.as_mut().clear_error();
+        self.as_mut().publish_undo();
+        let current = PathBuf::from(self.path().to_string());
+        self.as_mut().render(&current);
+    }
+
+    fn redo(mut self: Pin<&mut Self>) {
+        if let Err(error) = self.as_mut().rust_mut().get_mut().undo.redo() {
+            self.as_mut().report(&format!("No se pudo rehacer: {error}"));
+            return;
+        }
+        self.as_mut().clear_error();
+        self.as_mut().publish_undo();
+        let current = PathBuf::from(self.path().to_string());
+        self.as_mut().render(&current);
+    }
+
+    fn create_folder(mut self: Pin<&mut Self>, name: &QString) -> QString {
+        let parent = PathBuf::from(self.path().to_string());
+        let name = name.to_string();
+
+        // `KeepBoth`: crear «Nueva carpeta» cuando ya hay una da «Nueva carpeta
+        // (2)», como el Explorador. Fallar obligaría al usuario a inventar un
+        // nombre antes de tener la carpeta delante.
+        match kara_fs::create_directory(&parent, OsStr::new(&name), ConflictPolicy::KeepBoth) {
+            Ok(path) => {
+                let created = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.as_mut().clear_error();
+                self.as_mut().record(Action::DirectoryCreated { path });
+                QString::from(&created)
+            }
+            Err(error) => {
+                self.as_mut()
+                    .report(&format!("No se pudo crear la carpeta: {error}"));
+                QString::default()
+            }
+        }
+    }
+
+    fn base_name_length(self: Pin<&mut Self>, name: &QString) -> i32 {
+        let name = name.to_string();
+        let (base, _) = kara_core::naming::split_name(&name);
+        // QML cuenta en unidades UTF-16, que es como Qt indexa el texto.
+        clamp_count(base.encode_utf16().count())
+    }
+
+    fn rename_entry(mut self: Pin<&mut Self>, from: &QString, to: &QString) {
+        let parent = PathBuf::from(self.path().to_string());
+        let source = parent.join(from.to_string());
+        let target = to.to_string();
+
+        if target.is_empty() || target == from.to_string() {
+            return;
+        }
+
+        // `Fail`: renombrar encima de otro fichero lo perdería. Cuando haya
+        // diálogo de conflictos, aquí se ofrecerán las opciones que pide la
+        // spec; hasta entonces se avisa y no se toca nada.
+        match kara_fs::rename(&source, OsStr::new(&target), ConflictPolicy::Fail) {
+            Ok(destination) => {
+                self.as_mut().clear_error();
+                self.as_mut().record(Action::Renamed {
+                    from: source,
+                    to: destination,
+                });
+            }
+            Err(error) => {
+                self.as_mut()
+                    .report(&format!("No se pudo renombrar: {error}"));
+            }
+        }
+    }
+
     /// Refleja en las propiedades por qué columna se está ordenando.
     ///
     /// `column_for_sort_key` devuelve `None` para «sin ordenar», que no es
@@ -1171,9 +1349,18 @@ impl qobject::App {
     fn trash(mut self: Pin<&mut Self>, name: &QString) {
         let current = PathBuf::from(self.path().to_string());
         let victim = current.join(name.to_string());
-        if kara_fs::trash::trash_one(&victim, &kara_ops::trash_policy()).is_ok() {
-            self.as_mut().rust_mut().get_mut().tree.forget(&current);
-            self.as_mut().render(&current);
+        match kara_fs::trash::trash_one(&victim, &kara_ops::trash_policy()) {
+            Ok(item) => {
+                self.as_mut().rust_mut().get_mut().tree.forget(&current);
+                self.as_mut().clear_error();
+                self.as_mut().record(Action::Trashed {
+                    item: Box::new(item),
+                });
+            }
+            Err(error) => {
+                self.as_mut()
+                    .report(&format!("No se pudo enviar a la papelera: {error}"));
+            }
         }
     }
 }

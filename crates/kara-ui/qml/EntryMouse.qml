@@ -16,6 +16,8 @@ MouseArea {
 
     /// La vista marca esta entrada como la que tiene el foco.
     signal picked
+    /// La vista abre el editor de nombre sobre esta entrada.
+    signal renameRequested
 
     anchors.fill: parent
     hoverEnabled: true
@@ -38,8 +40,17 @@ MouseArea {
     Menu {
         id: entryMenu
         MenuItem {
+            text: qsTr("Renombrar")
+            onTriggered: control.renameRequested()
+        }
+        MenuItem {
             text: qsTr("Enviar a la papelera")
             onTriggered: control.app.trash(control.app.entry_names[control.index])
+        }
+        MenuSeparator {}
+        MenuItem {
+            text: qsTr("Nueva carpeta")
+            onTriggered: control.app.create_folder(qsTr("Nueva carpeta"))
         }
     }
 }

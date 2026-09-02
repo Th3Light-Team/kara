@@ -16,6 +16,15 @@ Item {
 
     // Anchos compartidos por la cabecera y las filas. Si se separan, las
     // columnas dejan de alinearse en cuanto se toca una.
+    /// Fila cuyo nombre se está editando, o -1 si ninguna.
+    property int renamingIndex: -1
+
+    /// Abre el editor sobre la fila que tenga el foco.
+    function startRename() {
+        if (rows.currentIndex >= 0)
+            view.renamingIndex = rows.currentIndex;
+    }
+
     readonly property int dateWidth: 150
     readonly property int typeWidth: 180
     readonly property int sizeWidth: 100
@@ -136,16 +145,74 @@ Item {
                     Layout.preferredWidth: view.app.icon_size
                     Layout.preferredHeight: view.app.icon_size
                 }
-                Text {
-                    text: view.app.entry_names[row.index] ?? ""
+                Item {
                     Layout.fillWidth: true
                     Layout.leftMargin: 6
                     Layout.preferredWidth: view.nameMinimum
                     Layout.maximumWidth: view.nameMaximum
-                    elide: Text.ElideMiddle
-                    color: Theme.text
-                    font.family: Theme.family
-                    font.pixelSize: Theme.sizeBase
+                    Layout.fillHeight: true
+
+                    readonly property bool renaming: view.renamingIndex === row.index
+                    readonly property string entryName: view.app.entry_names[row.index] ?? ""
+
+                    Text {
+                        anchors.fill: parent
+                        visible: !parent.renaming
+                        verticalAlignment: Text.AlignVCenter
+                        text: parent.entryName
+                        elide: Text.ElideMiddle
+                        color: Theme.text
+                        font.family: Theme.family
+                        font.pixelSize: Theme.sizeBase
+                    }
+
+                    Loader {
+                        anchors.fill: parent
+                        anchors.topMargin: 2
+                        anchors.bottomMargin: 2
+                        // El editor se crea al empezar a renombrar y se
+                        // destruye al terminar: mantener un TextField por fila
+                        // en una carpeta de miles sería absurdo.
+                        active: parent.renaming
+                        sourceComponent: nameEditor
+                    }
+
+                    Component {
+                        id: nameEditor
+
+                        TextField {
+                            text: view.app.entry_names[row.index] ?? ""
+                            color: Theme.text
+                            font.family: Theme.family
+                            font.pixelSize: Theme.sizeBase
+                            selectByMouse: true
+                            padding: 2
+
+                            background: Rectangle {
+                                radius: Theme.radius
+                                color: Theme.field
+                                border.width: 1
+                                border.color: Theme.accent
+                            }
+
+                            Component.onCompleted: {
+                                forceActiveFocus();
+                                // Solo el nombre base queda seleccionado: la
+                                // spec pide dejar fuera la extensión para no
+                                // borrarla sin querer. Dónde acaba lo dice
+                                // `kara-core`, que sabe que `.tar.gz` es una.
+                                select(0, view.app.base_name_length(text));
+                            }
+
+                            onAccepted: {
+                                view.app.rename_entry(view.app.entry_names[row.index], text);
+                                view.renamingIndex = -1;
+                            }
+                            Keys.onEscapePressed: view.renamingIndex = -1
+                            onActiveFocusChanged: if (!activeFocus)
+                                view.renamingIndex = -1
+                        }
+                    }
                 }
                 Text {
                     text: view.app.entry_dates[row.index] ?? ""
@@ -185,6 +252,10 @@ Item {
                 app: view.app
                 index: row.index
                 onPicked: rows.currentIndex = row.index
+                onRenameRequested: {
+                    rows.currentIndex = row.index;
+                    view.renamingIndex = row.index;
+                }
             }
         }
     }

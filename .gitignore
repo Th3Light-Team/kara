@@ -14,3 +14,6 @@
 
 # El lock es estado de ejecución, no del proyecto
 .kara/lock/
+
+# Worktrees de los agentes: son repos aparte, no contenido del proyecto.
+.claude/worktrees/
