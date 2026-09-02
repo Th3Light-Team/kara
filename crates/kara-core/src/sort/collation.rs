@@ -198,6 +198,21 @@ impl PartialOrd for CollationKey {
     }
 }
 
+/// Pliega un texto para **comparar por igualdad**, no para ordenar.
+///
+/// Aplica el mismo plegado de caja que [`collation_key`] —incluidas la sigma
+/// final y el signo micro— pero devuelve una `String` normal en vez de una clave
+/// de orden. Es lo que necesitan el filtro en vivo y el type-ahead: preguntan
+/// «¿empieza por?» o «¿contiene?», no «¿cuál va antes?».
+///
+/// **No pliega acentos**, por la misma razón que no lo hace la collation: al
+/// comparar nombres, `arbol` y `árbol` son distintos. Buscar sin acentos es otra
+/// relación y vive en la capa de búsqueda.
+#[must_use]
+pub fn fold_for_match(text: &str) -> String {
+    text.nfc().map(case_fold_char).collect()
+}
+
 /// Construye la clave de comparación de un nombre visible.
 ///
 /// Los nombres con bytes inválidos ya llegan como `U+FFFD` en `display`; la colisión
