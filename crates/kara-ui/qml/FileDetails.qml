@@ -1,12 +1,17 @@
 pragma ComponentBehavior: Bound
 
-// Vista de detalles: una fila por entrada, con columnas.
+// Vista de detalles: una fila por entrada, con columnas configurables.
 //
-// Referencia: `ground/spec/03-vistas.md`, «Modos de vista». Es el modo por
-// defecto porque es el que aguanta una carpeta con diez mil ficheros.
+// Referencia: `ground/spec/03-vistas.md`, «Modos de vista», «Columnas
+// configurables en Detalles», «Autoajustar ancho de columnas» y «Ordenar con
+// clic en cabecera de columna».
+//
+// Ni la cabecera ni las filas saben qué columnas hay: las dos recorren
+// `column_ids`, y el contenido sale de `entry_values`, que llega como una tabla
+// por filas. Cablear aquí «nombre, fecha, tipo, tamaño» sería justo lo que
+// «configurables» impide.
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Layouts
 import com.kara.ui
 
 Item {
@@ -14,8 +19,6 @@ Item {
 
     required property var app
 
-    // Anchos compartidos por la cabecera y las filas. Si se separan, las
-    // columnas dejan de alinearse en cuanto se toca una.
     /// Fila cuyo nombre se está editando, o -1 si ninguna.
     property int renamingIndex: -1
 
@@ -25,11 +28,14 @@ Item {
             view.renamingIndex = view.app.focused_index;
     }
 
-    readonly property int dateWidth: 150
-    readonly property int typeWidth: 180
-    readonly property int sizeWidth: 100
-    readonly property int nameMinimum: 320
-    readonly property int nameMaximum: 560
+    /// Los números se leen mejor alineados a la derecha; el resto, a la
+    /// izquierda. Es la única regla de presentación que depende de la columna.
+    function alignsRight(id) {
+        return id === "size" || id === "rating" || id === "duration";
+    }
+
+    readonly property int leftMargin: 14
+    readonly property int gap: 12
 
     Rectangle {
         id: columnHeader
@@ -39,54 +45,122 @@ Item {
         height: 30
         color: Theme.content
 
-        RowLayout {
+        Row {
             anchors.fill: parent
-            anchors.leftMargin: 14
-            anchors.rightMargin: 22
-            spacing: 12
+            anchors.leftMargin: view.leftMargin
+            spacing: view.gap
 
-            // Hueco del icono: la cabecera tiene que llevar el mismo que las
-            // filas o las columnas dejan de alinearse.
+            // Hueco del icono: las filas lo llevan delante del nombre y sin él
+            // las columnas dejan de alinearse.
             Item {
-                Layout.preferredWidth: view.app.icon_size
+                width: view.app.icon_size
+                height: 1
             }
-            ColumnHeader {
-                app: view.app
-                column: "name"
-                label: qsTr("Nombre")
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                Layout.preferredWidth: view.nameMinimum
-                Layout.maximumWidth: view.nameMaximum
-            }
-            ColumnHeader {
-                app: view.app
-                column: "modified"
-                label: qsTr("Fecha de modificación")
-                Layout.preferredWidth: view.dateWidth
-                Layout.fillHeight: true
-            }
-            ColumnHeader {
-                app: view.app
-                column: "kind"
-                label: qsTr("Tipo")
-                Layout.preferredWidth: view.typeWidth
-                Layout.fillHeight: true
-            }
-            ColumnHeader {
-                app: view.app
-                column: "size"
-                label: qsTr("Tamaño")
-                alignment: Text.AlignRight
-                Layout.preferredWidth: view.sizeWidth
-                Layout.fillHeight: true
-            }
-            // Lo que sobra a la derecha se deja en blanco: estirar las columnas
-            // hasta el borde en una pantalla ancha separa el nombre de su
-            // tamaño hasta hacerlos ilegibles juntos.
-            Item {
-                Layout.fillWidth: true
-                Layout.preferredWidth: 0
+
+            Repeater {
+                model: view.app.column_count
+
+                delegate: Item {
+                    id: head
+
+                    required property int index
+                    readonly property string columnId: view.app.column_ids[head.index] ?? ""
+
+                    width: view.app.column_widths[head.index] ?? 100
+                    height: columnHeader.height
+
+                    ColumnHeader {
+                        anchors.fill: parent
+                        app: view.app
+                        column: head.columnId
+                        label: view.app.column_labels[head.index] ?? ""
+                        alignment: view.alignsRight(head.columnId) ? Text.AlignRight : Text.AlignLeft
+                    }
+
+                    // Separador arrastrable. Es la forma que pide la spec de
+                    // cambiar el ancho, y va por encima de la cabecera para que
+                    // arrastrar no cuente además como un clic de ordenación.
+                    Item {
+                        width: 7
+                        height: parent.height
+                        anchors.right: parent.right
+                        anchors.rightMargin: -view.gap / 2
+
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: 1
+                            height: parent.height - 12
+                            color: grip.pressed ? Theme.accent : Theme.divider
+                        }
+
+                        MouseArea {
+                            id: grip
+                            anchors.fill: parent
+                            cursorShape: Qt.SplitHCursor
+                            property real grabbedAt: 0
+
+                            onPressed: mouse => {
+                                grip.grabbedAt = mouse.x;
+                            }
+                            onPositionChanged: mouse => {
+                                if (!grip.pressed)
+                                    return;
+                                const propuesto = head.width + mouse.x - grip.grabbedAt;
+                                // El mínimo lo impone `kara-core`; aquí solo se
+                                // evita mandar un ancho negativo.
+                                view.app.set_column_width(head.columnId, Math.max(0, propuesto));
+                            }
+                            onDoubleClicked: view.app.autofit_columns()
+                        }
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.RightButton
+                        onClicked: headerMenu.popup()
+                    }
+
+                    Menu {
+                        id: headerMenu
+
+                        MenuItem {
+                            text: qsTr("Mover a la izquierda")
+                            enabled: head.index > 0
+                            onTriggered: view.app.move_column(head.index, head.index - 1)
+                        }
+                        MenuItem {
+                            text: qsTr("Mover a la derecha")
+                            enabled: head.index + 1 < view.app.column_count
+                            onTriggered: view.app.move_column(head.index, head.index + 1)
+                        }
+                        MenuSeparator {}
+                        MenuItem {
+                            text: qsTr("Quitar esta columna")
+                            // La del nombre no se puede quitar: una tabla de
+                            // ficheros sin nombre no es nada.
+                            enabled: head.columnId !== "name"
+                            onTriggered: view.app.toggle_column(head.columnId)
+                        }
+                        Menu {
+                            title: qsTr("Añadir columna")
+                            enabled: view.app.addable_ids.length > 0
+
+                            Repeater {
+                                model: view.app.addable_ids
+                                delegate: MenuItem {
+                                    required property int index
+                                    text: view.app.addable_labels[index] ?? ""
+                                    onTriggered: view.app.toggle_column(view.app.addable_ids[index])
+                                }
+                            }
+                        }
+                        MenuSeparator {}
+                        MenuItem {
+                            text: qsTr("Ajustar todas las columnas")
+                            onTriggered: view.app.autofit_columns()
+                        }
+                    }
+                }
             }
         }
 
@@ -149,118 +223,95 @@ Item {
                 border.color: Theme.accent
             }
 
-            RowLayout {
+            Row {
                 anchors.fill: parent
-                anchors.leftMargin: 14
-                anchors.rightMargin: 22
-                spacing: 12
+                anchors.leftMargin: view.leftMargin
+                spacing: view.gap
 
                 EntryIcon {
                     app: view.app
                     index: row.index
                     side: view.app.icon_size
-                    Layout.preferredWidth: view.app.icon_size
-                    Layout.preferredHeight: view.app.icon_size
+                    anchors.verticalCenter: parent.verticalCenter
                 }
-                Item {
-                    Layout.fillWidth: true
-                    Layout.leftMargin: 6
-                    Layout.preferredWidth: view.nameMinimum
-                    Layout.maximumWidth: view.nameMaximum
-                    Layout.fillHeight: true
 
-                    readonly property bool renaming: view.renamingIndex === row.index
-                    readonly property string entryName: view.app.entry_names[row.index] ?? ""
+                Repeater {
+                    model: view.app.column_count
 
-                    Text {
-                        anchors.fill: parent
-                        visible: !parent.renaming
-                        verticalAlignment: Text.AlignVCenter
-                        text: parent.entryName
-                        elide: Text.ElideMiddle
-                        color: Theme.text
-                        font.family: Theme.family
-                        font.pixelSize: Theme.sizeBase
-                    }
+                    delegate: Item {
+                        id: cell
 
-                    Loader {
-                        anchors.fill: parent
-                        anchors.topMargin: 2
-                        anchors.bottomMargin: 2
-                        // El editor se crea al empezar a renombrar y se
-                        // destruye al terminar: mantener un TextField por fila
-                        // en una carpeta de miles sería absurdo.
-                        active: parent.renaming
-                        sourceComponent: nameEditor
-                    }
+                        required property int index
+                        readonly property string columnId: view.app.column_ids[cell.index] ?? ""
+                        readonly property bool isName: cell.columnId === "name"
+                        readonly property string text: view.app.entry_values[row.index * view.app.column_count + cell.index] ?? ""
 
-                    Component {
-                        id: nameEditor
+                        width: view.app.column_widths[cell.index] ?? 100
+                        height: row.height
 
-                        TextField {
-                            text: view.app.entry_names[row.index] ?? ""
-                            color: Theme.text
+                        Text {
+                            anchors.fill: parent
+                            visible: !(cell.isName && view.renamingIndex === row.index)
+                            verticalAlignment: Text.AlignVCenter
+                            horizontalAlignment: view.alignsRight(cell.columnId) ? Text.AlignRight : Text.AlignLeft
+                            text: cell.text
+                            // El nombre se recorta por el medio, donde menos
+                            // información se pierde; el resto por el final.
+                            elide: cell.isName ? Text.ElideMiddle : Text.ElideRight
+                            color: cell.isName ? Theme.text : Theme.textDim
                             font.family: Theme.family
                             font.pixelSize: Theme.sizeBase
-                            selectByMouse: true
-                            padding: 2
+                        }
 
-                            background: Rectangle {
-                                radius: Theme.radius
-                                color: Theme.field
-                                border.width: 1
-                                border.color: Theme.accent
-                            }
+                        Loader {
+                            anchors.fill: parent
+                            anchors.topMargin: 2
+                            anchors.bottomMargin: 2
+                            // El editor se crea al empezar a renombrar y se
+                            // destruye al terminar: mantener un TextField por
+                            // fila en una carpeta de miles sería absurdo.
+                            active: cell.isName && view.renamingIndex === row.index
+                            sourceComponent: nameEditor
+                        }
 
-                            Component.onCompleted: {
-                                forceActiveFocus();
-                                // Solo el nombre base queda seleccionado: la
-                                // spec pide dejar fuera la extensión para no
-                                // borrarla sin querer. Dónde acaba lo dice
-                                // `kara-core`, que sabe que `.tar.gz` es una.
-                                select(0, view.app.base_name_length(text));
-                            }
+                        Component {
+                            id: nameEditor
 
-                            onAccepted: {
-                                view.app.rename_entry(view.app.entry_names[row.index], text);
-                                view.renamingIndex = -1;
+                            TextField {
+                                text: cell.text
+                                color: Theme.text
+                                font.family: Theme.family
+                                font.pixelSize: Theme.sizeBase
+                                selectByMouse: true
+                                padding: 2
+
+                                background: Rectangle {
+                                    radius: Theme.radius
+                                    color: Theme.field
+                                    border.width: 1
+                                    border.color: Theme.accent
+                                }
+
+                                Component.onCompleted: {
+                                    forceActiveFocus();
+                                    // Solo el nombre base queda seleccionado:
+                                    // la spec pide dejar fuera la extensión
+                                    // para no borrarla sin querer. Dónde acaba
+                                    // lo dice `kara-core`, que sabe que
+                                    // `.tar.gz` es una sola.
+                                    select(0, view.app.base_name_length(text));
+                                }
+
+                                onAccepted: {
+                                    view.app.rename_entry(cell.text, text);
+                                    view.renamingIndex = -1;
+                                }
+                                Keys.onEscapePressed: view.renamingIndex = -1
+                                onActiveFocusChanged: if (!activeFocus)
+                                    view.renamingIndex = -1
                             }
-                            Keys.onEscapePressed: view.renamingIndex = -1
-                            onActiveFocusChanged: if (!activeFocus)
-                                view.renamingIndex = -1
                         }
                     }
-                }
-                Text {
-                    text: view.app.entry_dates[row.index] ?? ""
-                    Layout.preferredWidth: view.dateWidth
-                    Layout.leftMargin: 6
-                    elide: Text.ElideRight
-                    color: Theme.textDim
-                    font.family: Theme.family
-                    font.pixelSize: Theme.sizeBase
-                }
-                Text {
-                    text: view.app.entry_kinds[row.index] ?? ""
-                    Layout.preferredWidth: view.typeWidth
-                    Layout.leftMargin: 6
-                    elide: Text.ElideRight
-                    color: Theme.textDim
-                    font.family: Theme.family
-                    font.pixelSize: Theme.sizeBase
-                }
-                Text {
-                    text: view.app.entry_sizes[row.index] ?? ""
-                    Layout.preferredWidth: view.sizeWidth
-                    Layout.rightMargin: 6
-                    horizontalAlignment: Text.AlignRight
-                    color: Theme.textDim
-                    font.family: Theme.family
-                    font.pixelSize: Theme.sizeBase
-                }
-                Item {
-                    Layout.fillWidth: true
-                    Layout.preferredWidth: 0
                 }
             }
 

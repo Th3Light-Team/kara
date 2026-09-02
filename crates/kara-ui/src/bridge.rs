@@ -22,6 +22,7 @@ use kara_core::breadcrumb;
 use kara_core::entry::EntryKind;
 use kara_core::filter::{NameFilter, Visibility};
 use kara_core::history::History;
+use kara_core::columns::{ColumnLayout, ColumnMemory};
 use kara_core::selection::Selection;
 use kara_core::sort::{ColumnId, SortOverrides, SortSpec, column_for_sort_key};
 use kara_core::tree::{Branch, Expandable, RowKind, Section, SectionId, Tree};
@@ -62,6 +63,19 @@ pub mod qobject {
         /// entiende `kara_core::sort` («name», «kind», «size», «modified»), o
         /// vacía si no se ordena por ninguna. La cabecera la usa para saber
         /// dónde pintar la flecha.
+        /// Las columnas de la vista de detalles, en su orden.
+        #[qproperty(QStringList, column_ids)]
+        #[qproperty(QStringList, column_labels)]
+        #[qproperty(QList_i32, column_widths)]
+        #[qproperty(i32, column_count)]
+        /// Las que se pueden añadir, para el menú de la cabecera.
+        #[qproperty(QStringList, addable_ids)]
+        #[qproperty(QStringList, addable_labels)]
+        /// El contenido de la tabla, por filas: la celda `(fila, columna)` está
+        /// en `fila * column_count + columna`. Una lista de listas no se puede
+        /// exponer a QML, y una propiedad por columna obligaría a conocerlas de
+        /// antemano, que es justo lo que «configurables» impide.
+        #[qproperty(QStringList, entry_values)]
         #[qproperty(QString, sort_column)]
         #[qproperty(bool, sort_ascending)]
         /// Qué entradas están seleccionadas, en 1 y 0.
@@ -260,6 +274,22 @@ pub mod qobject {
         #[qinvokable]
         fn clear_error(self: Pin<&mut App>);
 
+        /// Cambia el ancho de una columna, arrastrando su separador.
+        #[qinvokable]
+        fn set_column_width(self: Pin<&mut App>, id: &QString, width: i32);
+
+        /// Enseña u oculta una columna. La del nombre no se puede quitar.
+        #[qinvokable]
+        fn toggle_column(self: Pin<&mut App>, id: &QString);
+
+        /// Mueve una columna a otra posición.
+        #[qinvokable]
+        fn move_column(self: Pin<&mut App>, from: i32, to: i32);
+
+        /// Devuelve todas las columnas a su ancho normal.
+        #[qinvokable]
+        fn autofit_columns(self: Pin<&mut App>);
+
         /// Ordena por una columna de la vista de detalles. Un segundo clic en
         /// la misma invierte el sentido.
         #[qinvokable]
@@ -309,6 +339,13 @@ pub struct AppRust {
     entry_dirs: cxx_qt_lib::QList<i32>,
     entry_dates: QStringList,
     entry_selected: cxx_qt_lib::QList<i32>,
+    entry_values: QStringList,
+    column_ids: QStringList,
+    column_labels: QStringList,
+    column_widths: cxx_qt_lib::QList<i32>,
+    column_count: i32,
+    addable_ids: QStringList,
+    addable_labels: QStringList,
     selected_count: i32,
     focused_index: i32,
     selected_size: QString,
@@ -352,6 +389,8 @@ pub struct AppRust {
     icons: Icons,
     /// Descripciones de los tipos, para la columna «Tipo».
     descriptions: MimeDescriptions,
+    /// Qué columnas enseña cada carpeta.
+    columns: ColumnMemory,
     /// Lo que Kara recuerda entre sesiones.
     prefs: Prefs,
     /// Qué está seleccionado y qué tiene el cursor.
@@ -411,6 +450,13 @@ impl Default for AppRust {
             entry_dirs: cxx_qt_lib::QList::<i32>::default(),
             entry_dates: QStringList::default(),
             entry_selected: cxx_qt_lib::QList::<i32>::default(),
+            entry_values: QStringList::default(),
+            column_ids: QStringList::default(),
+            column_labels: QStringList::default(),
+            column_widths: cxx_qt_lib::QList::<i32>::default(),
+            column_count: 0,
+            addable_ids: QStringList::default(),
+            addable_labels: QStringList::default(),
             selected_count: 0,
             focused_index: -1,
             selected_size: QString::default(),
@@ -467,6 +513,7 @@ impl Default for AppRust {
             listing: Arc::new(AtomicU64::new(0)),
             thumbs: Vec::new(),
             place_kinds: place_kinds(home.as_deref()),
+            columns: ColumnMemory::default(),
             prefs,
         };
 
@@ -488,6 +535,13 @@ impl Default for AppRust {
             app.entry_icons = snapshot.icons;
             app.entry_dirs = snapshot.dirs;
             app.entry_dates = snapshot.dates;
+            app.entry_values = snapshot.values;
+            app.column_ids = snapshot.column_ids;
+            app.column_labels = snapshot.column_labels;
+            app.column_widths = snapshot.column_widths;
+            app.column_count = snapshot.column_count;
+            app.addable_ids = snapshot.addable_ids;
+            app.addable_labels = snapshot.addable_labels;
             app.entry_count = snapshot.count;
             app.total_count = snapshot.total;
             app.crumb_names = snapshot.crumb_names;
@@ -578,6 +632,13 @@ struct Snapshot {
     icons: QStringList,
     dirs: cxx_qt_lib::QList<i32>,
     dates: QStringList,
+    values: QStringList,
+    column_ids: QStringList,
+    column_labels: QStringList,
+    column_widths: cxx_qt_lib::QList<i32>,
+    column_count: i32,
+    addable_ids: QStringList,
+    addable_labels: QStringList,
     selected: cxx_qt_lib::QList<i32>,
     selected_count: i32,
     focused_index: i32,
@@ -627,6 +688,25 @@ impl AppRust {
         }
         self.visible_path = Some(target.to_path_buf());
         self.visible = entries.clone();
+
+        // La tabla se construye por filas para que QML pueda indexarla con
+        // `fila * column_count + columna`.
+        let layout = self.columns.layout_for(target);
+        let columns: Vec<kara_core::sort::ColumnId> =
+            layout.columns().iter().map(|c| c.id.clone()).collect();
+        let mut values: Vec<QString> = Vec::with_capacity(entries.len() * columns.len());
+        for entry in &entries {
+            for id in &columns {
+                // «Tipo» es el único que no sale de una función pura: su
+                // descripción la resuelve la base de MIME, que tiene memoria.
+                let text = if id.0.as_ref() == "kind" {
+                    self.type_label(entry)
+                } else {
+                    present::cell_value(entry, id)
+                };
+                values.push(QString::from(&text));
+            }
+        }
 
         let selected = ints(
             (0..entries.len()).map(|index| i32::from(self.selection.is_selected(index))),
@@ -690,6 +770,27 @@ impl AppRust {
             sizes,
             kinds,
             icons,
+            values: values.into_iter().collect(),
+            column_ids: columns
+                .iter()
+                .map(|id| QString::from(&id.0.to_string()))
+                .collect(),
+            column_labels: columns
+                .iter()
+                .map(|id| QString::from(&present::column_label(id)))
+                .collect(),
+            column_widths: ints(layout.columns().iter().map(|c| clamp_count(c.width as usize))),
+            column_count: clamp_count(columns.len()),
+            addable_ids: layout
+                .available_to_add()
+                .iter()
+                .map(|id| QString::from(&id.0.to_string()))
+                .collect(),
+            addable_labels: layout
+                .available_to_add()
+                .iter()
+                .map(|id| QString::from(&present::column_label(id)))
+                .collect(),
             selected,
             selected_count: clamp_count(self.selection.len()),
             focused_index: self
@@ -957,6 +1058,13 @@ impl qobject::App {
         self.as_mut().set_entry_icons(view.icons);
         self.as_mut().set_entry_dirs(view.dirs);
         self.as_mut().set_entry_dates(view.dates);
+        self.as_mut().set_entry_values(view.values);
+        self.as_mut().set_column_ids(view.column_ids);
+        self.as_mut().set_column_labels(view.column_labels);
+        self.as_mut().set_column_widths(view.column_widths);
+        self.as_mut().set_column_count(view.column_count);
+        self.as_mut().set_addable_ids(view.addable_ids);
+        self.as_mut().set_addable_labels(view.addable_labels);
         self.as_mut().set_entry_selected(view.selected);
         self.as_mut().set_selected_count(view.selected_count);
         self.as_mut().set_focused_index(view.focused_index);
@@ -1469,6 +1577,55 @@ impl qobject::App {
                     .report(&format!("No se pudo renombrar: {error}"));
             }
         }
+    }
+
+    /// Cambia el reparto de columnas de esta carpeta y vuelve a pintarla.
+    ///
+    /// Se relista: los valores de las celdas se calculan al listar, y una
+    /// columna nueva no tiene de dónde salir si no. Es el mismo precio que ya
+    /// paga ordenar por una cabecera.
+    fn change_columns(mut self: Pin<&mut Self>, change: impl FnOnce(&mut ColumnLayout)) {
+        let folder = PathBuf::from(self.path().to_string());
+        {
+            let state = self.as_mut().rust_mut().get_mut();
+            let mut layout = state.columns.layout_for(&folder);
+            change(&mut layout);
+            state.columns.remember(&folder, layout);
+        }
+        self.as_mut().render(&folder);
+    }
+
+    fn set_column_width(mut self: Pin<&mut Self>, id: &QString, width: i32) {
+        let id = kara_core::sort::ColumnId(id.to_string().into());
+        let width = u32::try_from(width).unwrap_or(0);
+        self.as_mut()
+            .change_columns(|layout| layout.set_width(&id, width));
+    }
+
+    fn toggle_column(mut self: Pin<&mut Self>, id: &QString) {
+        let id = kara_core::sort::ColumnId(id.to_string().into());
+        self.as_mut().change_columns(|layout| {
+            if layout.is_visible(&id) {
+                // Quitar la del nombre se rechaza en el dominio; aquí basta con
+                // no insistir.
+                let _ = layout.remove(&id);
+            } else {
+                layout.add(id);
+            }
+        });
+    }
+
+    fn move_column(mut self: Pin<&mut Self>, from: i32, to: i32) {
+        let (Ok(from), Ok(to)) = (usize::try_from(from), usize::try_from(to)) else {
+            return;
+        };
+        self.as_mut()
+            .change_columns(|layout| layout.reorder(from, to));
+    }
+
+    fn autofit_columns(mut self: Pin<&mut Self>) {
+        self.as_mut()
+            .change_columns(kara_core::columns::ColumnLayout::autofit_all);
     }
 
     /// Refleja en las propiedades por qué columna se está ordenando.

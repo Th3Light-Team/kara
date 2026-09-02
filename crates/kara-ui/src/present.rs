@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use kara_core::FileEntry;
 use kara_core::breadcrumb::{Segment, SegmentKind};
 use kara_core::entry::EntryKind;
+use kara_core::sort::ColumnId;
 use kara_core::filter::base_and_extension;
 use kara_core::tree::SectionId;
 use kara_fs::places::{Place, PlaceKind};
@@ -120,6 +121,66 @@ pub fn modified_label(modified: Option<std::time::SystemTime>) -> String {
     };
     let local: chrono::DateTime<chrono::Local> = modified.into();
     local.format("%d/%m/%Y %H:%M").to_string()
+}
+
+/// Cómo se lee la cabecera de una columna.
+///
+/// Un identificador que esta versión no conoce —una columna de metadatos que
+/// aporte un extractor -— se enseña tal cual en vez de esconderse: es más útil
+/// ver «meta/exposicion» que una columna sin nombre.
+#[must_use]
+pub fn column_label(id: &ColumnId) -> String {
+    match id.0.as_ref() {
+        "name" => "Nombre".to_string(),
+        "extension" => "Extensión".to_string(),
+        "size" => "Tamaño".to_string(),
+        "modified" => "Fecha de modificación".to_string(),
+        "created" => "Fecha de creación".to_string(),
+        "accessed" => "Último acceso".to_string(),
+        "kind" => "Tipo".to_string(),
+        "location" => "Ubicación".to_string(),
+        "dimensions" => "Dimensiones".to_string(),
+        "duration" => "Duración".to_string(),
+        "album" => "Álbum".to_string(),
+        "artist" => "Artista".to_string(),
+        "tags" => "Etiquetas".to_string(),
+        "rating" => "Valoración".to_string(),
+        "thumbnail" => "Miniatura".to_string(),
+        "preview" => "Vista previa".to_string(),
+        "icon" => "Icono".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// El valor de una entrada en una columna.
+///
+/// Vacío cuando esa entrada no tiene nada que decir ahí: una carpeta no tiene
+/// tamaño y un texto no tiene duración. Vacío es la respuesta honesta; un cero
+/// diría que se midió y dio cero.
+#[must_use]
+pub fn cell_value(entry: &FileEntry, id: &ColumnId) -> String {
+    match id.0.as_ref() {
+        "name" => entry.display.clone(),
+        "size" => size_label(entry),
+        "modified" => modified_label(entry.modified),
+        "created" => modified_label(entry.created),
+        "accessed" => modified_label(entry.accessed),
+        // «Tipo» no sale de aquí: la descripción la resuelve el puente contra
+        // la base de MIME, que tiene memoria y no cabe en una función pura.
+        // `Snapshot` la inyecta ya resuelta.
+        "kind" => String::new(),
+        "extension" => kara_core::filter::base_and_extension(&entry.display)
+            .map(|(_, extension)| extension.to_string())
+            .unwrap_or_default(),
+        "location" => entry
+            .location
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        // Las columnas de metadatos las alimenta un extractor que todavía no
+        // existe; salen vacías en vez de inventarse un valor.
+        _ => String::new(),
+    }
 }
 
 /// Cómo se lee una sección del panel de navegación.
