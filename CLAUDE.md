@@ -173,7 +173,19 @@ la propia base de FreeDesktop. El idioma está fijado a español porque el resto
 de la ventana lo está: cuando la UI tenga traducciones, esa constante pasa a ser
 la cadena de idiomas del entorno.
 
-**Lo que falta de la vista:** miniaturas, los cuatro modos de vista con zoom,
+**Miniaturas: la caché compartida del escritorio.** `kara-fs::thumbnails`
+implementa el estándar de FreeDesktop —`~/.cache/thumbnails`, nombre = MD5 del
+`file://` URI, `Thumb::URI` y `Thumb::MTime` dentro del PNG—, así que lo que
+Dolphin ya generó se ve al instante y lo que Kara genera lo aprovechan los
+demás. Se leen los tres tipos de chunk de texto (`tEXt`, `zTXt`, `iTXt`): hay
+generadores reales que comprimen el URI. La búsqueda y la generación van en un
+hilo aparte, en dos pasadas —primero la caché, luego generar—, y un número de
+listado invalida el trabajo en cuanto el usuario cambia de carpeta.
+
+`kara-ui` acepta la carpeta a enseñar como argumento: `cargo run -p kara-ui --
+~/Descargas`.
+
+**Lo que falta de la vista:** los cuatro modos de vista con zoom,
 ordenar pulsando en la cabecera, selección múltiple, anclar carpetas al panel
 (necesita dónde guardar ajustes), y enchufar a la UI lo que el backend ya ofrece
 y nadie consume todavía (vigilancia, cola, deshacer).

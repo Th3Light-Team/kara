@@ -15,7 +15,7 @@
 use core::pin::Pin;
 use std::path::{Path, PathBuf};
 
-use cxx_qt::CxxQtType;
+use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QString, QStringList};
 use kara_core::breadcrumb;
 use kara_core::entry::EntryKind;
@@ -27,7 +27,11 @@ use kara_fs::icons::Icons;
 use kara_fs::mime::MimeDescriptions;
 use kara_fs::list_directory;
 use kara_fs::places::PlaceKind;
+use kara_fs::thumbnails::{ThumbnailSize, Thumbnails};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::present;
 
@@ -43,6 +47,9 @@ pub mod qobject {
         #[qproperty(QStringList, entry_kinds)]
         /// URL del icono de cada entrada, del tema del escritorio.
         #[qproperty(QStringList, entry_icons)]
+        /// URL de la miniatura de cada entrada, vacía mientras no haya una. Se
+        /// rellena desde un hilo de fondo, así que cambia después del listado.
+        #[qproperty(QStringList, entry_thumbs)]
         /// Entradas que se enseñan: ya filtradas.
         #[qproperty(i32, entry_count)]
         /// Entradas que hay en la carpeta antes de aplicar el filtro. La barra de
@@ -129,6 +136,11 @@ pub mod qobject {
         fn toggle_sidebar(self: Pin<&mut App>);
     }
 
+    // Las miniaturas se leen y se generan fuera del hilo de la interfaz, y
+    // vuelven encolando un cierre sobre él. Sin esto, mirar una carpeta de
+    // fotos congelaría la ventana hasta acabar de decodificarlas todas.
+    impl cxx_qt::Threading for App {}
+
     unsafe extern "C++" {
         include!("cxx-qt-lib/qstring.h");
         include!("cxx-qt-lib/qstringlist.h");
@@ -146,6 +158,7 @@ pub struct AppRust {
     entry_sizes: QStringList,
     entry_kinds: QStringList,
     entry_icons: QStringList,
+    entry_thumbs: QStringList,
     entry_count: i32,
     total_count: i32,
     crumb_names: QStringList,
@@ -174,6 +187,15 @@ pub struct AppRust {
     icons: Icons,
     /// Descripciones de los tipos, para la columna «Tipo».
     descriptions: MimeDescriptions,
+    /// La caché de miniaturas del escritorio. `None` si no hay dónde ponerla.
+    thumbnails: Option<Thumbnails>,
+    /// Sube en cada navegación. Un hilo cuyo número ya no es el actual tira su
+    /// trabajo: el usuario se fue de esa carpeta y nadie va a mirar el
+    /// resultado.
+    listing: Arc<AtomicU64>,
+    /// Copia en Rust de `entry_thumbs`, para poder parchear una posición sin
+    /// reconstruirla desde la lista de Qt.
+    thumbs: Vec<String>,
     /// Qué ubicación es cada raíz del panel, para darle su icono propio: la
     /// carpeta de descargas no se enseña con la carpeta genérica.
     place_kinds: HashMap<PathBuf, PlaceKind>,
@@ -186,7 +208,7 @@ impl Default for AppRust {
             .filter(|h| h.is_absolute());
         // Sin `$HOME` utilizable se arranca en la raiz: es la unica carpeta que
         // seguro existe, y arrancar con la vista vacia no orienta a nadie.
-        let start = home.clone().unwrap_or_else(|| PathBuf::from("/"));
+        let start = starting_folder().or_else(|| home.clone()).unwrap_or_else(|| PathBuf::from("/"));
 
         let mut app = Self {
             version: QString::from(env!("CARGO_PKG_VERSION")),
@@ -195,6 +217,7 @@ impl Default for AppRust {
             entry_sizes: QStringList::default(),
             entry_kinds: QStringList::default(),
             entry_icons: QStringList::default(),
+            entry_thumbs: QStringList::default(),
             entry_count: 0,
             total_count: 0,
             crumb_names: QStringList::default(),
@@ -222,6 +245,9 @@ impl Default for AppRust {
             // tema sale el fichero, no la nitidez.
             icons: Icons::load(ICON_SIZE),
             descriptions: MimeDescriptions::new(TYPE_LANGUAGES.iter().map(|l| (*l).to_string()).collect()),
+            thumbnails: Thumbnails::shared(THUMBNAIL_SIZE),
+            listing: Arc::new(AtomicU64::new(0)),
+            thumbs: Vec::new(),
             place_kinds: place_kinds(home.as_deref()),
         };
 
@@ -256,11 +282,42 @@ impl Default for AppRust {
     }
 }
 
+/// La carpeta que se pide por línea de órdenes: `kara ~/Imágenes`.
+///
+/// Se ignora lo que no sea una carpeta legible en vez de arrancar con la vista
+/// vacía: quien se equivoca de ruta prefiere ver su carpeta personal a ver nada.
+fn starting_folder() -> Option<PathBuf> {
+    let requested = PathBuf::from(std::env::args_os().nth(1)?);
+    let absolute = if requested.is_absolute() {
+        requested
+    } else {
+        std::env::current_dir().ok()?.join(requested)
+    };
+    absolute.is_dir().then_some(absolute)
+}
+
 /// Migas visibles cuando la vista todavía no ha dicho cuántas caben.
 const DEFAULT_CRUMB_CAPACITY: usize = 6;
 
 /// Talla de icono que se pide al tema.
 const ICON_SIZE: u32 = 16;
+
+/// Talla de miniatura que se pide a la caché compartida.
+///
+/// 128 píxeles es la talla «normal» del estándar, la que más probabilidades
+/// tiene de estar ya generada por otro programa, y sobra para la vista de
+/// detalles. Cuando haya vista de iconos con zoom, la talla saldrá del zoom.
+const THUMBNAIL_SIZE: ThumbnailSize = ThumbnailSize::Normal;
+
+/// Cuántas miniaturas se juntan antes de enseñarlas.
+///
+/// Una a una, cada una costaría reconstruir la lista entera y una vuelta al
+/// bucle de eventos; de golpe al final, una carpeta grande no enseñaría nada
+/// durante segundos.
+const THUMBNAIL_BATCH: usize = 24;
+
+/// Cada cuánto se enseña lo que haya, aunque el lote no esté lleno.
+const THUMBNAIL_FLUSH: Duration = Duration::from_millis(120);
 
 /// En qué idioma se piden las descripciones de tipo.
 ///
@@ -278,6 +335,8 @@ struct Snapshot {
     kinds: QStringList,
     icons: QStringList,
     count: i32,
+    /// Qué entradas pueden tener miniatura, para el hilo de fondo.
+    jobs: Vec<ThumbnailJob>,
     total: i32,
     crumb_names: QStringList,
     crumb_paths: QStringList,
@@ -321,6 +380,28 @@ impl AppRust {
             })
             .collect();
 
+        // La caché se consulta para todo, no solo para las imágenes: un PDF o
+        // un AppImage pueden tener miniatura hecha por otro programa. Generar,
+        // en cambio, solo se intenta con imágenes.
+        let jobs = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.kind != EntryKind::Directory)
+            .filter_map(|(row, entry)| {
+                let modified = entry.modified?;
+                let may_generate = self
+                    .icons
+                    .mime_of(&entry.display)
+                    .is_some_and(|mime| mime.starts_with("image/"));
+                Some(ThumbnailJob {
+                    row,
+                    path: target.join(&entry.name),
+                    modified,
+                    may_generate,
+                })
+            })
+            .collect();
+
         let segments = breadcrumb::segments(target, self.home.as_deref());
         let split = breadcrumb::collapse(&segments, self.crumb_capacity);
 
@@ -330,6 +411,7 @@ impl AppRust {
             sizes,
             kinds,
             icons,
+            jobs,
             count: clamp_count(entries.len()),
             total: clamp_count(total),
             crumb_names: labels(&split.visible),
@@ -338,6 +420,17 @@ impl AppRust {
             overflow_paths: paths(&split.overflow),
         })
     }
+}
+
+/// Una entrada a la que mirarle la miniatura.
+struct ThumbnailJob {
+    row: usize,
+    path: PathBuf,
+    modified: SystemTime,
+    /// Si vale la pena intentar generarla cuando no esté en la caché. Solo las
+    /// imágenes: un vídeo o un PDF necesitan herramientas externas, y probar con
+    /// cada fichero suelto sería gastar por nada.
+    may_generate: bool,
 }
 
 /// Las filas del panel de navegación, ya formateadas.
@@ -531,6 +624,11 @@ fn paths(segments: &[breadcrumb::Segment]) -> QStringList {
         .collect()
 }
 
+/// Vuelta de `i32` a `usize` para dimensionar la lista de miniaturas.
+fn clamp_count_usize(count: i32) -> usize {
+    usize::try_from(count).unwrap_or(0)
+}
+
 /// Qt cuenta con `int`. Una carpeta con más de 2^31 entradas no cabe, pero
 /// tampoco puede tumbar el contador.
 fn clamp_count(n: usize) -> i32 {
@@ -549,6 +647,7 @@ impl qobject::App {
         self.as_mut().set_entry_sizes(view.sizes);
         self.as_mut().set_entry_kinds(view.kinds);
         self.as_mut().set_entry_icons(view.icons);
+        self.as_mut().start_thumbnails(view.jobs, clamp_count_usize(view.count));
         self.as_mut().set_entry_count(view.count);
         self.as_mut().set_total_count(view.total);
         self.as_mut().set_crumb_names(view.crumb_names);
@@ -609,6 +708,111 @@ impl qobject::App {
     fn toggle_sidebar(mut self: Pin<&mut Self>) {
         let visible = *self.sidebar_visible();
         self.as_mut().set_sidebar_visible(!visible);
+    }
+
+    /// Arranca la búsqueda de miniaturas de la carpeta recién enseñada.
+    ///
+    /// Se hace en dos pasadas y en un hilo aparte. La primera solo mira la caché
+    /// compartida, que es barata, así que lo que otro programa ya generó aparece
+    /// casi de inmediato. La segunda genera lo que falta, que es lento, y va
+    /// goteando. Encadenarlas al revés dejaría la carpeta sin nada visible
+    /// mientras se decodifica la primera foto.
+    fn start_thumbnails(mut self: Pin<&mut Self>, jobs: Vec<ThumbnailJob>, rows: usize) {
+        // Cualquier hilo anterior queda invalidado por este número: el usuario
+        // ya no está en aquella carpeta.
+        let generation = {
+            let state = self.as_mut().rust_mut().get_mut();
+            state.thumbs = vec![String::new(); rows];
+            state.listing.fetch_add(1, Ordering::SeqCst) + 1
+        };
+        self.as_mut()
+            .set_entry_thumbs(QStringList::default());
+
+        let Some(thumbnails) = self.rust().thumbnails.clone() else {
+            return;
+        };
+        if jobs.is_empty() {
+            return;
+        }
+
+        let listing = Arc::clone(&self.rust().listing);
+        let thread = self.qt_thread();
+
+        std::thread::spawn(move || {
+            let current = || listing.load(Ordering::SeqCst) == generation;
+            let mut batch: Vec<(usize, String)> = Vec::new();
+            let mut last_flush = Instant::now();
+
+            let flush = |batch: &mut Vec<(usize, String)>| {
+                if batch.is_empty() {
+                    return;
+                }
+                let payload = std::mem::take(batch);
+                // Si el objeto ya no está, no hay nada que hacer ni nada que
+                // reportar: la ventana se cerró.
+                let _ = thread.queue(move |app| {
+                    app.apply_thumbnails(generation, payload);
+                });
+            };
+
+            // Primera pasada: solo lo que ya está en la caché.
+            let mut pending = Vec::new();
+            for job in jobs {
+                if !current() {
+                    return;
+                }
+                match thumbnails.lookup(&job.path, job.modified) {
+                    Some(found) => batch.push((job.row, kara_fs::file_uri(&found))),
+                    None => pending.push(job),
+                }
+                if batch.len() >= THUMBNAIL_BATCH || last_flush.elapsed() >= THUMBNAIL_FLUSH {
+                    flush(&mut batch);
+                    last_flush = Instant::now();
+                }
+            }
+            flush(&mut batch);
+
+            // Segunda pasada: generar lo que falte.
+            for job in pending {
+                if !current() {
+                    return;
+                }
+                if !job.may_generate || thumbnails.failed_before(&job.path, job.modified) {
+                    continue;
+                }
+                if let Ok(written) = thumbnails.generate(&job.path, job.modified) {
+                    batch.push((job.row, kara_fs::file_uri(&written)));
+                }
+                if batch.len() >= THUMBNAIL_BATCH || last_flush.elapsed() >= THUMBNAIL_FLUSH {
+                    flush(&mut batch);
+                    last_flush = Instant::now();
+                }
+            }
+            flush(&mut batch);
+        });
+    }
+
+    /// Vuelca un lote de miniaturas, si sigue siendo de la carpeta que se ve.
+    fn apply_thumbnails(mut self: Pin<&mut Self>, generation: u64, found: Vec<(usize, String)>) {
+        {
+            let state = self.as_mut().rust_mut().get_mut();
+            if state.listing.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            for (row, url) in found {
+                if let Some(slot) = state.thumbs.get_mut(row) {
+                    *slot = url;
+                }
+            }
+        }
+
+        let list: QStringList = self
+            .rust()
+            .thumbs
+            .iter()
+            .map(QString::from)
+            .collect();
+        self.as_mut().set_entry_thumbs(list);
     }
 
     /// Refleja en las propiedades si el historial puede ir atrás o adelante.

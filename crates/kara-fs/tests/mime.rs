@@ -83,6 +83,21 @@ fn un_comodin_que_no_es_de_extension_tambien_encaja() {
 }
 
 #[test]
+fn un_nombre_con_acentos_no_revienta_el_cotejo() {
+    // Cotejar la cola cortando el `&str` por una posicion contada desde el
+    // final cae dentro de un caracter en cuanto hay un acento o una raya, y eso
+    // es un panico. Paso de verdad al abrir la carpeta de descargas.
+    let db = parse_globs2(BASE);
+    assert_eq!(db.of("informe—final.txt"), Some("text/plain"));
+    assert_eq!(db.of("cañón.txt"), Some("text/plain"));
+    assert_eq!(db.of("—"), None);
+    assert_eq!(db.of("ñ"), None);
+    // Un nombre cuya cola en bytes coincide con la extension pero parte un
+    // caracter no puede colarse como coincidencia.
+    assert_eq!(db.of("añ"), None);
+}
+
+#[test]
 fn un_nombre_sin_tipo_conocido_no_se_inventa() {
     let db = parse_globs2(BASE);
     assert_eq!(db.of("cosa.qwertyuiop"), None);

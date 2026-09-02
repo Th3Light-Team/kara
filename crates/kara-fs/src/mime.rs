@@ -117,8 +117,18 @@ impl Glob {
     }
 
     /// El patrón es `*.algo`; se compara la cola del nombre.
+    ///
+    /// La comparación va por bytes y no por rebanada de `str` a propósito:
+    /// cortar un `&str` por una posición contada desde el final cae dentro de un
+    /// carácter en cuanto el nombre lleva un acento o una raya, y eso es un
+    /// pánico. Comparar bytes da el mismo resultado —dos textos UTF-8 son
+    /// iguales si y solo si sus bytes lo son— y no puede reventar.
     fn matches_suffix(&self, name: &str) -> bool {
-        let suffix = &self.pattern[1..];
+        let suffix = self.pattern.as_bytes();
+        let Some(suffix) = suffix.get(1..) else {
+            return false;
+        };
+        let name = name.as_bytes();
         if name.len() <= suffix.len() {
             return false;
         }

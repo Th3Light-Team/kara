@@ -19,6 +19,14 @@ pub mod mime;
 
 pub mod places;
 
+pub mod thumbnails;
+
+pub use thumbnails::{ThumbnailSize, Thumbnails};
+
+pub mod uri;
+
+pub use uri::file_uri;
+
 pub use listing::{EntryError, Listing, describe, list_directory, read_hidden_file};
 
 pub use mime::{MimeDatabase, MimeDescriptions};

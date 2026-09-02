@@ -312,7 +312,7 @@ Window {
                         // Hueco del icono: la cabecera tiene que llevar el mismo
                         // que las filas o las columnas dejan de alinearse.
                         Item {
-                            Layout.preferredWidth: 16
+                            Layout.preferredWidth: 20
                         }
                         Text {
                             text: qsTr("Nombre")
@@ -377,6 +377,9 @@ Window {
                         // el resultado de `??` a `source` deja un valor sin tipo
                         // que QML no sabe convertir a URL.
                         readonly property string iconUrl: app.entry_icons[row.index] ?? ""
+                        // La miniatura llega después que el listado, desde un
+                        // hilo de fondo; mientras no esté, manda el icono.
+                        readonly property string thumbUrl: app.entry_thumbs[row.index] ?? ""
 
                         width: fileList.width
                         height: Theme.rowHeight
@@ -400,14 +403,17 @@ Window {
                             spacing: 12
 
                             Image {
-                                Layout.preferredWidth: 16
-                                Layout.preferredHeight: 16
-                                source: row.iconUrl
+                                Layout.preferredWidth: 20
+                                Layout.preferredHeight: 20
+                                source: row.thumbUrl !== "" ? row.thumbUrl : row.iconUrl
+                                // Una miniatura no es cuadrada; sin esto se
+                                // estiraría, que es el modo por defecto de Image.
+                                fillMode: Image.PreserveAspectFit
                                 // El tema resuelve la talla, pero los ficheros
                                 // son SVG: sin `sourceSize` se rasterizan a su
                                 // tamaño nominal y se ven borrosos al escalar.
-                                sourceSize.width: 16
-                                sourceSize.height: 16
+                                sourceSize.width: 20
+                                sourceSize.height: 20
                                 // Un icono que no está no deja un hueco roto:
                                 // simplemente no se pinta.
                                 visible: status === Image.Ready
