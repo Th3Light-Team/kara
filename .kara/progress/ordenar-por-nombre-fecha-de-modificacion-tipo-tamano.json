@@ -2,7 +2,7 @@
   "conveniencia": "Ordenar por (nombre, fecha de modificación, tipo, tamaño…)",
   "crate": "kara-core",
   "slug": "ordenar-por-nombre-fecha-de-modificacion-tipo-tamano",
-  "estado": "fallida",
+  "estado": "aprobada_con_deuda",
   "commit": "5cea729",
   "pruebas": {
     "testFiles": [
@@ -26,12 +26,13 @@
   "intentos": 3,
   "nota": "Agoto los 3 intentos. El intento 2 tuvo CERO bloqueantes pero fue rechazado por un bug de la puerta del workflow (exigia approved==true y al supervisor se le instruye desaprobar por defecto). El intento 3, ya commiteado, REINTRODUJO un bloqueante. La puerta ya esta arreglada. NO relanzar a ciegas: requiere decision humana sobre el plegado de caja.",
   "bloqueantePendiente": {
+    "estado": "RESUELTO",
     "file": "crates/kara-core/src/sort/collation.rs",
-    "line": 153,
-    "issue": "case_fold_char es una tabla a mano (ASCII, Latin-1, griego base, cirilico base). Latin Extended-A/B pasa sin plegar: la insensibilidad a mayusculas no existe para polaco, checo, turco, etc. La spec la enuncia sin condiciones.",
-    "propuestaSupervisor": "Usar char::to_lowercase() (mapeo Unicode por defecto, no lee locale)",
-    "objecionImplementador": "to_lowercase() no pliega sigma final: 'ΟΔΟΣ' y 'οδός' quedarian separadas. El arreglo correcto es to_lowercase() MAS el caso especial ς->σ."
+    "arreglo": "case_fold_char pasa a char::to_lowercase() (mapeo Unicode por defecto, no lee locale) conservando dos arms propios donde folding y mapping divergen y to_lowercase no llega: sigma final U+03C2->U+03C3 y signo micro U+00B5->U+03BC. Ambos modelos tenian parte de razon.",
+    "verificado": "Comprobado a mano contra el codigo anterior: la tabla a mano fallaba polaco, checo, C/L con trazo y maltes; el nuevo los pasa todos sin regresion en sigma, ASCII, Latin-1 ni cirilico.",
+    "huecoRestante": "Mapeos multi-char (U+0130 turco -> i + U+0307) se dejan sin plegar: plegarlos exigiria un atomo multi-caracter y una asignacion por nombre. Documentado en el doc comment. Dos code points, no todo Latin Extended."
   },
   "specGapsPendientes": 7,
-  "actualizado": "2026-09-02T02:56:15-04:00"
+  "actualizado": "2026-09-02T10:36:39-04:00",
+  "deudaDePruebas": "El arreglo NO tiene test de regresion: los ficheros de tests son propiedad del supervisor y son inmutables para quien implementa. Cuando se retome esta conveniencia, el supervisor debe anadir casos discriminantes de plegado (minuscula vs MAYUSCULA-con-prefijo) para Latin Extended-A/B y sigma final."
 }

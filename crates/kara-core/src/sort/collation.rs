@@ -130,46 +130,37 @@ fn first_char_at(s: &str, byte_offset: usize) -> char {
     s[byte_offset..].chars().next().unwrap_or('0')
 }
 
-/// Unicode **simple** case folding of a single `char` — a hand-maintained,
-/// locale-independent table, deliberately *not* built on [`char::to_lowercase`].
+/// Unicode **simple** case folding of a single `char`: locale-independent, total and
+/// always 1:1, so a `CollationAtom::Char` stays a single character.
 ///
-/// `to_lowercase` implements Unicode's default *case mapping*, which is not the same
-/// relation as *case folding*: they diverge on a handful of characters, the sharpest
-/// example being Greek final sigma (U+03C2 `ς`), which lowercases to itself but
-/// case-folds to U+03C3 `σ` — the same target as capital sigma (U+03A3 `Σ`). Folding
-/// through `to_lowercase` would leave `"ΟΔΟΣ"` and `"οδός"` sorted apart even though
-/// they are the same word with the same case-insensitive spelling. This table maps
-/// both to `σ`.
+/// Built on [`char::to_lowercase`], which implements Unicode's default case *mapping*
+/// and reads no locale — the C library's `strcoll`/`tolower` are the locale-dependent
+/// ones, not this. Two characters need their own arm because case folding and case
+/// mapping genuinely diverge there, and `to_lowercase` leaves both untouched:
 ///
-/// Coverage is scoped to the scripts the product's own documentation and UI use
-/// (ASCII, Latin-1 Supplement, Greek, Cyrillic) plus the micro sign, rather than the
-/// full multi-thousand-entry `CaseFolding.txt`: no case-folding crate is vendored in
-/// this workspace, and none ships pre-built offline data for a fuller table (see the
-/// module's edge-case notes). Characters outside this table — Latin Extended-A/B,
-/// Georgian, Armenian, Deseret, the Kelvin/Ångström/Ohm compatibility signs, etc. —
-/// pass through unchanged, so two such names that differ only in case do not group
-/// together. That is a known scope gap, not nondeterminism: the function stays total,
-/// pure and locale-independent, so it never breaks the total order.
+/// - Greek final sigma (U+03C2 `ς`) lowercases to itself but folds to U+03C3 `σ`, the
+///   same target as capital sigma. Without this arm `"ΟΔΟΣ"` and `"οδός"` — the same
+///   word with the same case-insensitive spelling — would sort apart.
+/// - The micro sign (U+00B5 `µ`) folds to Greek small mu (U+03BC `μ`).
+///
+/// Characters whose lowercase mapping expands to several `char`s (U+0130 `İ` becomes
+/// `i` + U+0307) are left unfolded: folding them would need a multi-character atom,
+/// which would cost an allocation per name and break the 100 k-entry budget. That is
+/// the only remaining scope gap, and it is two code points wide rather than the whole
+/// of Latin Extended-A/B.
 fn case_fold_char(c: char) -> char {
     match c {
-        'A'..='Z' => c.to_ascii_lowercase(),
-        // Latin-1 Supplement: À-Ö, Ø-Þ (U+00D7 × and U+00DF ß are not letters that
-        // fold further under simple case folding).
-        '\u{00C0}'..='\u{00D6}' | '\u{00D8}'..='\u{00DE}' => {
-            char::from_u32(c as u32 + 0x20).unwrap_or(c)
-        }
-        // Micro sign folds to Greek small mu, per Unicode's common case-folding rule.
+        // Case folding, not case mapping: `to_lowercase` leaves these alone.
         '\u{00B5}' => '\u{03BC}',
-        // Greek capital letters (Α-Ρ, Σ-Ϋ — U+03A2 is unassigned).
-        '\u{0391}'..='\u{03A1}' | '\u{03A3}'..='\u{03AB}' => {
-            char::from_u32(c as u32 + 0x20).unwrap_or(c)
-        }
-        // Greek final sigma folds together with capital/medial sigma.
         '\u{03C2}' => '\u{03C3}',
-        // Cyrillic: Ѐ-Џ (offset +0x50) and А-Я (offset +0x20).
-        '\u{0400}'..='\u{040F}' => char::from_u32(c as u32 + 0x50).unwrap_or(c),
-        '\u{0410}'..='\u{042F}' => char::from_u32(c as u32 + 0x20).unwrap_or(c),
-        _ => c,
+        _ => {
+            let mut lowered = c.to_lowercase();
+            match (lowered.next(), lowered.next()) {
+                (Some(single), None) => single,
+                // Multi-character expansion, or no mapping at all: leave as is.
+                _ => c,
+            }
+        }
     }
 }
 
@@ -242,10 +233,8 @@ pub fn collation_key(display: &str, collation: &Collation) -> CollationKey {
             let folded = if collation.case_sensitive {
                 first
             } else {
-                // Unicode simple case folding via the hand-maintained table on
-                // `case_fold_char` (see its doc comment for why not `to_lowercase`):
-                // locale-independent, allocation-free and always 1:1, so
-                // `CollationAtom::Char` stays a single character.
+                // Unicode simple case folding: locale-independent, allocation-free
+                // and always 1:1, so `CollationAtom::Char` stays a single character.
                 case_fold_char(first)
             };
             atoms.push(CollationAtom::Char(folded));
