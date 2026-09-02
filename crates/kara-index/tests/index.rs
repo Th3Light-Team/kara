@@ -187,3 +187,31 @@ fn max_depth_limits_the_walk() {
     });
     assert_eq!(deep, 0);
 }
+
+/// El plegado de busqueda es el de la collation mas quitar diacriticos: una sola
+/// definicion de «misma letra ignorando la caja», no dos que puedan divergir.
+#[test]
+fn search_folding_builds_on_the_core_case_folding() {
+    for text in ["Árbol", "ÑOÑO", "ΟΔΟΣ", "οδός", "\u{00B5}m", "Żółw"] {
+        let sin_marcas: String = {
+            use unicode_normalization::UnicodeNormalization;
+            text.nfd()
+                .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
+                .collect()
+        };
+        assert_eq!(fold_for_search(text), kara_core::fold_for_match(&sin_marcas), "{text}");
+    }
+}
+
+/// Las minusculas que ocupan varios char las resuelve el paso de diacriticos.
+#[test]
+fn multi_char_lowercase_is_handled_by_the_accent_step() {
+    assert_eq!(fold_for_search("İSTANBUL"), fold_for_search("istanbul"));
+}
+
+/// Buscar SI pliega acentos; ordenar no. Son dos relaciones distintas.
+#[test]
+fn searching_folds_accents_but_matching_for_order_does_not() {
+    assert_eq!(fold_for_search("Árbol"), fold_for_search("arbol"));
+    assert_ne!(kara_core::fold_for_match("Árbol"), kara_core::fold_for_match("arbol"));
+}

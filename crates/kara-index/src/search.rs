@@ -48,18 +48,26 @@ pub enum SearchEvent {
     Done { matches: u64, cancelled: bool },
 }
 
-/// Normaliza un texto para comparar: sin acentos y en minúsculas.
+/// Normaliza un texto para comparar: sin acentos y sin distinguir mayúsculas.
 ///
-/// NFD separa la letra base de sus diacríticos, se descartan los diacríticos
-/// combinantes y se recompone en NFC.
+/// Es exactamente `kara_core::fold_for_match` aplicado al texto **sin
+/// diacríticos**: buscar pliega una relación más que ordenar, y solo esa. Definir
+/// aquí un plegado de caja propio haría que un día divergieran sin que nadie se
+/// diera cuenta.
+///
+/// El orden importa. Primero se quitan los diacríticos —NFD separa la letra base
+/// de sus marcas y se descartan las combinantes—, lo que de paso resuelve los
+/// pocos caracteres cuya minúscula ocupa varios `char` y que
+/// `fold_for_match` deja intactos a propósito: `İ` (U+0130) se descompone en `I`
+/// más un punto combinante, así que llega al plegado de caja como una `I` normal
+/// y `istanbul` encuentra `İSTANBUL`.
 #[must_use]
 pub fn fold_for_search(text: &str) -> String {
-    text.nfd()
+    let without_marks: String = text
+        .nfd()
         .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
-        .collect::<String>()
-        .to_lowercase()
-        .nfc()
-        .collect()
+        .collect();
+    kara_core::fold_for_match(&without_marks)
 }
 
 /// Consulta ya normalizada. Construirla una vez evita replegar el término por
