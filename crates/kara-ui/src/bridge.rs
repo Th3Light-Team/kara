@@ -174,13 +174,13 @@ impl qobject::App {
         self.as_mut().set_entry_count(view.count);
     }
 
-    fn cd(mut self: Pin<&mut Self>, name: &cxx_qt_lib::QString) {
+    fn cd(self: Pin<&mut Self>, name: &cxx_qt_lib::QString) {
         let mut target = PathBuf::from(self.path().to_string());
         target.push(name.to_string());
         self.navigate_to(&target);
     }
 
-    fn up(mut self: Pin<&mut Self>) {
+    fn up(self: Pin<&mut Self>) {
         let current = PathBuf::from(self.path().to_string());
         if let Some(parent) = current.parent() {
             let parent = parent.to_path_buf();
