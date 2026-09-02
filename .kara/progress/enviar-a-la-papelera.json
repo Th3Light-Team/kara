@@ -2,9 +2,9 @@
   "conveniencia": "Enviar a la papelera",
   "crate": "kara-fs",
   "slug": "enviar-a-la-papelera",
-  "estado": "auditado_pendiente_supervision",
+  "estado": "supervisado_aprobado_con_condicion",
   "intentos": 3,
-  "actualizado": "2026-09-02T14:14:33-04:00",
+  "actualizado": "2026-09-02T14:43:21-04:00",
   "historial": [
     {
       "fecha": "2026-09-02T13:06:24-04:00",
@@ -25,6 +25,11 @@
       "fecha": "2026-09-02T14:40:00-04:00",
       "estado": "implementado_intento_3",
       "nota": "Corregidos los 2 bloqueantes del intento 2: (1) el rename final de place_in_trash usaba std::fs::rename, que en POSIX reemplaza en silencio un fichero regular ya existente en files/ (huerfano por .trashinfo purgado, crash a medias, u otra implementacion escribiendo la misma papelera); ahora usa rustix::fs::renameat_with(..., RenameFlags::NOREPLACE) y trata EEXIST como la misma colision que el O_EXCL del .trashinfo ya maneja (libera la reserva, siguiente intento); copy_across_devices abre el destino con OpenOptions::create_new(true) en vez de File::create por la misma razon. (2) DeletionDate ya no lleva el offset UTC cableado a 0: se anadio TrashPolicy.utc_offset_seconds (i32, default 0) y place_in_trash lo inyecta en DeletionDate::from_system_time_local; no cambia ninguna de las 8 firmas normativas de apiPublica (los tests que construyen TrashPolicy usan `..TrashPolicy::default()`, verificado antes de tocar, siguen compilando). Ademas, de los hallazgos 'importantes' repetidos en los dos intentos: probe_trash ahora calcula el tamano real de un directorio con apparent_size (antes usaba metadata.len(), el tamano del inodo) para que coincida con check_capacity y el aviso pueda darse ANTES de actuar (cb_13); probe_trash distingue ahora StickyTrashRejected, PathIsInsideTrash y PathIsTopDir en vez de ser siempre inalcanzables (cb_12); TrashInfo::parse rechaza componentes '..' tambien en la rama de papelera home, no solo en la de volumen; apparent_size (compartida por check_capacity y check_free_space_for_copy) consulta ahora al observador en cada entrada y devuelve TrashError::Cancelled ante Flow::Cancel, igual que delete_recursive, asi que recorrer un arbol grande para comprobar capacidad o espacio ya no es un bucle sin punto de cancelacion (cb_29); probe_trash sigue sin poder cancelarse porque su firma normativa no lleva observador, documentado en el propio codigo. cargo test -p kara-fs: 76 pasan, 2 ignorados (sin cambios). cargo clippy -p kara-fs --all-targets -- -D warnings: limpio. grep de unwrap/expect/panic/todo! en src/: vacio. sha256 de los 4 ficheros de test identico al del contrato. Hallazgos 'menores' que quedan sin resolver, documentados como tension test/produccion o cambio de API fuera de alcance: restore_dir_times (eliminarlo rompe cb_09, snapshot de mtime de info/, fichero de prueba congelado); el allow crate-wide de collapsible_if/cloned_ref_to_slice_refs en Cargo.toml (verificado quitando el allow: los dos lints solo disparan en tests/common/mod.rs, tests/trash_home.rs y tests/trash_volume.rs -- patron pre-let-chains y &[x.clone()] -- cero disparos en src/; Cargo no permite acotar [lints] a un solo directorio y los ficheros de test no se pueden tocar para anadir un allow local); NoSpace/MediaUnavailable en TrashError (anadir variantes cambia el enum normativo del contrato, no solo el struct TrashPolicy); permisos 0755 explicitos en los directorios intermedios que restore_item recrea (create_dir_all los deja en 0777&umask, no necesariamente 0755); deteccion de volumen desconectado en restore_item (cb_18, ya documentado en el intento 2)."
+    },
+    {
+      "fecha": "2026-09-02T14:43:21-04:00",
+      "estado": "supervisado",
+      "nota": "Supervision adversarial: 6 defectos que las 76 pruebas no capturaban, 5 pruebas nuevas (trash_supervisor.rs) verificadas contra el codigo defectuoso, 1 bloqueante que no se puede arreglar dentro de kara-fs (DeletionDate en UTC) y queda como specGap para kara-ops. 81 pruebas verdes, clippy limpio, los 4 sha256 intactos."
     }
   ],
   "contrato": {
@@ -555,5 +560,153 @@
     "unwrapEnSrc": 0,
     "integridadPruebas": "los 4 sha256 cuadran: quien implemento no toco las pruebas"
   },
-  "notaTimestamp": "El campo 'actualizado' que dejo la sesion anterior decia 14:40 cuando eran las 14:10: escribio una marca futura en vez de ejecutar date -Is."
+  "notaTimestamp": "El campo 'actualizado' que dejo la sesion anterior decia 14:40 cuando eran las 14:10: escribio una marca futura en vez de ejecutar date -Is.",
+  "supervision": {
+    "quien": "supervisor adversarial (Opus), worktree kara-idx / rama integracion",
+    "veredicto": "APROBADO CON CONDICION. El modulo kara-fs queda aprobado tras los seis arreglos de esta fase. La conveniencia NO esta terminada: mientras nadie inyecte el desplazamiento horario local, cada .trashinfo que escribe Kara lleva la fecha en UTC, y eso incumple la spec ('registrar la fecha') y rompe la interoperabilidad con Dolphin/Nautilus que la propia nota de la spec presupone.",
+    "auditoriaMecanica": "compila; 81 pruebas (76 originales + 5 nuevas), 0 rojas, 2 ignoradas legitimas; cargo clippy --all-targets sin avisos en todo el workspace; cero unwrap/expect/panic/todo en src/; los 4 sha256 de los ficheros de prueba inmutables intactos; NO se ejecuto cargo fmt.",
+    "contrasteConFreeDesktopReal": [
+      "gio trash sobre ficheros con espacios, acentos, '#', '%', '?', '[', ']' y salto de linea, con XDG_DATA_HOME redirigido: el Path= de Kara coincide byte a byte con el de gio en todos los caracteres que cb_06 exige, y la ida y vuelta es exacta.",
+      "Diferencia observada y aceptada: gio escapa ademas + & = , ; : @ ' ( ) ! * ; Kara los deja literales. cb_06 dice 'como minimo', el decodificado es identico en ambos sentidos, y la papelera real del usuario (~/.local/share/Trash) no contiene ningun caso que lo distinga. No es incumplimiento.",
+      "La papelera real del usuario usa el estilo de KIO para las colisiones ('preview.png (1)'); Kara usa 'x.2.txt' como manda cb_08. La spec FreeDesktop no fija esquema de nombres: no es incumplimiento.",
+      "DeletionDate: para el mismo instante gio escribio 2026-09-02T14:17:55 y Kara 2026-09-02T18:18:27. La maquina esta en UTC-4. Confirmado el riesgo que el propio contrato listaba."
+    ],
+    "hallazgos": [
+      {
+        "id": "sup_h1",
+        "severidad": "bloqueante",
+        "titulo": "$topdir/.Trash-$uid que sea un enlace simbolico se seguia: los ficheros borrados acababan en un directorio ajeno",
+        "donde": "crates/kara-fs/src/trash/dir.rs, build_volume_trash_dir (la linea `if !root.is_dir()`) y probe_trash (`if candidate_root.is_dir()`)",
+        "porQue": "cb_12 exige desconfiar de $topdir/.Trash (symlink, no-directorio, sin sticky) y que 'nada se escriba a traves del symlink', pero esa desconfianza no se aplicaba a la papelera en la que de verdad se escribe. Path::is_dir sigue los enlaces. En un $topdir escribible por todos -- la unidad extraible tipica, justo el caso que motiva el sticky bit -- cualquiera puede pre-crear .Trash-<uid> apuntando a un directorio suyo.",
+        "demostrado": "trash_one devolvia Ok y el fichero, con su .trashinfo, aparecia dentro del directorio senuelo. Reproducido en /dev/shm.",
+        "arreglo": "volume_root_state() en dir.rs: lstat en vez de stat, y se rechaza symlink / no-directorio / propiedad de otro uid (la misma comprobacion que hace el backend local de glib). Nueva UnavailableReason::VolumeTrashRejected, expuesta igual en trash_one (NoTrashOnVolume) y en probe_trash (Unavailable).",
+        "pruebas": "sup_01, sup_02"
+      },
+      {
+        "id": "sup_h2",
+        "severidad": "bloqueante (no arreglable dentro de kara-fs)",
+        "titulo": "DeletionDate se escribe en UTC con la politica por defecto",
+        "donde": "crates/kara-fs/src/trash/dir.rs, TrashPolicy::default() -> utc_offset_seconds: 0",
+        "porQue": "FreeDesktop exige hora local sin zona y la spec exige 'registrar la fecha para poder restaurar'. El contrato mando inyectar el offset para que la conversion fuera determinista, pero no dejo ninguna via para obtenerlo: kara-ops no existe todavia, kara-fs tiene prohibido leer la zona horaria, y sus dependencias permitidas (kara-core, rustix, thiserror, percent-encoding) no incluyen nada capaz de leer /etc/localtime. El resultado es que hoy, con TrashPolicy::default(), todo .trashinfo sale con la hora equivocada en cualquier maquina que no este en Greenwich.",
+        "demostrado": "gio 14:17:55 vs Kara 18:18:27 para el mismo instante en una maquina en UTC-4.",
+        "arreglo": "NINGUNO en esta fase: cualquier arreglo aqui contradice el contrato o el presupuesto de dependencias. Queda como specGap sg_01, bloqueante para la conveniencia (no para el modulo).",
+        "pruebas": "ninguna nueva: el comportamiento actual es exactamente el que el contrato pidio"
+      },
+      {
+        "id": "sup_h3",
+        "severidad": "media",
+        "titulo": "probe_trash y trash_one no coincidian en el conjunto de rutas rechazadas",
+        "donde": "crates/kara-fs/src/trash/dir.rs, probe_trash",
+        "porQue": "probe_trash es lo que la UI mira para decidir si ofrece 'Enviar a la papelera' o el aviso de borrado directo (cb_10, cb_25). Devolvia Available para '/' y para rutas relativas, que trash_one rechaza de plano con RefusedSpecialPath (cb_23): la UI ofreceria una operacion condenada a fallar.",
+        "demostrado": "probe_trash('/') -> Ok(Available { kind: Home, .. }) frente a trash_one('/') -> Err(RefusedSpecialPath { reason: Root }).",
+        "arreglo": "probe_trash llama a refuse_special_path primero y propaga el mismo error, salvo PathIsInsideTrash, que se conserva en forma Unavailable porque es un estado que la UI muestra junto a las demas razones.",
+        "pruebas": "sup_03, sup_04"
+      },
+      {
+        "id": "sup_h4",
+        "severidad": "media",
+        "titulo": "delete_permanently no tenia ninguna guarda: ni '/' ni los puntos de montaje",
+        "donde": "crates/kara-fs/src/trash/mod.rs, delete_permanently",
+        "porQue": "trash_one rechaza '/' y los puntos de montaje (cb_23) porque vaciarlos no es reversible. En la operacion que YA es irreversible no habia ninguna comprobacion: la llamada entraba a recorrer el arbol y a borrar entrada por entrada. CLAUDE.md hace de la seguridad de las operaciones destructivas una regla no negociable.",
+        "demostrado": "delete_permanently('/proc') recorria el arbol hasta morir en /proc/fb con PermissionDenied, en vez de negarse.",
+        "arreglo": "Se rechazan '/' y los puntos de montaje, y deliberadamente NADA MAS de refuse_special_path: vaciar la papelera consiste en llamar a esta funcion sobre rutas de dentro de la papelera, y rechazarlas romperia esa conveniencia futura.",
+        "pruebas": "sup_05 (punto de montaje). La guarda de '/' se deja sin prueba a proposito: comprobar que una prueba falla contra el codigo sin arreglar exigiria ejecutar delete_permanently('/') sobre un arbol sin guarda."
+      },
+      {
+        "id": "sup_h5",
+        "severidad": "media",
+        "titulo": "restore_item usaba rename(2) a secas: la ruta de deshacer podia pisar un fichero del usuario",
+        "donde": "crates/kara-fs/src/trash/mod.rs, restore_item",
+        "porQue": "resolve_restore_destination comprueba que el destino este libre y despues renombra. Entre las dos cosas otro proceso, o una descarga en curso, puede crear justo ese fichero, y rename lo destruye sin decir nada. place_in_trash ya usaba RENAME_NOREPLACE contra esta misma clase de carrera; la ruta de deshacer, que es el eje de la conveniencia ('debe ser deshacible con Ctrl+Z'), no.",
+        "arreglo": "Fail y KeepBoth renombran con RENAME_NOREPLACE y mapean EEXIST a DestinationExists; Overwrite conserva el rename que pisa, que es lo que el llamador pidio explicitamente.",
+        "pruebas": "ninguna: la carrera no se puede provocar de forma determinista sin inyectar un retardo en src/. Se deja constar en vez de anadir una prueba que pase con y sin el arreglo."
+      },
+      {
+        "id": "sup_h6",
+        "severidad": "media",
+        "titulo": "RENAME_NOREPLACE no existe en todos los sistemas de ficheros: 'Enviar a la papelera' no funcionaba en NFS ni en varios FUSE",
+        "donde": "crates/kara-fs/src/trash/mod.rs, place_in_trash (renameat_with con RenameFlags::NOREPLACE)",
+        "porQue": "renameat2 devuelve ENOSYS en kernels < 3.15 y EINVAL/EOPNOTSUPP para el flag en NFS, varios montajes FUSE y overlayfs antiguos. Ahi el errno caia en classify_io_error -> TrashError::Io y la conveniencia imprescindible fallaba entera en ese volumen. Un explorador de ficheros se encuentra esos montajes a diario.",
+        "arreglo": "rename_noreplace(): ante ENOSYS/EINVAL/EOPNOTSUPP cae a stat + rename simple, que es lo que hacen incondicionalmente las demas implementaciones FreeDesktop, y lo documenta. La reserva del nombre via .trashinfo con O_EXCL (cb_08) sigue cubriendo el otro lado de la carrera.",
+        "pruebas": "ninguna: haria falta un sistema de ficheros sin renameat2 montado en la maquina."
+      },
+      {
+        "id": "sup_h7",
+        "severidad": "baja",
+        "titulo": "restore_item se traga el fallo al borrar el .trashinfo",
+        "donde": "crates/kara-fs/src/trash/mod.rs, restore_item (`let _ = std::fs::remove_file(&item.info_path)`)",
+        "porQue": "CLAUDE.md: 'cada error se propaga o se reporta'. Si el .trashinfo sobrevive al fichero, la vista de papelera ensena una entrada fantasma. RestoreError no tiene ninguna variante capaz de decir 'restaurado, pero el registro se quedo' sin mentir diciendo que la restauracion fallo, y la firma es normativa.",
+        "arreglo": "Documentado en el codigo (el lector de la papelera debe tratar como rancia una entrada sin fichero). Queda como specGap sg_02."
+      },
+      {
+        "id": "sup_h8",
+        "severidad": "baja",
+        "titulo": "La documentacion de TrashObserver::on_bytes era falsa",
+        "donde": "crates/kara-fs/src/trash/mod.rs, trait TrashObserver",
+        "porQue": "Decia 'Only ever called during an authorised cross-device copy or during delete_permanently', pero apparent_size la llama tambien al medir un elemento contra max_item_bytes. La invariante que el contrato enuncia para on_bytes solo se cumple cuando max_item_bytes es None.",
+        "arreglo": "Doc corregida diciendo exactamente cuando se llama y que cb_02 se sigue cumpliendo (rename puro sin limite de tamano no la llama nunca)."
+      }
+    ],
+    "specGaps": [
+      {
+        "id": "sg_01",
+        "severidad": "bloqueante",
+        "titulo": "Nadie inyecta el desplazamiento horario local, asi que la fecha de borrado es UTC",
+        "queDiceLaSpec": "05-operaciones, 'Enviar a la papelera': «debe registrar la ruta original y la fecha para poder restaurar», y la nota que adopta FreeDesktop, cuyo DeletionDate es hora local sin zona. La spec presupone interoperar con Dolphin/Nautilus.",
+        "queFalta": "El contrato exigio inyectar el offset (para que la prueba fuera determinista) pero no definio quien lo calcula ni con que. TrashPolicy::default() vale 0. kara-fs tiene prohibido leer la zona y no tiene dependencia capaz de parsear /etc/localtime.",
+        "quienLoResuelve": "kara-ops, antes de que la UI envie nada a la papelera: rellenar utc_offset_seconds con el offset local real, y anadir en su propio contrato una prueba que compare el DeletionDate escrito con el que produce `gio trash` para el mismo instante.",
+        "verificable": "Con XDG_DATA_HOME redirigido, borrar el mismo fichero con gio y con Kara y comparar la linea DeletionDate."
+      },
+      {
+        "id": "sg_02",
+        "severidad": "media",
+        "titulo": "No hay forma de reportar una restauracion que dejo el .trashinfo detras",
+        "queDiceLaSpec": "05-operaciones, 'Deshacer': «si el estado cambio ... avisar en vez de fallar en silencio». CLAUDE.md: nada de operaciones silenciosas.",
+        "queFalta": "restore_item devuelve Result<PathBuf, RestoreError> y ninguna de las dos ramas describe 'el fichero volvio pero el registro se quedo'. Hoy el fallo se ignora.",
+        "quienLoResuelve": "El contrato de 'Vaciar la papelera' / la vista de papelera: el lector debe tratar como rancia toda entrada de info/ sin su pareja en files/, y ofrecer limpiarla."
+      },
+      {
+        "id": "sg_03",
+        "severidad": "media",
+        "titulo": "La deteccion del punto de montaje es lexica: un ancestro que sea enlace simbolico coloca la papelera de volumen en un directorio cualquiera",
+        "queDiceLaSpec": "05-operaciones, nota: «papeleras por volumen (.Trash-<uid>)», que en FreeDesktop viven en el topdir, es decir en el punto de montaje.",
+        "queFalta": "topdir_of camina los padres lexicos con lstat. Con /casa/enlace -> /mnt/vol, borrar /casa/enlace/sub/f.txt crea la papelera en /mnt/vol/sub/.Trash-<uid> en vez de en /mnt/vol: se siembran papeleras sueltas por directorios del usuario y la vista de papelera no las encontrara. Verificado en la maquina. glib hace la misma travesia lexica, asi que NO es una desviacion de la implementacion de referencia, y arreglarlo aqui chocaria con cb_03 (original_path debe ser la ruta previa, sin canonizar).",
+        "quienLoResuelve": "kara-ops: canonizar los ancestros de la seleccion antes de llamar a kara-fs, dejando intacto el ultimo componente para no seguir el enlace que se quiere borrar (cb_22)."
+      },
+      {
+        "id": "sg_04",
+        "severidad": "baja",
+        "titulo": "probe_trash no puede cancelarse cuando hay limite de tamano",
+        "queDiceLaSpec": "06-contexto-power: «borrar carpetas grandes muestra progreso y permite cancelar»; CLAUDE.md: el listado nunca bloquea la UI.",
+        "queFalta": "La firma normativa de probe_trash no lleva observador, asi que la travesia que mide el elemento contra max_item_bytes corre sin poder cancelarse. Esta acotada por el limite, pero un limite alto sobre un arbol enorme bloquea el hilo que llame.",
+        "quienLoResuelve": "kara-ops: llamar a probe_trash desde su worker, nunca desde el hilo de la UI; o un contrato posterior que le anada observador."
+      },
+      {
+        "id": "sg_05",
+        "severidad": "baja",
+        "titulo": "El contrato definia TrashPolicy sin ninguna via para inyectar lo que el mismo contrato exigia inyectar",
+        "queDiceLaSpec": "n/a: es un hueco del contrato, no de la spec.",
+        "queFalta": "apiPublica fija TrashPolicy con cuatro campos y a la vez manda que el offset de DeletionDate se inyecte. La implementacion tuvo que anadir utc_offset_seconds. La extension es correcta y necesaria; queda anotada para que no se lea como una desviacion.",
+        "quienLoResuelve": "Ya resuelto en la implementacion; se documenta aqui."
+      }
+    ],
+    "meParecereriaMejorPeroLaSpecNoLoExige": [
+      "gio se niega a usar papelera en 'system internal mounts' (tmpfs, /run, /dev/shm) y falla en voz alta; Kara crea .Trash-<uid> ahi sin objecion. Sembrar papeleras en tmpfs es ruido, pero la spec no pide ninguna lista de sistemas de ficheros excluidos.",
+      "El juego de percent-encoding de Kara es un subconjunto del de gio (deja literales + & = , ; : @ ' ( ) ! *). Yo escaparia lo mismo que gio por pura simetria al comparar ficheros, pero cb_06 dice 'como minimo' y el decodificado es identico.",
+      "DeletionDate::parse acepta un 31 de febrero (valida rangos, no el calendario). La spec no pide validacion de calendario y un .trashinfo ajeno con fecha imposible no impide restaurar.",
+      "ensure_dir crea el directorio con la umask y le pone 0700 despues: hay una ventana en la que la papelera del hogar es 0755. Un mkdir con modo explicito la cerraria. La spec no habla de esa ventana."
+    ],
+    "pruebasAnadidas": {
+      "fichero": "crates/kara-fs/tests/trash_supervisor.rs",
+      "nota": "Propiedad del supervisor. Los cuatro ficheros de prueba originales NO se tocaron: sus sha256 siguen cuadrando.",
+      "verificacionDeDiscriminacion": "Ejecutadas contra el codigo anterior al arreglo (git stash de dir.rs y mod.rs, conservando solo la variante nueva del enum para que compilara): las 5 fallan, cada una con el sintoma exacto que documenta su doc-comment. sup_02 hay que ejecutarla aislada (comparte /dev/shm/.Trash-<uid> con sup_01).",
+      "casos": [
+        "sup_01 ... trash_uid_que_es_un_enlace: antes -> Ok(TrashedItem) con el fichero dentro del senuelo",
+        "sup_02 ... probe_avisa_de_la_trash_uid_que_es_un_enlace: antes -> Ok(Available { kind: Volume, would_create: false })",
+        "sup_03 ... probe_rechaza_la_raiz: antes -> Ok(Available { kind: Home })",
+        "sup_04 ... probe_rechaza_una_ruta_relativa: antes -> Err(NotFound)",
+        "sup_05 ... delete_permanently_rechaza_un_punto_de_montaje: antes -> Err(PermissionDenied { path: /proc/fb }) tras recorrer el arbol"
+      ]
+    }
+  }
 }

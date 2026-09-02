@@ -176,6 +176,46 @@ fn is_valid_shared_trash_dir(dot_trash: &Path) -> Result<bool, TrashError> {
     }
 }
 
+/// State of a volume trash root (`$topdir/.Trash-$uid`, or `$topdir/.Trash/$uid`)
+/// before anything is written into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VolumeRootState {
+    /// Nothing is there: it can be created if the policy allows it.
+    Missing,
+    /// A real directory owned by this user.
+    Usable,
+    /// Something is there, but following it would be unsafe.
+    Rejected,
+}
+
+/// The same distrust `is_valid_shared_trash_dir` applies to `$topdir/.Trash`,
+/// applied to the trash root that actually gets written into.
+///
+/// `$topdir` is frequently world-writable (that is the whole reason the shared
+/// `.Trash` needs a sticky bit), so anybody can pre-create `.Trash-$uid` there
+/// as a symbolic link pointing wherever they like. Following it would move
+/// this user's deleted files, and their `.trashinfo` records, straight into
+/// somebody else's directory — silently, since the operation would otherwise
+/// succeed. `stat`-based checks such as `Path::is_dir` follow symlinks and
+/// cannot see this; `lstat` can. The ownership check is the same one glib's
+/// local trash backend applies before reusing an existing `.Trash-$uid`.
+fn volume_root_state(root: &Path) -> Result<VolumeRootState, TrashError> {
+    match std::fs::symlink_metadata(root) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink()
+                || !metadata.is_dir()
+                || metadata.uid() != current_uid()
+            {
+                Ok(VolumeRootState::Rejected)
+            } else {
+                Ok(VolumeRootState::Usable)
+            }
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(VolumeRootState::Missing),
+        Err(source) => Err(classify_io_error(root, source)),
+    }
+}
+
 /// Where the volume trash for `path` would live, without creating anything.
 fn volume_candidate(path: &Path) -> Result<(PathBuf, PathBuf), TrashError> {
     let top_dir = topdir_of(path)?;
@@ -247,7 +287,14 @@ fn build_volume_trash_dir(
     policy: &TrashPolicy,
     original_path: &Path,
 ) -> Result<TrashDir, TrashError> {
-    if !root.is_dir() {
+    let state = volume_root_state(&root)?;
+    if state == VolumeRootState::Rejected {
+        return Err(TrashError::NoTrashOnVolume {
+            path: original_path.to_path_buf(),
+            reason: UnavailableReason::VolumeTrashRejected,
+        });
+    }
+    if state == VolumeRootState::Missing {
         if !policy.create_volume_trash {
             return Err(TrashError::NoTrashOnVolume {
                 path: original_path.to_path_buf(),
@@ -317,13 +364,30 @@ pub fn resolve_trash_dir(path: &Path, policy: &TrashPolicy) -> Result<TrashDir, 
 /// Answers whether `path` could be trashed. Never creates, writes or moves
 /// anything, even when the policy allows creating a volume trash.
 pub fn probe_trash(path: &Path, policy: &TrashPolicy) -> Result<TrashAvailability, TrashError> {
+    // A probe whose answer disagrees with what `trash_one` would then do is
+    // worse than no probe at all: the point of asking first is to warn before
+    // acting (cb_10, cb_25), so a path `trash_one` refuses outright — `/`, a
+    // relative path, an ancestor of the trash itself — must be refused here
+    // with the very same error instead of being reported as trashable
+    // (cb_23). The one refusal kept in `Unavailable` form is a path already
+    // inside the trash, which is a *state* a caller can display next to the
+    // other availability reasons rather than a programming error.
+    match super::refuse_special_path(path) {
+        Ok(()) => {}
+        Err(TrashError::PathIsInsideTrash { .. }) => {
+            return Ok(TrashAvailability::Unavailable {
+                reason: UnavailableReason::PathIsInsideTrash,
+            });
+        }
+        Err(error) => return Err(error),
+    }
+
     let metadata = lstat(path)?;
 
-    // These two mirror the hard refusals `trash_one` applies before moving
-    // anything (cb_23), but surfaced the way `probe` reports everything
-    // else: as a typed reason to show *before* acting, not an error only
-    // discovered after the fact (cb_12's "the reason is exposed as
-    // ... in probe").
+    // Mirrors the rest of the refusals `trash_one` applies before moving
+    // anything (cb_23), surfaced the way `probe` reports everything else: as a
+    // typed reason to show *before* acting, not an error only discovered after
+    // the fact (cb_12's "the reason is exposed as ... in probe").
     if let Ok(home_root) = home_trash_root()
         && (path.starts_with(home_root.join("files")) || path.starts_with(home_root.join("info")))
     {
@@ -374,12 +438,20 @@ pub fn probe_trash(path: &Path, policy: &TrashPolicy) -> Result<TrashAvailabilit
     }
 
     let (top_dir, candidate_root) = volume_candidate(path)?;
-    if candidate_root.is_dir() {
-        return Ok(TrashAvailability::Available {
-            kind: TrashKind::Volume,
-            would_create: false,
-            free_bytes: free_bytes_on(&candidate_root),
-        });
+    match volume_root_state(&candidate_root)? {
+        VolumeRootState::Usable => {
+            return Ok(TrashAvailability::Available {
+                kind: TrashKind::Volume,
+                would_create: false,
+                free_bytes: free_bytes_on(&candidate_root),
+            });
+        }
+        VolumeRootState::Rejected => {
+            return Ok(TrashAvailability::Unavailable {
+                reason: UnavailableReason::VolumeTrashRejected,
+            });
+        }
+        VolumeRootState::Missing => {}
     }
 
     // `$topdir/.Trash` existing but failing the sticky/real-directory check

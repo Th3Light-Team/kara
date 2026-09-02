@@ -95,8 +95,11 @@ pub trait TrashObserver {
         Flow::Continue
     }
 
-    /// Fine-grained byte progress. Only ever called during an authorised
-    /// cross-device copy or during [`delete_permanently`].
+    /// Fine-grained byte progress. Called during an authorised cross-device
+    /// copy, during [`delete_permanently`], and — once per entry, so that the
+    /// walk stays cancellable — while measuring an item against
+    /// `TrashPolicy::max_item_bytes`. A plain same-volume `rename(2)` with no
+    /// size limit set never calls it (cb_02).
     fn on_bytes(&mut self, copied: u64, total: Option<u64>) -> Flow {
         let _ = (copied, total);
         Flow::Continue
@@ -417,13 +420,7 @@ fn place_in_trash(
         // a crash mid-operation). EEXIST here means the same collision
         // `.trashinfo`'s O_EXCL already guards against, so it is handled the
         // same way: release the reservation and try the next candidate name.
-        match rustix::fs::renameat_with(
-            rustix::fs::CWD,
-            path,
-            rustix::fs::CWD,
-            &target_path,
-            rustix::fs::RenameFlags::NOREPLACE,
-        ) {
+        match rename_noreplace(path, &target_path) {
             Ok(()) => {
                 return Ok(TrashedItem {
                     original_path: path.to_path_buf(),
@@ -492,6 +489,39 @@ fn place_in_trash(
                 return Err(classify_io_error(path, source.into()));
             }
         }
+    }
+}
+
+/// `rename(2)` that refuses to clobber an existing destination, reporting the
+/// collision as `EEXIST`.
+///
+/// `RENAME_NOREPLACE` is the only way to make that atomic, but `renameat2` is
+/// not universally available: kernels older than 3.15 answer `ENOSYS`, and
+/// several filesystems a file manager routinely meets — NFS, some FUSE mounts,
+/// older overlayfs — answer `EINVAL` or `EOPNOTSUPP` for the flag even on a
+/// modern kernel. Failing there would mean "send to trash" simply does not
+/// work on those mounts, which is worse than the degradation this fallback
+/// accepts: a `stat` followed by a plain rename, which is what every other
+/// FreeDesktop implementation does unconditionally. The window between the two
+/// is narrow and, for the trash, already guarded on the other side by the
+/// `.trashinfo` name reservation (cb_08).
+fn rename_noreplace(from: &Path, to: &Path) -> Result<(), rustix::io::Errno> {
+    match rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        from,
+        rustix::fs::CWD,
+        to,
+        rustix::fs::RenameFlags::NOREPLACE,
+    ) {
+        Err(rustix::io::Errno::NOSYS)
+        | Err(rustix::io::Errno::INVAL)
+        | Err(rustix::io::Errno::OPNOTSUPP) => {
+            if std::fs::symlink_metadata(to).is_ok() {
+                return Err(rustix::io::Errno::EXIST);
+            }
+            rustix::fs::renameat(rustix::fs::CWD, from, rustix::fs::CWD, to)
+        }
+        other => other,
     }
 }
 
@@ -836,14 +866,38 @@ pub fn restore_item(
         return Err(classify_parent_or_volume_error(parent, source));
     }
 
-    match std::fs::rename(&item.trashed_path, &destination) {
+    // Only `Overwrite` may land on an occupied path. For the other two the
+    // check above is not enough on its own: between it and the rename another
+    // process — or the user, or a running download — can create the very file
+    // the check just found free, and a plain `rename(2)` would destroy it
+    // without a word. Undo is the operation the whole convenience is built
+    // around ("la operación debe ser deshacible con Ctrl+Z"), so it is the
+    // last place that may lose a file (cb_16).
+    let renamed = if on_conflict == ConflictPolicy::Overwrite {
+        rustix::fs::renameat(
+            rustix::fs::CWD,
+            &item.trashed_path,
+            rustix::fs::CWD,
+            &destination,
+        )
+    } else {
+        rename_noreplace(&item.trashed_path, &destination)
+    };
+
+    match renamed {
         Ok(()) => {
+            // A `.trashinfo` that outlives its `files/` entry leaves a phantom
+            // row in the trash view. Nothing in `RestoreError` can describe
+            // "restored, but the record stayed behind" without claiming the
+            // restore failed, so the cleanup is best-effort here and the trash
+            // reader is expected to treat an entry with no file as stale.
             let _ = std::fs::remove_file(&item.info_path);
             Ok(destination)
         }
+        Err(rustix::io::Errno::EXIST) => Err(RestoreError::DestinationExists { destination }),
         Err(source) => Err(RestoreError::Io {
             path: destination,
-            source,
+            source: source.into(),
         }),
     }
 }
@@ -884,7 +938,20 @@ pub fn delete_permanently(
     path: &Path,
     observer: &mut dyn TrashObserver,
 ) -> Result<u64, TrashError> {
+    // The same two refusals `trash_one` applies (cb_23) matter more here, not
+    // less: this is the irreversible half of the pair, and "reversibilidad por
+    // defecto" (00-filosofia) has nothing left to fall back on once the walk
+    // starts. Only `/` and mount points are refused, deliberately not the rest
+    // of `refuse_special_path`: emptying the trash means calling this on paths
+    // that live *inside* the trash, and refusing those would break it.
+    if path == Path::new("/") {
+        return Err(TrashError::RefusedSpecialPath {
+            path: path.to_path_buf(),
+            reason: RefusalReason::Root,
+        });
+    }
     let metadata = dir::lstat(path)?;
+    refuse_mount_point(path, &metadata)?;
     let mut removed: u64 = 0;
     delete_recursive(path, &metadata, observer, &mut removed)?;
     Ok(removed)

@@ -18,6 +18,14 @@ pub enum UnavailableReason {
     TopDirNotWritable,
     /// `$topdir/.Trash` exists but failed the sticky/real-directory checks.
     StickyTrashRejected,
+    /// The volume trash root itself (`$topdir/.Trash-$uid`, or the `$uid`
+    /// subdirectory of a validated `$topdir/.Trash`) exists but is not
+    /// trustworthy: a symbolic link, something that is not a directory, or a
+    /// directory owned by another user. On a volume whose top directory is
+    /// writable by everybody — the usual removable drive — anybody could have
+    /// planted it, so following it would hand this user's deleted files to
+    /// whoever it points at.
+    VolumeTrashRejected,
     /// `$topdir/.Trash-$uid` is missing and the policy forbids creating it.
     VolumeTrashMissingAndCreationDisabled,
     /// The path already lives inside a trash directory.
