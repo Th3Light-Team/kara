@@ -2,7 +2,7 @@
   "conveniencia": "Ordenar por (nombre, fecha de modificación, tipo, tamaño…)",
   "crate": "kara-core",
   "slug": "ordenar-por-nombre-fecha-de-modificacion-tipo-tamano",
-  "estado": "aprobada_con_deuda",
+  "estado": "aprobada",
   "commit": "1ff6b7a",
   "pruebas": {
     "testFiles": [
@@ -33,7 +33,7 @@
     "huecoRestante": "Mapeos multi-char (U+0130 turco -> i + U+0307) se dejan sin plegar: plegarlos exigiria un atomo multi-caracter y una asignacion por nombre. Documentado en el doc comment. Dos code points, no todo Latin Extended."
   },
   "specGapsPendientes": 7,
-  "actualizado": "2026-09-02T11:58:01-04:00",
+  "actualizado": "2026-09-02T12:02:15-04:00",
   "deudaDePruebas": {
     "estado": "SALDADA",
     "cubierto": [
@@ -53,5 +53,6 @@
     "Mapeos multi-caracter distintos de U+0130 (ß -> ss, ﬁ -> fi, U+1E9E) no tienen test propio: comparten la misma rama de to_lowercase que U+0130, ya fijada en case_48.",
     "Titlecase (dígrafos U+01C5 ǅ, U+01C8 ǈ) sin cubrir: to_lowercase los mapea 1:1, pero no hay caso que lo fije.",
     "Plegado fuera del BMP (Deseret U+10400/U+10428, Adlam) sin cubrir."
-  ]
+  ],
+  "notaEstado": "Cerrada. El bloqueante de plegado se arreglo (1ff6b7a) y el supervisor anadio los tests de regresion (ceecd34), verificados fallando contra las dos implementaciones erroneas plausibles. Quedan 7 specGaps y 3 huecos de prueba anotados, ninguno bloqueante."
 }
