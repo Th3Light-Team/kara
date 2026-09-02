@@ -17,5 +17,7 @@ pub mod conflict;
 pub use clock::{local_utc_offset_seconds, trash_policy};
 pub use batch::{BatchPolicy, BatchReport, ErrorDecision, Failure, FailureKind};
 pub use conflict::{
-    ConflictDecisions, ConflictKind, Resolution, ResolutionCounts, split_name, unique_name,
+    ConflictDecisions, ConflictKind, Resolution, ResolutionCounts,
 };
+// Reexportados desde kara-core, donde viven para que kara-fs pueda usarlos.
+pub use kara_core::{split_name, unique_name};

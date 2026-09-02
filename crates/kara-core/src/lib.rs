@@ -11,6 +11,7 @@ pub mod completion;
 pub mod entry;
 pub mod filter;
 pub mod history;
+pub mod naming;
 pub mod sort;
 pub mod typeahead;
 
@@ -19,6 +20,7 @@ pub use entry::{EntryKind, FileEntry, MetadataBag, MetadataKey, MetadataValue};
 pub use completion::{Completer, PathInput, Source, Suggestion, Suggestions, split_input};
 pub use filter::{NameDisplay, NameFilter, Visibility, base_and_extension};
 pub use history::{History, HistoryEntry, ViewState};
+pub use naming::{split_name, unique_name};
 pub use typeahead::TypeAhead;
 pub use sort::{
     Collation, CollationKey, ColumnId, DirectoryGrouping, SortError, SortKey, SortOrder,
