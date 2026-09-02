@@ -12,6 +12,10 @@
 //!   como salida explícita para volúmenes sin papelera; nunca se invoca sola.
 //! - **Manejo de errores con reintentar / omitir / cancelar**
 //!   (§ «Manejo de errores»): un fallo por elemento no aborta el lote.
+//! - **Listar la papelera**, base de «Restaurar desde la papelera» y
+//!   «Vaciar la papelera»: empareja `info/` con `files/` en la papelera
+//!   personal y en la de cada volumen, sin abortar por un `.trashinfo`
+//!   ilegible ni por una entrada desemparejada — ver [`listing`].
 //!
 //! Esta capa no pregunta ni confirma nada: el ajuste de confirmación y los
 //! diálogos viven por encima (`ground/spec/06-contexto-power.md`).
@@ -19,6 +23,7 @@
 mod dir;
 mod error;
 mod info;
+mod listing;
 
 pub use dir::{
     TrashAvailability, TrashDir, TrashKind, TrashPolicy, home_trash_dir, probe_trash,
@@ -26,6 +31,10 @@ pub use dir::{
 };
 pub use error::{RefusalReason, RestoreError, TrashError, TrashInfoError, UnavailableReason};
 pub use info::{DeletionDate, TrashInfo, read_trash_info};
+pub use listing::{
+    EmptyOutcome, TrashEntry, TrashListing, delete_trash_entry, empty_trash, empty_trash_in,
+    list_trash, list_trash_in,
+};
 
 use std::ffi::OsStr;
 use std::io::{Read, Write};
