@@ -57,6 +57,17 @@ Window {
         sequence: "Ctrl+F"
         onActivated: filterField.forceActiveFocus()
     }
+    Shortcut {
+        sequence: "F9"
+        onActivated: app.toggle_sidebar()
+    }
+
+    // Ancho del panel de navegación. La spec lo quiere persistente entre
+    // sesiones; hoy no hay dónde guardarlo, así que vuelve a su sitio al
+    // arrancar.
+    property int sidebarWidth: 240
+    readonly property int sidebarMin: 160
+    readonly property int sidebarMax: 480
 
     ColumnLayout {
         anchors.fill: parent
@@ -129,6 +140,11 @@ Window {
                 anchors.rightMargin: 10
                 spacing: 2
 
+                NavButton {
+                    glyph: "☰"
+                    tip: qsTr("Panel de navegación (F9)")
+                    onClicked: app.toggle_sidebar()
+                }
                 NavButton {
                     glyph: "←"
                     tip: qsTr("Atrás (Alt+←)")
@@ -227,102 +243,65 @@ Window {
             color: Theme.divider
         }
 
-        // ---- Contenido -------------------------------------------------------
-        Rectangle {
+        // ---- Cuerpo: panel de navegación + contenido -------------------------
+        RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            color: Theme.content
+            spacing: 0
 
-            // Cabecera de columnas. Todavía es un rótulo: ordenar pulsando aquí
-            // llega con la vista de detalles completa.
-            Rectangle {
-                id: columnHeader
-                anchors.top: parent.top
-                anchors.left: parent.left
-                anchors.right: parent.right
-                height: 30
-                color: Theme.content
+            Sidebar {
+                app: app
+                visible: app.sidebar_visible
+                Layout.preferredWidth: win.sidebarWidth
+                Layout.fillHeight: true
+            }
 
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 14
-                    anchors.rightMargin: 22
-                    spacing: 12
-
-                    Text {
-                        text: qsTr("Nombre")
-                        Layout.fillWidth: true
-                        Layout.preferredWidth: 320
-                        Layout.maximumWidth: 560
-                        color: Theme.headerText
-                        font.family: Theme.family
-                        font.pixelSize: Theme.sizeSmall
-                    }
-                    Text {
-                        text: qsTr("Tipo")
-                        Layout.preferredWidth: 140
-                        color: Theme.headerText
-                        font.family: Theme.family
-                        font.pixelSize: Theme.sizeSmall
-                    }
-                    Text {
-                        text: qsTr("Tamaño")
-                        Layout.preferredWidth: 110
-                        horizontalAlignment: Text.AlignRight
-                        color: Theme.headerText
-                        font.family: Theme.family
-                        font.pixelSize: Theme.sizeSmall
-                    }
-                    // Lo que sobra a la derecha se deja en blanco: estirar las
-                    // columnas hasta el borde en una pantalla ancha separa el
-                    // nombre de su tamaño hasta hacerlos ilegibles juntos.
-                    Item {
-                        Layout.fillWidth: true
-                        Layout.preferredWidth: 0
-                    }
-                }
+            // Separador arrastrable. Es ancho para poder agarrarlo y pinta una
+            // línea de un píxel: un divisor de un píxel es imposible de coger.
+            Item {
+                visible: app.sidebar_visible
+                Layout.preferredWidth: 5
+                Layout.fillHeight: true
 
                 Rectangle {
-                    anchors.bottom: parent.bottom
-                    width: parent.width
-                    height: 1
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    width: 1
+                    height: parent.height
                     color: Theme.divider
+                }
+
+                MouseArea {
+                    id: splitter
+                    anchors.fill: parent
+                    cursorShape: Qt.SplitHCursor
+                    property real grabbedAt: 0
+
+                    onPressed: mouse => {
+                        splitter.grabbedAt = mouse.x;
+                    }
+                    onPositionChanged: mouse => {
+                        if (!splitter.pressed)
+                            return;
+                        const propuesto = win.sidebarWidth + mouse.x - splitter.grabbedAt;
+                        win.sidebarWidth = Math.max(win.sidebarMin, Math.min(win.sidebarMax, propuesto));
+                    }
                 }
             }
 
-            ListView {
-                id: fileList
-                anchors.top: columnHeader.bottom
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                clip: true
-                focus: true
-                model: app.entry_count
-                currentIndex: -1
-                highlightMoveDuration: 0
-                ScrollBar.vertical: ScrollBar {}
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                color: Theme.content
 
-                delegate: Item {
-                    id: row
-
-                    required property int index
-                    readonly property bool current: fileList.currentIndex === row.index
-
-                    width: fileList.width
-                    height: Theme.rowHeight
-
-                    Rectangle {
-                        anchors.fill: parent
-                        anchors.leftMargin: 4
-                        anchors.rightMargin: 4
-                        radius: Theme.radius
-                        color: {
-                            if (row.current)
-                                return Theme.selection;
-                            return rowArea.containsMouse ? Theme.hover : "transparent";
-                        }
-                    }
+                // Cabecera de columnas. Todavía es un rótulo: ordenar pulsando aquí
+                // llega con la vista de detalles completa.
+                Rectangle {
+                    id: columnHeader
+                    anchors.top: parent.top
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    height: 30
+                    color: Theme.content
 
                     RowLayout {
                         anchors.fill: parent
@@ -331,74 +310,156 @@ Window {
                         spacing: 12
 
                         Text {
-                            text: app.entry_names[row.index] ?? ""
+                            text: qsTr("Nombre")
                             Layout.fillWidth: true
                             Layout.preferredWidth: 320
                             Layout.maximumWidth: 560
-                            elide: Text.ElideMiddle
-                            color: Theme.text
+                            color: Theme.headerText
                             font.family: Theme.family
-                            font.pixelSize: Theme.sizeBase
+                            font.pixelSize: Theme.sizeSmall
                         }
                         Text {
-                            text: app.entry_kinds[row.index] ?? ""
+                            text: qsTr("Tipo")
                             Layout.preferredWidth: 140
-                            color: Theme.textDim
+                            color: Theme.headerText
                             font.family: Theme.family
-                            font.pixelSize: Theme.sizeBase
+                            font.pixelSize: Theme.sizeSmall
                         }
                         Text {
-                            text: app.entry_sizes[row.index] ?? ""
+                            text: qsTr("Tamaño")
                             Layout.preferredWidth: 110
                             horizontalAlignment: Text.AlignRight
-                            color: Theme.textDim
+                            color: Theme.headerText
                             font.family: Theme.family
-                            font.pixelSize: Theme.sizeBase
+                            font.pixelSize: Theme.sizeSmall
                         }
+                        // Lo que sobra a la derecha se deja en blanco: estirar las
+                        // columnas hasta el borde en una pantalla ancha separa el
+                        // nombre de su tamaño hasta hacerlos ilegibles juntos.
                         Item {
                             Layout.fillWidth: true
                             Layout.preferredWidth: 0
                         }
                     }
 
-                    MouseArea {
-                        id: rowArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        acceptedButtons: Qt.LeftButton | Qt.RightButton
-                        onClicked: mouse => {
-                            fileList.currentIndex = row.index;
-                            if (mouse.button === Qt.RightButton)
-                                rowMenu.popup();
-                        }
-                        onDoubleClicked: {
-                            if (app.entry_kinds[row.index] === "Carpeta")
-                                app.cd(app.entry_names[row.index]);
-                        }
+                    Rectangle {
+                        anchors.bottom: parent.bottom
+                        width: parent.width
+                        height: 1
+                        color: Theme.divider
                     }
+                }
 
-                    Menu {
-                        id: rowMenu
-                        MenuItem {
-                            text: qsTr("Enviar a la papelera")
-                            onTriggered: app.trash(app.entry_names[row.index])
+                ListView {
+                    id: fileList
+                    anchors.top: columnHeader.bottom
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    clip: true
+                    focus: true
+                    model: app.entry_count
+                    currentIndex: -1
+                    highlightMoveDuration: 0
+                    ScrollBar.vertical: ScrollBar {}
+
+                    delegate: Item {
+                        id: row
+
+                        required property int index
+                        readonly property bool current: fileList.currentIndex === row.index
+
+                        width: fileList.width
+                        height: Theme.rowHeight
+
+                        Rectangle {
+                            anchors.fill: parent
+                            anchors.leftMargin: 4
+                            anchors.rightMargin: 4
+                            radius: Theme.radius
+                            color: {
+                                if (row.current)
+                                    return Theme.selection;
+                                return rowArea.containsMouse ? Theme.hover : "transparent";
+                            }
+                        }
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 14
+                            anchors.rightMargin: 22
+                            spacing: 12
+
+                            Text {
+                                text: app.entry_names[row.index] ?? ""
+                                Layout.fillWidth: true
+                                Layout.preferredWidth: 320
+                                Layout.maximumWidth: 560
+                                elide: Text.ElideMiddle
+                                color: Theme.text
+                                font.family: Theme.family
+                                font.pixelSize: Theme.sizeBase
+                            }
+                            Text {
+                                text: app.entry_kinds[row.index] ?? ""
+                                Layout.preferredWidth: 140
+                                color: Theme.textDim
+                                font.family: Theme.family
+                                font.pixelSize: Theme.sizeBase
+                            }
+                            Text {
+                                text: app.entry_sizes[row.index] ?? ""
+                                Layout.preferredWidth: 110
+                                horizontalAlignment: Text.AlignRight
+                                color: Theme.textDim
+                                font.family: Theme.family
+                                font.pixelSize: Theme.sizeBase
+                            }
+                            Item {
+                                Layout.fillWidth: true
+                                Layout.preferredWidth: 0
+                            }
+                        }
+
+                        MouseArea {
+                            id: rowArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            onClicked: mouse => {
+                                fileList.currentIndex = row.index;
+                                if (mouse.button === Qt.RightButton)
+                                    rowMenu.popup();
+                            }
+                            onDoubleClicked: {
+                                if (app.entry_kinds[row.index] === "Carpeta")
+                                    app.cd(app.entry_names[row.index]);
+                            }
+                        }
+
+                        Menu {
+                            id: rowMenu
+                            MenuItem {
+                                text: qsTr("Enviar a la papelera")
+                                onTriggered: app.trash(app.entry_names[row.index])
+                            }
                         }
                     }
                 }
-            }
 
-            // Vacío explícito: una lista en blanco no distingue «carpeta vacía»
-            // de «el filtro no deja pasar nada», y son dos situaciones distintas.
-            Text {
-                anchors.centerIn: parent
-                visible: app.entry_count === 0
-                width: parent.width - 60
-                horizontalAlignment: Text.AlignHCenter
-                wrapMode: Text.WordWrap
-                color: Theme.textDim
-                font.family: Theme.family
-                font.pixelSize: Theme.sizeBase
-                text: app.total_count === 0 ? qsTr("Esta carpeta está vacía") : qsTr("Ningún elemento coincide con el filtro")
+                // Vacío explícito: una lista en blanco no distingue «carpeta vacía»
+                // de «el filtro no deja pasar nada», y son dos situaciones distintas.
+                Text {
+                    anchors.centerIn: parent
+                    visible: app.entry_count === 0
+                    width: parent.width - 60
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                    color: Theme.textDim
+                    font.family: Theme.family
+                    font.pixelSize: Theme.sizeBase
+                    text: app.total_count === 0 ? qsTr("Esta carpeta está vacía") : qsTr("Ningún elemento coincide con el filtro")
+                }
             }
         }
 

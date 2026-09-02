@@ -148,17 +148,23 @@ velocidad y ETA, pila de deshacer, resolución de conflictos) y `kara-index`
 **UI: el chrome montado sobre datos reales.** Ventana sin marco con barra de
 título propia, barra de comandos con atrás/adelante/subir/refrescar, migas de
 pan navegables con desbordamiento, edición de ruta con Ctrl+L, filtro por nombre
-y barra de estado. El listado sale de `kara-fs`, no de datos falsos.
+y barra de estado. Panel de navegación con Acceso rápido (XDG) y Este equipo
+(raíz y volúmenes montados), árbol con carga diferida que sigue a la carpeta que
+se enseña. El listado sale de `kara-fs`, no de datos falsos.
 
-**Lo que falta de la vista:** panel lateral de navegación, iconos y miniaturas,
-los cuatro modos de vista con zoom, ordenar pulsando en la cabecera, selección
-múltiple, y enchufar a la UI lo que el backend ya ofrece y nadie consume todavía
-(vigilancia, cola, deshacer).
+**Lo que falta de la vista:** iconos y miniaturas, los cuatro modos de vista con
+zoom, ordenar pulsando en la cabecera, selección múltiple, anclar carpetas al
+panel (necesita dónde guardar ajustes), y enchufar a la UI lo que el backend ya
+ofrece y nadie consume todavía (vigilancia, cola, deshacer).
 
 ### Cabos sueltos conocidos
 
 - **Enlazado con `ld.bfd`**: el build avisa de que no hay `mold`, `lld` ni `gold`.
   Funciona, pero un `sudo apt install mold` acorta bastante el ciclo de compilación.
+- **Todo el I/O de listado es síncrono**, y desplegar el panel lo multiplica por
+  la profundidad de la ruta. Una carpeta enorme o un volumen de red colgado
+  bloquean la ventana. La spec lo prohíbe explícitamente: el listado asíncrono
+  es trabajo pendiente, no un detalle.
 - **El binario `qml` de Qt no está**: `qt6-declarative-dev-tools` trae `qmllint`,
   `qmlformat` y `qmlls`, pero no el runtime suelto. Irrelevante para Kara (cxx-qt
   embebe el motor); solo afecta a `ground/run.sh`, que cae a PyQt6.

@@ -13,6 +13,7 @@ pub mod filter;
 pub mod history;
 pub mod naming;
 pub mod sort;
+pub mod tree;
 pub mod typeahead;
 
 pub use breadcrumb::{Collapsed, Segment, SegmentKind, collapse, segments};
@@ -21,6 +22,7 @@ pub use completion::{Completer, PathInput, Source, Suggestion, Suggestions, spli
 pub use filter::{NameDisplay, NameFilter, Visibility, base_and_extension};
 pub use history::{History, HistoryEntry, ViewState};
 pub use naming::{split_name, unique_name};
+pub use tree::{Branch, Expandable, Row, RowKind, Section, SectionId, Tree};
 pub use typeahead::TypeAhead;
 pub use sort::{
     Collation, CollationKey, ColumnId, DirectoryGrouping, SortError, SortKey, SortOrder,

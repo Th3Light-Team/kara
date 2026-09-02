@@ -13,7 +13,11 @@ pub mod trash;
 
 pub mod listing;
 
+pub mod places;
+
 pub use listing::{EntryError, Listing, describe, list_directory, read_hidden_file};
+
+pub use places::{Place, PlaceKind, quick_access, this_computer};
 
 pub mod transfer;
 

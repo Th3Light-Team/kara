@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use kara_core::FileEntry;
 use kara_core::breadcrumb::{Segment, SegmentKind};
 use kara_core::entry::EntryKind;
+use kara_core::tree::SectionId;
+use kara_fs::places::{Place, PlaceKind};
 
 /// Tamaño legible con la escala binaria que usan Windows y Dolphin.
 ///
@@ -54,9 +56,45 @@ pub fn kind_label(entry: &FileEntry) -> &'static str {
 #[must_use]
 pub fn crumb_label(segment: &Segment) -> String {
     match segment.kind {
-        SegmentKind::Root => "Este equipo".to_string(),
+        // El mismo nombre que en el panel: «Este equipo» es la sección que
+        // agrupa la raíz y los volúmenes, no la raíz.
+        SegmentKind::Root => "Sistema de archivos".to_string(),
         SegmentKind::Home => "Inicio".to_string(),
         SegmentKind::Directory => segment.name.to_string_lossy().into_owned(),
+    }
+}
+
+/// Cómo se lee una sección del panel de navegación.
+#[must_use]
+pub fn section_label(id: SectionId) -> &'static str {
+    match id {
+        SectionId::QuickAccess => "Acceso rápido",
+        SectionId::ThisComputer => "Este equipo",
+    }
+}
+
+/// Cómo se lee una ubicación del panel.
+///
+/// Los volúmenes no tienen un nombre nuestro: se llaman como el sistema los
+/// montó, y sin punto de montaje legible no queda más que la ruta.
+#[must_use]
+pub fn place_label(place: &Place) -> String {
+    match place.kind {
+        PlaceKind::Home => "Inicio".to_string(),
+        PlaceKind::Desktop => "Escritorio".to_string(),
+        PlaceKind::Downloads => "Descargas".to_string(),
+        PlaceKind::Documents => "Documentos".to_string(),
+        PlaceKind::Pictures => "Imágenes".to_string(),
+        PlaceKind::Music => "Música".to_string(),
+        PlaceKind::Videos => "Vídeos".to_string(),
+        PlaceKind::Root => "Sistema de archivos".to_string(),
+        PlaceKind::Volume => place
+            .label
+            .as_ref()
+            .map_or_else(
+                || place.path.to_string_lossy().into_owned(),
+                |label| label.to_string_lossy().into_owned(),
+            ),
     }
 }
 
@@ -283,6 +321,6 @@ mod tests {
             Some(Path::new("/home/ana")),
         );
         let labels: Vec<String> = segments.iter().map(crumb_label).collect();
-        assert_eq!(labels, ["Este equipo", "home", "Inicio", "Documentos"]);
+        assert_eq!(labels, ["Sistema de archivos", "home", "Inicio", "Documentos"]);
     }
 }

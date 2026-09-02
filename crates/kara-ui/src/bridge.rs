@@ -18,9 +18,11 @@ use std::path::{Path, PathBuf};
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QString, QStringList};
 use kara_core::breadcrumb;
+use kara_core::entry::EntryKind;
 use kara_core::filter::{NameFilter, Visibility};
 use kara_core::history::History;
 use kara_core::sort::SortSpec;
+use kara_core::tree::{Branch, Expandable, RowKind, Section, SectionId, Tree};
 use kara_fs::list_directory;
 
 use crate::present;
@@ -48,6 +50,18 @@ pub mod qobject {
         #[qproperty(bool, can_go_back)]
         #[qproperty(bool, can_go_forward)]
         #[qproperty(QString, filter_text)]
+        /// Filas del panel de navegación, en listas paralelas. Una cabecera de
+        /// sección se reconoce porque su ruta está vacía: no lleva a ningún
+        /// sitio.
+        #[qproperty(QStringList, nav_labels)]
+        #[qproperty(QStringList, nav_paths)]
+        #[qproperty(QList_i32, nav_depths)]
+        #[qproperty(QList_i32, nav_expandable)]
+        #[qproperty(QList_i32, nav_expanded)]
+        #[qproperty(i32, nav_count)]
+        /// Fila de la carpeta que se está viendo, o -1 si no sale en el panel.
+        #[qproperty(i32, nav_current)]
+        #[qproperty(bool, sidebar_visible)]
         type App = super::AppRust;
 
         /// Entra en una subcarpeta de la actual. Si no se puede listar, no se
@@ -93,13 +107,28 @@ pub mod qobject {
         /// Relee la carpeta actual sin tocar el historial.
         #[qinvokable]
         fn reload(self: Pin<&mut App>);
+
+        /// Despliega o pliega una rama del panel **sin navegar**: la spec exige
+        /// que abrir una rama no mueva la vista principal.
+        #[qinvokable]
+        fn nav_toggle(self: Pin<&mut App>, row: i32);
+
+        /// Navega a la carpeta de una fila del panel.
+        #[qinvokable]
+        fn nav_activate(self: Pin<&mut App>, row: i32);
+
+        /// Enseña u oculta el panel de navegación (F9).
+        #[qinvokable]
+        fn toggle_sidebar(self: Pin<&mut App>);
     }
 
     unsafe extern "C++" {
         include!("cxx-qt-lib/qstring.h");
         include!("cxx-qt-lib/qstringlist.h");
+        include!("cxx-qt-lib/qlist.h");
         type QString = cxx_qt_lib::QString;
         type QStringList = cxx_qt_lib::QStringList;
+        type QList_i32 = cxx_qt_lib::QList<i32>;
     }
 }
 
@@ -118,11 +147,20 @@ pub struct AppRust {
     can_go_back: bool,
     can_go_forward: bool,
     filter_text: QString,
+    nav_labels: QStringList,
+    nav_paths: QStringList,
+    nav_depths: cxx_qt_lib::QList<i32>,
+    nav_expandable: cxx_qt_lib::QList<i32>,
+    nav_expanded: cxx_qt_lib::QList<i32>,
+    nav_count: i32,
+    nav_current: i32,
+    sidebar_visible: bool,
 
     // Estado que no se expone a QML.
     history: History,
     home: Option<PathBuf>,
     crumb_capacity: usize,
+    tree: Tree,
 }
 
 impl Default for AppRust {
@@ -149,9 +187,18 @@ impl Default for AppRust {
             can_go_back: false,
             can_go_forward: false,
             filter_text: QString::default(),
+            nav_labels: QStringList::default(),
+            nav_paths: QStringList::default(),
+            nav_depths: cxx_qt_lib::QList::<i32>::default(),
+            nav_expandable: cxx_qt_lib::QList::<i32>::default(),
+            nav_expanded: cxx_qt_lib::QList::<i32>::default(),
+            nav_count: 0,
+            nav_current: -1,
+            sidebar_visible: true,
             history: History::new(start.clone()),
-            home,
+            home: home.clone(),
             crumb_capacity: DEFAULT_CRUMB_CAPACITY,
+            tree: Tree::new(sections(home.as_deref())),
         };
 
         // Al arrancar no hay ninguna señal que emitir todavía, así que el
@@ -169,6 +216,16 @@ impl Default for AppRust {
             app.overflow_names = snapshot.overflow_names;
             app.overflow_paths = snapshot.overflow_paths;
         }
+
+        app.reveal(&start);
+        let nav = app.nav_view(&start);
+        app.nav_labels = nav.labels;
+        app.nav_paths = nav.paths;
+        app.nav_depths = nav.depths;
+        app.nav_expandable = nav.expandable;
+        app.nav_expanded = nav.expanded;
+        app.nav_count = nav.count;
+        app.nav_current = nav.current;
         app
     }
 }
@@ -237,6 +294,139 @@ impl AppRust {
     }
 }
 
+/// Las filas del panel de navegación, ya formateadas.
+struct NavView {
+    labels: QStringList,
+    paths: QStringList,
+    depths: cxx_qt_lib::QList<i32>,
+    expandable: cxx_qt_lib::QList<i32>,
+    expanded: cxx_qt_lib::QList<i32>,
+    count: i32,
+    current: i32,
+}
+
+/// Las dos secciones del panel, con las ubicaciones que hay ahora mismo.
+fn sections(home: Option<&Path>) -> Vec<Section> {
+    let branch = |place: &kara_fs::places::Place| Branch {
+        name: std::ffi::OsString::from(present::place_label(place)),
+        path: place.path.clone(),
+    };
+
+    vec![
+        Section {
+            id: SectionId::QuickAccess,
+            roots: kara_fs::places::quick_access(home)
+                .iter()
+                .map(branch)
+                .collect(),
+        },
+        Section {
+            id: SectionId::ThisComputer,
+            roots: kara_fs::places::this_computer().iter().map(branch).collect(),
+        },
+    ]
+}
+
+fn ints(values: impl IntoIterator<Item = i32>) -> cxx_qt_lib::QList<i32> {
+    let mut list = cxx_qt_lib::QList::<i32>::default();
+    for value in values {
+        list.append(value);
+    }
+    list
+}
+
+impl AppRust {
+    /// Aplana el árbol a listas paralelas y localiza la fila de `current`.
+    fn nav_view(&self, current: &Path) -> NavView {
+        let rows = self.tree.rows();
+
+        let mut labels = Vec::with_capacity(rows.len());
+        let mut paths = Vec::with_capacity(rows.len());
+        let mut depths = Vec::with_capacity(rows.len());
+        let mut expandable = Vec::with_capacity(rows.len());
+        let mut expanded = Vec::with_capacity(rows.len());
+        let mut current_row = -1_i32;
+
+        for (index, row) in rows.iter().enumerate() {
+            depths.push(clamp_count(row.depth));
+            match &row.kind {
+                RowKind::Section(id) => {
+                    labels.push(QString::from(present::section_label(*id)));
+                    // Sin ruta: es lo que distingue una cabecera de una carpeta.
+                    paths.push(QString::default());
+                    expandable.push(0);
+                    expanded.push(0);
+                }
+                RowKind::Folder {
+                    path,
+                    name,
+                    expandable: can_expand,
+                    expanded: is_expanded,
+                } => {
+                    labels.push(QString::from(&name.to_string_lossy().into_owned()));
+                    paths.push(QString::from(&path.to_string_lossy().into_owned()));
+                    // Mientras no se sepa, se ofrece la flecha: averiguarlo exige
+                    // leer la carpeta, que es justo lo que se difiere.
+                    expandable.push(i32::from(*can_expand != Expandable::No));
+                    expanded.push(i32::from(*is_expanded));
+
+                    // La primera fila que coincida gana: la carpeta personal sale
+                    // antes que la misma ruta colgando de la raíz, y resaltar
+                    // «Inicio» orienta mejor que resaltar `/home/ana`.
+                    if current_row < 0 && path == current {
+                        current_row = clamp_count(index);
+                    }
+                }
+            }
+        }
+
+        NavView {
+            count: clamp_count(rows.len()),
+            current: current_row,
+            labels: labels.into_iter().collect(),
+            paths: paths.into_iter().collect(),
+            depths: ints(depths),
+            expandable: ints(expandable),
+            expanded: ints(expanded),
+        }
+    }
+
+    /// Lee las subcarpetas de una rama y se las entrega al árbol.
+    ///
+    /// Una carpeta que no se puede leer se registra como vacía: la flecha
+    /// desaparece en vez de quedarse ofreciendo algo que nunca se va a abrir.
+    fn load_children(&mut self, path: &Path) {
+        let Ok(listing) = list_directory(path) else {
+            self.tree.set_children(path, Vec::new());
+            return;
+        };
+
+        let mut entries = listing.entries;
+        // Solo carpetas: el panel navega, no lista contenido.
+        entries.retain(|entry| entry.kind == EntryKind::Directory);
+        Visibility::default().retain_visible(&mut entries);
+        kara_core::sort::sort_entries(&mut entries, &SortSpec::default());
+
+        let children = entries
+            .iter()
+            .map(|entry| Branch {
+                path: path.join(&entry.name),
+                name: entry.name.clone(),
+            })
+            .collect();
+        self.tree.set_children(path, children);
+    }
+
+    /// Despliega lo necesario para que `target` se vea en el panel.
+    fn reveal(&mut self, target: &Path) {
+        for ancestor in self.tree.path_to_reveal(target) {
+            if self.tree.expand(&ancestor) {
+                self.load_children(&ancestor);
+            }
+        }
+    }
+}
+
 fn labels(segments: &[breadcrumb::Segment]) -> QStringList {
     segments
         .iter()
@@ -274,7 +464,59 @@ impl qobject::App {
         self.as_mut().set_crumb_paths(view.crumb_paths);
         self.as_mut().set_overflow_names(view.overflow_names);
         self.as_mut().set_overflow_paths(view.overflow_paths);
+
+        // El panel sigue a la vista: despliega los ancestros de la carpeta que
+        // se acaba de enseñar y la resalta.
+        self.as_mut().rust_mut().get_mut().reveal(target);
+        self.publish_nav();
         true
+    }
+
+    /// Vuelca las filas del panel de navegación.
+    fn publish_nav(mut self: Pin<&mut Self>) {
+        let current = PathBuf::from(self.path().to_string());
+        let nav = self.rust().nav_view(&current);
+        self.as_mut().set_nav_labels(nav.labels);
+        self.as_mut().set_nav_paths(nav.paths);
+        self.as_mut().set_nav_depths(nav.depths);
+        self.as_mut().set_nav_expandable(nav.expandable);
+        self.as_mut().set_nav_expanded(nav.expanded);
+        self.as_mut().set_nav_count(nav.count);
+        self.as_mut().set_nav_current(nav.current);
+    }
+
+    /// La ruta de una fila del panel, o `None` si es una cabecera de sección.
+    fn nav_path_at(&self, row: i32) -> Option<PathBuf> {
+        let paths = self.nav_paths();
+        let index = isize::try_from(row).ok()?;
+        let path = paths.get(index)?.to_string();
+        if path.is_empty() {
+            return None;
+        }
+        Some(PathBuf::from(path))
+    }
+
+    fn nav_toggle(mut self: Pin<&mut Self>, row: i32) {
+        let Some(path) = self.nav_path_at(row) else {
+            return;
+        };
+        let needs_children = self.as_mut().rust_mut().get_mut().tree.toggle(&path);
+        if needs_children {
+            self.as_mut().rust_mut().get_mut().load_children(&path);
+        }
+        self.publish_nav();
+    }
+
+    fn nav_activate(mut self: Pin<&mut Self>, row: i32) {
+        let Some(path) = self.nav_path_at(row) else {
+            return;
+        };
+        self.as_mut().navigate_to(&path);
+    }
+
+    fn toggle_sidebar(mut self: Pin<&mut Self>) {
+        let visible = *self.sidebar_visible();
+        self.as_mut().set_sidebar_visible(!visible);
     }
 
     /// Refleja en las propiedades si el historial puede ir atrás o adelante.
@@ -380,6 +622,10 @@ impl qobject::App {
 
     fn reload(mut self: Pin<&mut Self>) {
         let current = PathBuf::from(self.path().to_string());
+        // Refrescar también refresca la rama: si no, una subcarpeta creada o
+        // borrada fuera sigue saliendo en el panel hasta reiniciar. `forget` no
+        // la pliega, así que lo que el usuario abrió sigue abierto.
+        self.as_mut().rust_mut().get_mut().tree.forget(&current);
         self.as_mut().render(&current);
     }
 
@@ -392,6 +638,7 @@ impl qobject::App {
         let current = PathBuf::from(self.path().to_string());
         let victim = current.join(name.to_string());
         if kara_fs::trash::trash_one(&victim, &kara_ops::trash_policy()).is_ok() {
+            self.as_mut().rust_mut().get_mut().tree.forget(&current);
             self.as_mut().render(&current);
         }
     }

@@ -12,6 +12,7 @@ fn main() {
             QmlFile::from("qml/TitleButton.qml"),
             QmlFile::from("qml/NavButton.qml"),
             QmlFile::from("qml/AddressBar.qml"),
+            QmlFile::from("qml/Sidebar.qml"),
             QmlFile::from("qml/ResizeHandle.qml"),
         ]),
     )
