@@ -1430,13 +1430,242 @@ fn case_42_compare_entries_is_a_total_order() {
     }
 }
 
+// ------------------------------------------- plegado de caja (regresión) ---
+//
+// `compare_names` es un orden TOTAL: desempata por los puntos de código originales,
+// así que jamás devuelve `Equal` para dos cadenas distintas. Comparar "żółw" con
+// "żółw" en mayúsculas esperando `Equal` no probaría nada.
+//
+// La forma que sí discrimina —y la que usan los casos 43 a 48— es comparar una
+// palabra en minúscula con una MAYÚSCULA que la tiene como prefijo:
+//
+//   - con plegado correcto: la minúscula es prefijo de la otra y sale `Less`;
+//   - sin plegar: la minúscula empieza por un punto de código MAYOR que su capital
+//     (`ż` U+017C > `Ż` U+017B) y sale `Greater`.
+//
+// Resultados opuestos: el test distingue de verdad una implementación de la otra.
+
+/// Comprueba el par discriminante en los dos sentidos: `lower < UPPER_PREFIJADA`.
+fn folds_case(lower: &str, upper_with_lower_as_prefix: &str) {
+    let collation = Collation::default();
+    assert_eq!(
+        compare_names(lower, upper_with_lower_as_prefix, &collation),
+        core::cmp::Ordering::Less,
+        "{lower:?} deberia ir antes que {upper_with_lower_as_prefix:?}: \
+         tras plegar la caja el primero es prefijo del segundo (sin plegar saldria Greater)"
+    );
+    assert_eq!(
+        compare_names(upper_with_lower_as_prefix, lower, &collation),
+        core::cmp::Ordering::Greater,
+        "la comparacion debe ser antisimetrica para {lower:?} y {upper_with_lower_as_prefix:?}"
+    );
+}
+
+/// Caso 43: plegado de caja en Latin Extended-A — polaco y checo.
+///
+/// Regresión del bloqueante: la tabla de plegado escrita a mano solo llegaba al
+/// Suplemento Latin-1, así que `ż`, `ć`, `ł`, `ą`, `č` y `š` pasaban **sin plegar** y
+/// la insensibilidad a mayúsculas —que la spec enuncia sin condiciones— no funcionaba
+/// en polaco ni en checo.
+#[test]
+fn case_43_latin_extended_a_folds_for_polish_and_czech() {
+    // żółw / ŻÓŁWY — U+017C vs U+017B.
+    folds_case("\u{17C}\u{F3}\u{142}w", "\u{17B}\u{D3}\u{141}WY");
+    // ćma / ĆMAS — U+0107 vs U+0106.
+    folds_case("\u{107}ma", "\u{106}MAS");
+    // łąka / ŁĄKAS — U+0142 vs U+0141 y U+0105 vs U+0104.
+    folds_case("\u{142}\u{105}ka", "\u{141}\u{104}KAS");
+    // čas / ČASY — U+010D vs U+010C.
+    folds_case("\u{10D}as", "\u{10C}ASY");
+    // šum / ŠUMY — U+0161 vs U+0160.
+    folds_case("\u{161}um", "\u{160}UMY");
+
+    // Y en una lista ordenada de verdad: [čaj, żubr, ŻÓŁW]. Sin plegar, ŻÓŁW
+    // adelantaria a żubr porque Ż (U+017B) < ż (U+017C).
+    assert_eq!(
+        name_asc(&["\u{17C}ubr", "\u{17B}\u{D3}\u{141}W", "\u{10D}aj"]),
+        vec!["\u{10D}aj", "\u{17C}ubr", "\u{17B}\u{D3}\u{141}W"]
+    );
+}
+
+/// Caso 44: plegado de caja en maltés (Latin Extended-A) y en Latin Extended-B.
+///
+/// El mismo hueco del caso 43, en los dos bloques que la tabla a mano ni rozaba.
+#[test]
+fn case_44_latin_extended_b_and_maltese_fold() {
+    // ħabib / ĦABIBI — U+0127 vs U+0126 (maltés).
+    folds_case("\u{127}abib", "\u{126}ABIBI");
+    // ħġieġ / ĦĠIEĠA — U+0127/U+0126 y U+0121/U+0120.
+    folds_case("\u{127}\u{121}ie\u{121}", "\u{126}\u{120}IE\u{120}A");
+    // știre / ȘTIRI — U+0219 vs U+0218, Latin Extended-B (rumano).
+    folds_case("\u{219}tire", "\u{218}TIRI");
+    // ǧala / ǦALAS — U+01E7 vs U+01E6, Latin Extended-B.
+    folds_case("\u{1E7}ala", "\u{1E6}ALAS");
+}
+
+/// Caso 45: griego — sigma final y sigma medial pliegan ambas con la capital.
+///
+/// Sin el plegado de la sigma final, `"ΟΔΟΣ"` y `"οδος"` (el mismo nombre con la misma
+/// escritura insensible a mayúsculas) se separarían en el listado. También cubre las
+/// capitales acentuadas (`Ά` U+0386), que la tabla a mano dejaba fuera de su rango
+/// U+0391..=U+03AB.
+#[test]
+fn case_45_greek_sigma_and_accented_capitals_fold() {
+    // οδοσ / ΟΔΟΣΑ — sigma medial U+03C3 vs U+03A3.
+    folds_case(
+        "\u{3BF}\u{3B4}\u{3BF}\u{3C3}",
+        "\u{39F}\u{394}\u{39F}\u{3A3}\u{391}",
+    );
+    // άλφα / ΆΛΦΑΣ — capital acentuada U+0386 -> U+03AC.
+    folds_case(
+        "\u{3AC}\u{3BB}\u{3C6}\u{3B1}",
+        "\u{386}\u{39B}\u{3A6}\u{391}\u{3A3}",
+    );
+
+    // Sigma final: "οδος.txt" vs "ΟΔΟΣ.PDF". Plegando, las cuatro primeras letras
+    // empatan y decide la extension (txt > pdf) -> Greater. Sin plegar la sigma final,
+    // ς (U+03C2) < σ (U+03C3) decidiria antes y saldria Less.
+    assert_eq!(
+        compare_names(
+            "\u{3BF}\u{3B4}\u{3BF}\u{3C2}.txt",
+            "\u{39F}\u{394}\u{39F}\u{3A3}.PDF",
+            &Collation::default()
+        ),
+        core::cmp::Ordering::Greater,
+        "la sigma final debe plegar con la capital: decide la extension, no la sigma"
+    );
+
+    // Las dos sigmas minusculas caen en el mismo punto del orden: [ΟΔΟΣΑ, οδοςβ,
+    // ΟΔΟΣΓ]. Sin plegar la sigma final, οδοςβ se adelantaria a las tres.
+    assert_eq!(
+        name_asc(&[
+            "\u{39F}\u{394}\u{39F}\u{3A3}\u{391}",
+            "\u{3BF}\u{3B4}\u{3BF}\u{3C2}\u{3B2}",
+            "\u{39F}\u{394}\u{39F}\u{3A3}\u{393}",
+        ]),
+        vec![
+            "\u{39F}\u{394}\u{39F}\u{3A3}\u{391}",
+            "\u{3BF}\u{3B4}\u{3BF}\u{3C2}\u{3B2}",
+            "\u{39F}\u{394}\u{39F}\u{3A3}\u{393}",
+        ]
+    );
+}
+
+/// Caso 46: el signo micro (U+00B5) pliega a mu griega minúscula (U+03BC).
+///
+/// Es plegado, no mapeo: `to_lowercase` deja el signo micro intacto, así que sin su
+/// arm propio `µs.log` y `ΜS.LOG` se separarían.
+#[test]
+fn case_46_micro_sign_folds_to_greek_small_mu() {
+    let collation = Collation::default();
+
+    // µb vs ΜA: plegando ambos a μ decide la segunda letra (b > a) -> Greater.
+    // Sin plegar, µ (U+00B5) < Μ (U+039C) decidiria antes -> Less.
+    assert_eq!(
+        compare_names("\u{B5}b", "\u{39C}A", &collation),
+        core::cmp::Ordering::Greater,
+        "el signo micro debe plegar con la mu capital"
+    );
+    // µsb vs μsa: mismo razonamiento contra la mu minuscula (U+03BC).
+    assert_eq!(
+        compare_names("\u{B5}sb", "\u{3BC}sa", &collation),
+        core::cmp::Ordering::Greater,
+        "el signo micro debe plegar con la mu minuscula"
+    );
+    // Plegan igual, pero el orden es total: desempatan por punto de codigo.
+    assert_eq!(
+        compare_names("\u{B5}s.log", "\u{3BC}s.log", &collation),
+        core::cmp::Ordering::Less,
+        "empatan tras plegar y desempata el punto de codigo (U+00B5 < U+03BC)"
+    );
+}
+
+/// Caso 47: sin regresión — lo que la tabla a mano ya cubría sigue plegando.
+///
+/// ASCII, Suplemento Latin-1 y cirílico base.
+#[test]
+fn case_47_ascii_latin1_and_cyrillic_still_fold() {
+    // ASCII.
+    folds_case("readme", "READMES");
+    // Latin-1: á/Á (U+00E1/U+00C1), ñ/Ñ (U+00F1/U+00D1), ö/Ö (U+00F6/U+00D6),
+    // ø/Ø (U+00F8/U+00D8) y þ/Þ (U+00FE/U+00DE), los bordes de los dos rangos.
+    folds_case("\u{E1}ngel", "\u{C1}NGELES");
+    folds_case("\u{F1}u", "\u{D1}US");
+    folds_case("\u{F6}l", "\u{D6}LS");
+    folds_case("\u{F8}re", "\u{D8}RED");
+    folds_case("\u{FE}or", "\u{DE}ORN");
+    // Cirilico: мир / МИРОВ (U+043C vs U+041C) y ёж / ЁЖИ (U+0451 vs U+0401).
+    folds_case("\u{43C}\u{438}\u{440}", "\u{41C}\u{418}\u{420}\u{41E}\u{412}");
+    folds_case("\u{451}\u{436}", "\u{401}\u{416}\u{418}");
+}
+
+/// Caso 48: hueco conocido y deliberado — los mapeos que expanden a varios caracteres
+/// se dejan **sin plegar**.
+///
+/// `İ` (U+0130) minúsculiza a `i` + U+0307: plegarlo exigiría un átomo
+/// multi-carácter y una asignación por nombre, lo que rompe el presupuesto de 100 000
+/// entradas. Este test fija el comportamiento para que cambiarlo sea una decisión
+/// deliberada y no un accidente.
+#[test]
+fn case_48_multi_char_lowercase_expansions_stay_unfolded() {
+    let collation = Collation::default();
+
+    // İx vs iy: sin plegar decide la primera letra, İ (U+0130) > i (U+0069).
+    // Si İ plegase a i, decidiria la segunda y saldria Less.
+    assert_eq!(
+        compare_names("\u{130}x", "iy", &collation),
+        core::cmp::Ordering::Greater,
+        "U+0130 se deja sin plegar a proposito: su minuscula expande a dos caracteres"
+    );
+    // El contraste: la I ASCII si pliega, y por eso decide la segunda letra.
+    assert_eq!(
+        compare_names("Ix", "iy", &collation),
+        core::cmp::Ordering::Less,
+        "un plegado dependiente del locale turco mandaria I a ı (U+0131) y saldria Greater"
+    );
+    // La ı sin punto (U+0131) tampoco pliega con la i ASCII: no es su mapeo por
+    // defecto, solo el turco.
+    assert_eq!(
+        compare_names("\u{131}x", "iy", &collation),
+        core::cmp::Ordering::Greater,
+        "U+0131 y U+0069 son caracteres distintos fuera del locale turco"
+    );
+}
+
 /// Invariante de [`collation_key`]: comparar claves precomputadas equivale a
 /// [`compare_names`].
 #[test]
 fn collation_key_ordering_matches_compare_names() {
     let sample = [
-        "a", "A", "a1", "a01", "a2", "a10", "archivo", "ARCHIVO", ".bashrc", "", "acci\u{f3}n",
-        "accio\u{301}n", "accion", "z", "1", "01",
+        "a",
+        "A",
+        "a1",
+        "a01",
+        "a2",
+        "a10",
+        "archivo",
+        "ARCHIVO",
+        ".bashrc",
+        "",
+        "acci\u{f3}n",
+        "accio\u{301}n",
+        "accion",
+        "z",
+        "1",
+        "01",
+        // Plegado de caja mas alla de Latin-1: la clave precomputada debe seguir al
+        // comparador tambien aqui.
+        "\u{17C}\u{F3}\u{142}w",
+        "\u{17B}\u{D3}\u{141}W",
+        "\u{10D}as",
+        "\u{10C}AS",
+        "\u{3BF}\u{3B4}\u{3BF}\u{3C2}",
+        "\u{3BF}\u{3B4}\u{3BF}\u{3C3}",
+        "\u{39F}\u{394}\u{39F}\u{3A3}",
+        "\u{B5}s",
+        "\u{3BC}s",
+        "\u{130}stanbul",
+        "istanbul",
     ];
     for collation in [
         Collation::default(),

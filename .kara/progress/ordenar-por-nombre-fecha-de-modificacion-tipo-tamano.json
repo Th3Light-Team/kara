@@ -3,24 +3,24 @@
   "crate": "kara-core",
   "slug": "ordenar-por-nombre-fecha-de-modificacion-tipo-tamano",
   "estado": "aprobada_con_deuda",
-  "commit": "5cea729",
+  "commit": "1ff6b7a",
   "pruebas": {
     "testFiles": [
       {
         "path": "/home/oliverv/Projects/kara/crates/kara-core/tests/sort.rs",
-        "sha256": "fac1adf6e4e7f4b3bbb9e1b371163e546f561ced431d2aff410b7d20b189ac5c"
+        "sha256": "c09103954c0e06226bea1ed310f9da58a9e69f545efcdd7a0dad23abeb70255d"
       },
       {
         "path": "/home/oliverv/Projects/kara/crates/kara-core/tests/sort_allocations.rs",
-        "sha256": "5fa35c8f594b5264b6ab8a19d628b505bd7768c78d1775a885651d445de73b16"
+        "sha256": "002b994768ef453807b3bd7e2eb72e3d875be0df4fab7cd560e147149cc691cf"
       },
       {
         "path": "/home/oliverv/Projects/kara/crates/kara-core/tests/sort_properties.rs",
-        "sha256": "e69ed6a5ac17b7ea65b841de72c8c5a6edbffa17264d0d0fb7ae6d2cfbe6ac0e"
+        "sha256": "9bd01d91a12216b586da3d90c979fc9d2b2e58ead7d04429a23b5b9bae5ad56b"
       }
     ],
-    "total": 58,
-    "verdes": 56,
+    "total": 65,
+    "verdes": 63,
     "ignorados": 2
   },
   "intentos": 3,
@@ -33,6 +33,25 @@
     "huecoRestante": "Mapeos multi-char (U+0130 turco -> i + U+0307) se dejan sin plegar: plegarlos exigiria un atomo multi-caracter y una asignacion por nombre. Documentado en el doc comment. Dos code points, no todo Latin Extended."
   },
   "specGapsPendientes": 7,
-  "actualizado": "2026-09-02T10:36:39-04:00",
-  "deudaDePruebas": "El arreglo NO tiene test de regresion: los ficheros de tests son propiedad del supervisor y son inmutables para quien implementa. Cuando se retome esta conveniencia, el supervisor debe anadir casos discriminantes de plegado (minuscula vs MAYUSCULA-con-prefijo) para Latin Extended-A/B y sigma final."
+  "actualizado": "2026-09-02T11:58:01-04:00",
+  "deudaDePruebas": {
+    "estado": "SALDADA",
+    "cubierto": [
+      "case_43: Latin Extended-A — polaco (ż/Ż, ć/Ć, ł/Ł, ą/Ą) y checo (č/Č, š/Š), en pares discriminantes minuscula vs MAYUSCULA-con-prefijo y en una lista ordenada.",
+      "case_44: maltes (ħ/Ħ, ġ/Ġ, Latin Extended-A) y Latin Extended-B (ș/Ș rumano, ǧ/Ǧ).",
+      "case_45: griego — sigma medial, sigma final (ς con ΟΔΟΣ) y capitales acentuadas (Ά U+0386), que la tabla a mano dejaba fuera de su rango U+0391..=U+03AB.",
+      "case_46: signo micro U+00B5 -> U+03BC, discriminante contra un plegado que solo use to_lowercase.",
+      "case_47: sin regresion — ASCII, Suplemento Latin-1 (bordes á, ñ, ö, ø, þ) y cirilico base (м/М, ё/Ё).",
+      "case_48: hueco deliberado — U+0130 İ se deja SIN plegar (su minuscula expande a i + U+0307); tambien fija que la I ASCII pliega a i y no a ı, es decir que el plegado no lee el locale turco.",
+      "collation_key_ordering_matches_compare_names: la muestra incluye ahora Latin Extended, las dos sigmas, el signo micro y İ.",
+      "sort_properties: el alfabeto de proptest incorpora ż/Ż, ς/σ/Σ, µ/μ e İ, de modo que las propiedades de orden total se ejercitan tambien sobre caracteres plegados.",
+      "sort_allocations: case_folding_outside_ascii_does_not_allocate_per_comparison fija que el plegado sigue siendo 1:1 y sin asignar, que es justo el motivo de dejar U+0130 sin plegar."
+    ],
+    "verificacion": "Los tests se ejecutaron contra el codigo defectuoso (git checkout 5cea729 -- crates/kara-core/src/sort/collation.rs): fallan case_43, case_44 y case_45. Contra una variante que solo usa to_lowercase (sin los arms de sigma final y signo micro) fallan case_45 y case_46. case_47 y case_48 pasan con ambas versiones a proposito: son no-regresion y fijacion del hueco conocido."
+  },
+  "huecosDePruebaPendientes": [
+    "Mapeos multi-caracter distintos de U+0130 (ß -> ss, ﬁ -> fi, U+1E9E) no tienen test propio: comparten la misma rama de to_lowercase que U+0130, ya fijada en case_48.",
+    "Titlecase (dígrafos U+01C5 ǅ, U+01C8 ǈ) sin cubrir: to_lowercase los mapea 1:1, pero no hay caso que lo fije.",
+    "Plegado fuera del BMP (Deseret U+10400/U+10428, Adlam) sin cubrir."
+  ]
 }

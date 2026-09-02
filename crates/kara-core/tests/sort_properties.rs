@@ -36,6 +36,17 @@ fn name_strategy() -> impl Strategy<Value = String> {
             Just("\u{f3}".to_string()),
             Just("o\u{301}".to_string()),
             Just("-".to_string()),
+            // Plegado de caja fuera de ASCII: Latin Extended-A (ż/Ż), las dos sigmas
+            // griegas con su capital, el signo micro y la İ turca, que se deja sin
+            // plegar. Todos deben respetar el orden total igual que el resto.
+            Just("\u{17c}".to_string()),
+            Just("\u{17b}".to_string()),
+            Just("\u{3c2}".to_string()),
+            Just("\u{3c3}".to_string()),
+            Just("\u{3a3}".to_string()),
+            Just("\u{b5}".to_string()),
+            Just("\u{3bc}".to_string()),
+            Just("\u{130}".to_string()),
         ],
         0..6usize,
     )
