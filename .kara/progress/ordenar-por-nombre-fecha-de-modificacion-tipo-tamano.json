@@ -1,0 +1,37 @@
+{
+  "conveniencia": "Ordenar por (nombre, fecha de modificación, tipo, tamaño…)",
+  "crate": "kara-core",
+  "slug": "ordenar-por-nombre-fecha-de-modificacion-tipo-tamano",
+  "estado": "fallida",
+  "commit": "5cea729",
+  "pruebas": {
+    "testFiles": [
+      {
+        "path": "/home/oliverv/Projects/kara/crates/kara-core/tests/sort.rs",
+        "sha256": "fac1adf6e4e7f4b3bbb9e1b371163e546f561ced431d2aff410b7d20b189ac5c"
+      },
+      {
+        "path": "/home/oliverv/Projects/kara/crates/kara-core/tests/sort_allocations.rs",
+        "sha256": "5fa35c8f594b5264b6ab8a19d628b505bd7768c78d1775a885651d445de73b16"
+      },
+      {
+        "path": "/home/oliverv/Projects/kara/crates/kara-core/tests/sort_properties.rs",
+        "sha256": "e69ed6a5ac17b7ea65b841de72c8c5a6edbffa17264d0d0fb7ae6d2cfbe6ac0e"
+      }
+    ],
+    "total": 58,
+    "verdes": 56,
+    "ignorados": 2
+  },
+  "intentos": 3,
+  "nota": "Agoto los 3 intentos. El intento 2 tuvo CERO bloqueantes pero fue rechazado por un bug de la puerta del workflow (exigia approved==true y al supervisor se le instruye desaprobar por defecto). El intento 3, ya commiteado, REINTRODUJO un bloqueante. La puerta ya esta arreglada. NO relanzar a ciegas: requiere decision humana sobre el plegado de caja.",
+  "bloqueantePendiente": {
+    "file": "crates/kara-core/src/sort/collation.rs",
+    "line": 153,
+    "issue": "case_fold_char es una tabla a mano (ASCII, Latin-1, griego base, cirilico base). Latin Extended-A/B pasa sin plegar: la insensibilidad a mayusculas no existe para polaco, checo, turco, etc. La spec la enuncia sin condiciones.",
+    "propuestaSupervisor": "Usar char::to_lowercase() (mapeo Unicode por defecto, no lee locale)",
+    "objecionImplementador": "to_lowercase() no pliega sigma final: 'ΟΔΟΣ' y 'οδός' quedarian separadas. El arreglo correcto es to_lowercase() MAS el caso especial ς->σ."
+  },
+  "specGapsPendientes": 7,
+  "actualizado": "2026-09-02T02:56:15-04:00"
+}

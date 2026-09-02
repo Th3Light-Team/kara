@@ -401,6 +401,18 @@ Reporta los hechos tal cual.
     continue
   }
 
+  // Punto de retorno por intento: la auditoria ya paso (tests verdes, clippy
+  // limpio, pruebas intactas). Commitear AQUI permite volver al mejor intento si
+  // uno posterior empeora el codigo, y salva el trabajo si el limite salta
+  // durante la supervision.
+  await agent(`
+Trabajas en ${REPO}. Tarea mecanica. La auditoria del intento ${attempt} paso.
+Haz 'git add -A && git commit' con mensaje:
+"wip(${CRATE}): intento ${attempt} de ${CONVENIENCIA} (auditoria verde, sin supervisar)"
+y el trailer "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>".
+Devuelve el sha corto. No hagas nada mas.
+`, { model: 'haiku', effort: 'low', label: `wip:intento-${attempt}` })
+
   phase('Supervision')
   lastReview = await agent(`
 Eres el supervisor de Kara. La implementacion pasa las pruebas — condicion
@@ -424,14 +436,22 @@ ${RULES}
   if (!lastReview) return interrumpido('Supervision', { intento: attempt, historial: history })
 
   const blockers = lastReview.findings.filter(f => f.severity === 'bloqueante')
-  if (lastReview.approved && blockers.length === 0) {
+
+  // La puerta es OBJETIVA: cero bloqueantes. El campo `approved` del supervisor
+  // es solo advisory — se le instruye ser adversarial y desaprobar por defecto,
+  // asi que casi nunca dice true. Exigir ambos rechazaba intentos limpios y
+  // dejaba que el siguiente intento empeorase el codigo (ocurrio de verdad).
+  if (blockers.length === 0) {
     approved = true
-    log(`Intento ${attempt}: APROBADO`)
+    log(`Intento ${attempt}: APROBADO (0 bloqueantes; supervisor advisory: ${lastReview.approved})`)
+    if (lastReview.findings.length) {
+      log(`  quedan ${lastReview.findings.length} hallazgo(s) no bloqueantes, anotados para revision humana`)
+    }
     break
   }
 
-  log(`Intento ${attempt}: rechazado por supervision — ${blockers.length} bloqueante(s)`)
-  history.push({ attempt, rechazado: 'supervision', hallazgos: lastReview.findings })
+  log(`Intento ${attempt}: rechazado — ${blockers.length} bloqueante(s)`)
+  history.push({ attempt, rechazado: 'supervision', bloqueantes: blockers.length, hallazgos: lastReview.findings })
 }
 
 // ---------------------------------------------------------------------------
