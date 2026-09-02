@@ -32,32 +32,7 @@
     "verificado": "Comprobado a mano contra el codigo anterior: la tabla a mano fallaba polaco, checo, C/L con trazo y maltes; el nuevo los pasa todos sin regresion en sigma, ASCII, Latin-1 ni cirilico.",
     "huecoRestante": "Mapeos multi-char (U+0130 turco -> i + U+0307) se dejan sin plegar: plegarlos exigiria un atomo multi-caracter y una asignacion por nombre. Documentado en el doc comment. Dos code points, no todo Latin Extended."
   },
-  "specGapsPendientes": {
-    "total": 7,
-    "cerrados": [
-      {
-        "id": 1,
-        "commit": "6e8e3bc",
-        "resumen": "Faltaba el inverso de sort_key_for_column. column_for_sort_key(&SortKey) -> Option<ColumnId> en src/sort/spec.rs; la vista Detalles lo necesita para la flecha ▲/▼ de columna activa (03-vistas.md:68 y :92). None para Unsorted y para Metadata(Custom(\"\")).",
-        "regresion": "case_49_column_and_sort_key_round_trip — round-trip de las 15 columnas normativas, los dos casos sin columna, la colision meta/dimensions y las tres columnas no ordenables."
-      },
-      {
-        "id": 2,
-        "resumen": "available_keys ofrecia Size, Modified, Created, Accessed, Kind y Location incondicionalmente, contra 03-vistas.md:50 («los criterios disponibles dependen de los metadatos»). El menu ofrecia «Fecha de creacion» en un volumen sin btime y al elegirla no pasaba nada.",
-        "criterio": "Regla de presencia uniforme para TODOS los criterios derivados de un Option de FileEntry (size, modified, created, accessed, type_label, location), sin exceptuar Size ni Modified: basta que UNA entrada aporte el dato. Name, Extension (derivados de display) y Unsorted (un estado) siempre estan. Excepcion deliberada: el listado vacio devuelve el juego intrinseco completo.",
-        "regresion": "case_31_available_keys_depend_on_present_metadata, reescrito: listado sin datos, listado vacio, presencia parcial, type_label sin fechas, cada campo abriendo su criterio, metadatos y listado completo. Verificado en rojo contra el codigo anterior."
-      },
-      {
-        "id": 6,
-        "commit": "6e8e3bc",
-        "resumen": "extract_value aplicaba extension_of sin mirar entry.kind, asi que 'My.folder' se intercalaba entre los ficheros .folder al ordenar por extension con DirectoryGrouping::Mixed. Las carpetas reciben la cadena vacia, que es un valor y no un ausente.",
-        "regresion": "case_50_directories_have_no_extension — verificado fallando contra 5cea729 (mod.rs anterior): produce [Makefile, normal, archivo.folder, My.folder, zeta.folder] en vez de agrupar My.folder con los sin extension. Cubre tambien el sentido descendente, que distingue el valor vacio de un ausente."
-      }
-    ],
-    "abiertos": [3, 4, 5],
-    "nota": "El checkpoint solo guardaba el RECUENTO de gaps, no la lista: las descripciones de 3, 4 y 5 no estan persistidas en ningun sitio del arbol y hay que recuperarlas de la revision adversarial. El gap 7 no aparece ni entre los accionables ni entre los abiertos del triaje que llego a esta sesion: queda sin ubicar."
-  },
-  "actualizado": "2026-09-02T13:01:08-04:00",
+  "actualizado": "2026-09-02T13:04:22-04:00",
   "deudaDePruebas": {
     "estado": "SALDADA",
     "cubierto": [
@@ -78,5 +53,58 @@
     "Titlecase (dígrafos U+01C5 ǅ, U+01C8 ǈ) sin cubrir: to_lowercase los mapea 1:1, pero no hay caso que lo fije.",
     "Plegado fuera del BMP (Deseret U+10400/U+10428, Adlam) sin cubrir."
   ],
-  "notaEstado": "Cerrada. El bloqueante de plegado se arreglo (1ff6b7a) y el supervisor anadio los tests de regresion (ceecd34), verificados fallando contra las dos implementaciones erroneas plausibles. De los 7 specGaps quedan cerrados el 1, el 2 y el 6, los tres con regresion propia; siguen abiertos el 3, el 4 y el 5. Quedan tambien 3 huecos de prueba anotados, ninguno bloqueante."
+  "notaEstado": "Cerrada. El bloqueante de plegado se arreglo (1ff6b7a) y el supervisor anadio los tests de regresion (ceecd34), verificados fallando contra las dos implementaciones erroneas plausibles. De los 7 specGaps quedan cerrados el 1, el 2 y el 6, los tres con regresion propia; siguen abiertos el 3, el 4 y el 5. Quedan tambien 3 huecos de prueba anotados, ninguno bloqueante.",
+  "specGaps": [
+    {
+      "n": 1,
+      "estado": "CERRADO",
+      "commit": "6e8e3bc",
+      "titulo": "Mapeo inverso SortKey -> ColumnId",
+      "detalle": "Sin el, kara-ui tendria que recorrer las columnas visibles para pintar la flecha de columna activa (03-vistas.md:68 y :92), metiendo logica de ordenacion en la capa de presentacion."
+    },
+    {
+      "n": 2,
+      "estado": "CERRADO",
+      "commit": "2e9197e",
+      "titulo": "Disponibilidad de los criterios intrinsecos",
+      "detalle": "available_keys emitia Size/Modified/Created/Accessed/Kind/Location incondicionalmente, contra 03-vistas.md:50. Ahora regla de presencia uniforme; listado vacio ofrece el juego completo."
+    },
+    {
+      "n": 3,
+      "estado": "ABIERTO",
+      "titulo": "Modo global por defecto",
+      "detalle": "03-vistas.md:296 pide un modo global del que hereden las carpetas sin ajuste previo. SortSpec::default() esta cableado en el tipo. Pertenece a 'Recordar la vista por carpeta' (amarilla). MISMO MECANISMO que el gap 4.",
+      "decisionUsuario": "pendiente de confirmar el orden must/should"
+    },
+    {
+      "n": 4,
+      "estado": "ABIERTO",
+      "titulo": "Ambito de persistencia de 'Carpetas primero'",
+      "detalle": "03-vistas.md:80 dice 'global y/o por carpeta', asi que solo-por-carpeta YA cumple la spec. El usuario pidio ademas el toggle global estilo Dolphin.",
+      "decisionUsuario": "SI, toggle global. Diseno acordado: SortSpec sigue siendo el estado resuelto; un tipo parcial guarda lo que el usuario sobrescribio; resolve(almacenado, defaults) -> SortSpec. Cierra tambien el gap 3.",
+      "bloqueo": "Es conveniencia amarilla y CLAUDE.md prohibe empezar un should con musts pendientes. Sin confirmar."
+    },
+    {
+      "n": 5,
+      "estado": "CERRADO",
+      "titulo": "Segunda pulsacion de Ctrl+F3/F4/F5/F6",
+      "detalle": "La spec no dice que invierta; el usuario decidio que si. Resuelto extrayendo activated_with() de on_header_click: cabecera y atajo comparten semantica. with_key sigue siendo el setter idempotente del menu.",
+      "decisionUsuario": "SI, invierte."
+    },
+    {
+      "n": 6,
+      "estado": "CERRADO",
+      "commit": "6e8e3bc",
+      "titulo": "Extension de un directorio",
+      "detalle": "extract_value aplicaba extension_of sin mirar kind. Las carpetas reciben ahora la cadena vacia, que es un valor y no un ausente."
+    },
+    {
+      "n": 7,
+      "estado": "CERRADO",
+      "commit": "1ff6b7a + ceecd34",
+      "titulo": "Cobertura del plegado de caja",
+      "detalle": "Tabla a mano limitada a ASCII/Latin-1/griego/cirilico basicos. Sustituida por char::to_lowercase() mas los arms de sigma final y signo micro, con 7 tests de regresion verificados contra las dos implementaciones erroneas plausibles."
+    }
+  ],
+  "notaContabilidad": "El checkpoint guardaba antes solo el RECUENTO de specGaps (7), no su texto, asi que las descripciones vivian unicamente en la salida del workflow. Lo detecto el supervisor al no poder ubicar el gap 7. Ahora se persiste la lista completa."
 }

@@ -110,11 +110,28 @@ impl SortSpec {
     /// - [`SortError::UnknownColumn`] si el identificador no mapea a ningún criterio.
     /// - [`SortError::UnsortableColumn`] si la columna es explícitamente no ordenable.
     pub fn on_header_click(&self, column: &ColumnId) -> Result<SortSpec, SortError> {
-        let key = sort_key_for_column(column)?;
+        Ok(self.activated_with(sort_key_for_column(column)?))
+    }
+
+    /// Activates a criterion the way a *gesture* does: re-activating the one already
+    /// in force flips the direction, activating a different one starts ascending.
+    ///
+    /// This is the shared semantics of the two gestures the spec gives that
+    /// behaviour to — clicking a Details header (03-vistas.md:92, "el segundo clic
+    /// invierte a descendente"; "Cambiar de columna reinicia a ascendente") and the
+    /// `Ctrl+F3`/`F4`/`F5`/`F6` shortcuts (07-atajos-teclado.md:64). Routing both
+    /// through one function is what keeps mouse and keyboard from drifting apart.
+    ///
+    /// It is deliberately **not** what [`SortSpec::with_key`] does. A menu *sets* a
+    /// state: picking "Name" twice in the Sort by menu must leave the direction
+    /// alone. A gesture *activates*: repeating it toggles. Two verbs because they
+    /// are two interactions, not one with a flag.
+    #[must_use]
+    pub fn activated_with(&self, key: SortKey) -> SortSpec {
         if key == self.key {
-            Ok(self.toggled_order())
+            self.toggled_order()
         } else {
-            Ok(self.with_key(key))
+            self.with_key(key)
         }
     }
 
