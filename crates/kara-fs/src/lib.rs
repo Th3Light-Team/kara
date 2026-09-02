@@ -11,6 +11,8 @@
 
 pub mod trash;
 
+pub mod clipboard;
+
 pub mod listing;
 
 pub mod icons;
