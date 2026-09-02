@@ -12,6 +12,7 @@ pub mod entry;
 pub mod filter;
 pub mod history;
 pub mod naming;
+pub mod selection;
 pub mod sort;
 pub mod tree;
 
@@ -24,6 +25,7 @@ pub use completion::{Completer, PathInput, Source, Suggestion, Suggestions, spli
 pub use filter::{NameDisplay, NameFilter, Visibility, base_and_extension};
 pub use history::{History, HistoryEntry, ViewState};
 pub use naming::{split_name, unique_name};
+pub use selection::Selection;
 pub use tree::{Branch, Expandable, Row, RowKind, Section, SectionId, Tree};
 pub use view::{FolderView, ViewMemory, ViewMode, ViewSettings};
 pub use typeahead::TypeAhead;
