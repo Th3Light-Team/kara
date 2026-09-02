@@ -14,8 +14,8 @@ pub mod batch;
 pub mod clock;
 pub mod conflict;
 
-pub use clock::local_utc_offset_seconds;
-pub use batch::{BatchPolicy, BatchReport, Failure, FailureAction, FailureKind};
+pub use clock::{local_utc_offset_seconds, trash_policy};
+pub use batch::{BatchPolicy, BatchReport, ErrorDecision, Failure, FailureKind};
 pub use conflict::{
-    ConflictKind, ConflictPolicy, Resolution, ResolutionCounts, split_name, unique_name,
+    ConflictDecisions, ConflictKind, Resolution, ResolutionCounts, split_name, unique_name,
 };

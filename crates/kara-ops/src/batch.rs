@@ -10,16 +10,16 @@
 
 use std::path::PathBuf;
 
-/// Qué hacer ante un elemento que ha fallado.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FailureAction {
-    /// Volver a intentarlo con este elemento.
-    Retry,
-    /// Dejarlo y seguir con el resto.
-    Skip,
-    /// Parar el lote de forma ordenada.
-    Cancel,
-}
+pub use kara_fs::trash::ErrorDecision;
+
+// El vocabulario de decisiones lo define `kara-fs` y esta capa lo reutiliza en
+// vez de declarar el suyo. Tener dos enums paralelos —uno aquí y otro allí— para
+// la misma pregunta garantizaba que acabaran divergiendo, y `kara-fs` no puede
+// importar el de aquí sin invertir la regla de capas `ops -> fs`. Así que la
+// definición vive abajo y se comparte hacia arriba.
+//
+// `ErrorDecision::SkipAll` pliega en la propia acción el «hacer esto para
+// todos», que aquí se interpreta fijando la decisión general.
 
 /// Categoría del fallo. Determina qué se ofrece: la spec pide que «sin espacio»
 /// y «acceso denegado» no se traten como un error corriente.
@@ -67,7 +67,7 @@ pub struct Failure {
 /// Recuerda las decisiones «para todos» y acumula el resumen final.
 #[derive(Debug, Clone, Default)]
 pub struct BatchPolicy {
-    blanket: Option<FailureAction>,
+    blanket: Option<ErrorDecision>,
     cancelled: bool,
     failures: Vec<Failure>,
     skipped: Vec<PathBuf>,
@@ -86,16 +86,22 @@ impl BatchPolicy {
     /// reintentar no puede ayudar: convertiría «Reintentar todos» en un bucle
     /// infinito sobre un medio desconectado.
     #[must_use]
-    pub fn decide(&self, failure: &Failure) -> Option<FailureAction> {
+    pub fn decide(&self, failure: &Failure) -> Option<ErrorDecision> {
         match self.blanket {
-            Some(FailureAction::Retry) if !failure.kind.retry_may_help() => None,
+            Some(ErrorDecision::Retry) if !failure.kind.retry_may_help() => None,
             other => other,
         }
     }
 
     /// Marca «omitir todos» o «reintentar todos».
-    pub fn apply_to_all(&mut self, action: FailureAction) {
-        self.blanket = Some(action);
+    ///
+    /// `SkipAll` se normaliza a `Skip`: la decisión general ya la representa
+    /// este campo, y guardarla dos veces daría dos fuentes de verdad.
+    pub fn apply_to_all(&mut self, action: ErrorDecision) {
+        self.blanket = Some(match action {
+            ErrorDecision::SkipAll => ErrorDecision::Skip,
+            other => other,
+        });
     }
 
     /// Vuelve a preguntar en cada fallo.
@@ -104,17 +110,17 @@ impl BatchPolicy {
     }
 
     /// Registra lo que se hizo con un fallo.
-    pub fn record(&mut self, failure: Failure, action: FailureAction) {
+    pub fn record(&mut self, failure: Failure, action: ErrorDecision) {
         match action {
-            FailureAction::Skip => {
+            ErrorDecision::Skip | ErrorDecision::SkipAll => {
                 self.skipped.push(failure.path.clone());
                 self.failures.push(failure);
             }
-            FailureAction::Cancel => {
+            ErrorDecision::Cancel => {
                 self.cancelled = true;
                 self.failures.push(failure);
             }
-            FailureAction::Retry => {}
+            ErrorDecision::Retry => {}
         }
     }
 

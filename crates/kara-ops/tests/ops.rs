@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use kara_ops::{
-    BatchPolicy, ConflictKind, ConflictPolicy, Failure, FailureAction, FailureKind, Resolution,
+    BatchPolicy, ConflictKind, ConflictDecisions, Failure, ErrorDecision, FailureKind, Resolution,
     local_utc_offset_seconds, split_name, unique_name,
 };
 
@@ -38,7 +38,7 @@ fn merge_is_offered_only_between_directories() {
 /// fichero lo elegido para dos ficheros seria la sorpresa destructiva a evitar.
 #[test]
 fn apply_to_all_is_scoped_per_conflict_kind() {
-    let mut p = ConflictPolicy::new();
+    let mut p = ConflictDecisions::new();
     p.apply_to_all(ConflictKind::FileOverFile, Resolution::Replace);
     assert_eq!(p.decide(ConflictKind::FileOverFile), Some(&Resolution::Replace));
     assert_eq!(p.decide(ConflictKind::FileOverDirectory), None, "este sigue preguntando");
@@ -47,7 +47,7 @@ fn apply_to_all_is_scoped_per_conflict_kind() {
 /// La spec pide poder cambiar de opinion mientras queden conflictos.
 #[test]
 fn a_blanket_decision_can_be_changed_or_revoked() {
-    let mut p = ConflictPolicy::new();
+    let mut p = ConflictDecisions::new();
     p.apply_to_all(ConflictKind::FileOverFile, Resolution::Replace);
     p.apply_to_all(ConflictKind::FileOverFile, Resolution::Skip);
     assert_eq!(p.decide(ConflictKind::FileOverFile), Some(&Resolution::Skip));
@@ -58,7 +58,7 @@ fn a_blanket_decision_can_be_changed_or_revoked() {
 /// El resumen final debe decir cuantos se reemplazaron, omitieron y duplicaron.
 #[test]
 fn the_policy_counts_what_it_resolved() {
-    let mut p = ConflictPolicy::new();
+    let mut p = ConflictDecisions::new();
     p.record(&Resolution::Replace);
     p.record(&Resolution::Skip);
     p.record(&Resolution::Skip);
@@ -125,7 +125,7 @@ fn skipping_records_the_path_and_keeps_going() {
             kind: FailureKind::PermissionDenied,
             reason: "permiso denegado".into(),
         },
-        FailureAction::Skip,
+        ErrorDecision::Skip,
     );
     p.record_success();
     let r = p.report();
@@ -140,7 +140,7 @@ fn cancelling_stops_the_batch() {
     let mut p = BatchPolicy::new();
     p.record(
         Failure { path: "/x".into(), kind: FailureKind::Other, reason: "vaya".into() },
-        FailureAction::Cancel,
+        ErrorDecision::Cancel,
     );
     assert!(p.is_cancelled());
     assert!(p.report().cancelled);
@@ -151,21 +151,21 @@ fn cancelling_stops_the_batch() {
 #[test]
 fn retry_all_does_not_apply_where_retrying_cannot_help() {
     let mut p = BatchPolicy::new();
-    p.apply_to_all(FailureAction::Retry);
+    p.apply_to_all(ErrorDecision::Retry);
     let en_uso = Failure { path: "/a".into(), kind: FailureKind::InUse, reason: String::new() };
     let sin_medio =
         Failure { path: "/b".into(), kind: FailureKind::MediaGone, reason: String::new() };
-    assert_eq!(p.decide(&en_uso), Some(FailureAction::Retry));
+    assert_eq!(p.decide(&en_uso), Some(ErrorDecision::Retry));
     assert_eq!(p.decide(&sin_medio), None, "vuelve a preguntar en vez de reintentar sin fin");
 }
 
 #[test]
 fn skip_all_applies_to_every_kind() {
     let mut p = BatchPolicy::new();
-    p.apply_to_all(FailureAction::Skip);
+    p.apply_to_all(ErrorDecision::Skip);
     for kind in [FailureKind::MediaGone, FailureKind::NoSpace, FailureKind::InUse] {
         let f = Failure { path: "/a".into(), kind, reason: String::new() };
-        assert_eq!(p.decide(&f), Some(FailureAction::Skip));
+        assert_eq!(p.decide(&f), Some(ErrorDecision::Skip));
     }
 }
 
@@ -193,4 +193,15 @@ fn the_local_offset_matches_the_system() {
     let h: i32 = z[1..3].parse().expect("horas");
     let m: i32 = z[3..5].parse().expect("minutos");
     assert_eq!(s, signo * (h * 3600 + m * 60), "debe coincidir con el sistema");
+}
+
+/// La politica que entrega kara-ops NO puede llevar el desfase a cero: seria el
+/// defecto de kara-fs, que estampa UTC y corre la fecha del .trashinfo.
+#[test]
+fn the_trash_policy_carries_the_real_local_offset() {
+    let p = kara_ops::trash_policy();
+    assert_eq!(p.utc_offset_seconds, local_utc_offset_seconds());
+    if local_utc_offset_seconds() != 0 {
+        assert_ne!(p.utc_offset_seconds, 0, "no puede quedarse en el defecto UTC");
+    }
 }

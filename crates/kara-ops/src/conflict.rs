@@ -109,19 +109,24 @@ impl ResolutionCounts {
     }
 }
 
-/// Decisiones «para todos los conflictos restantes».
+/// Decisiones «para todos los conflictos restantes» de una operación en curso.
+///
+/// No confundir con `kara_fs::ConflictPolicy`, que es otra cosa y vive una capa
+/// más abajo: aquel es un ajuste fijo de qué hacer cuando el destino de una
+/// restauración está ocupado, y este es el estado vivo de lo que el usuario ha
+/// ido respondiendo en un lote. Compartían nombre por accidente.
 ///
 /// Se guardan **por tipo de conflicto**, no una sola global: la spec sugiere
 /// poder decidir distinto según el tipo, y aplicar a un choque carpeta-contra-
 /// fichero lo que se eligió para dos ficheros sería justo la sorpresa
 /// destructiva que se quiere evitar.
 #[derive(Debug, Clone, Default)]
-pub struct ConflictPolicy {
+pub struct ConflictDecisions {
     blanket: BTreeMap<ConflictKind, Resolution>,
     counts: ResolutionCounts,
 }
 
-impl ConflictPolicy {
+impl ConflictDecisions {
     #[must_use]
     pub fn new() -> Self {
         Self::default()

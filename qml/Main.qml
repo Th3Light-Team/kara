@@ -73,9 +73,22 @@ Window {
 
                     MouseArea {
                         anchors.fill: parent
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        onClicked: function (mouse) {
+                            if (mouse.button === Qt.RightButton)
+                                rowMenu.popup();
+                        }
                         onDoubleClicked: {
                             if (app.entry_kinds[row.index] === "Folder")
                                 app.cd(app.entry_names[row.index]);
+                        }
+                    }
+
+                    Menu {
+                        id: rowMenu
+                        MenuItem {
+                            text: qsTr("Enviar a la papelera")
+                            onTriggered: app.trash(app.entry_names[row.index])
                         }
                     }
 

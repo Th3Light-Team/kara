@@ -31,6 +31,10 @@ pub mod qobject {
         /// Sube a la carpeta padre. En la raiz no hace nada.
         #[qinvokable]
         fn up(self: Pin<&mut App>);
+
+        /// Envia una entrada de la carpeta actual a la papelera y refresca.
+        #[qinvokable]
+        fn trash(self: Pin<&mut App>, name: &QString);
     }
 
     unsafe extern "C++" {
@@ -178,6 +182,19 @@ impl qobject::App {
         let mut target = PathBuf::from(self.path().to_string());
         target.push(name.to_string());
         self.navigate_to(&target);
+    }
+
+    /// Envia a la papelera, nunca borra.
+    ///
+    /// La politica se pide a `kara_ops::trash_policy()` y no se construye aqui:
+    /// `TrashPolicy::default()` deja el desfase horario a cero y estampa el
+    /// `.trashinfo` en UTC, que no falla en ninguna parte y corre la fecha.
+    fn trash(mut self: Pin<&mut Self>, name: &cxx_qt_lib::QString) {
+        let current = PathBuf::from(self.path().to_string());
+        let victim = current.join(name.to_string());
+        if kara_fs::trash::trash_one(&victim, &kara_ops::trash_policy()).is_ok() {
+            self.as_mut().navigate_to(&current);
+        }
     }
 
     fn up(self: Pin<&mut Self>) {
