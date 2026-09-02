@@ -10,3 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod trash;
+
+pub mod listing;
+
+pub use listing::{EntryError, Listing, describe, list_directory, read_hidden_file};

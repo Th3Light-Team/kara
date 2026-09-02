@@ -581,6 +581,7 @@ dependencies = [
  "kara-core",
  "percent-encoding",
  "rustix",
+ "tempfile",
  "thiserror 2.0.20",
 ]
 
