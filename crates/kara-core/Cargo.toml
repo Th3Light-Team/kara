@@ -9,3 +9,7 @@ repository.workspace = true
 
 [dependencies]
 thiserror = "2.0.20"
+unicode-normalization = "0.1.25"
+
+[dev-dependencies]
+proptest = "1.11.0"
