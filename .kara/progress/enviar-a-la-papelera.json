@@ -2,9 +2,9 @@
   "conveniencia": "Enviar a la papelera",
   "crate": "kara-fs",
   "slug": "enviar-a-la-papelera",
-  "estado": "implementado_intento_3",
+  "estado": "auditado_pendiente_supervision",
   "intentos": 3,
-  "actualizado": "2026-09-02T14:40:00-04:00",
+  "actualizado": "2026-09-02T14:14:33-04:00",
   "historial": [
     {
       "fecha": "2026-09-02T13:06:24-04:00",
@@ -544,5 +544,16 @@
     "ignorados": 2,
     "baseline": "cargo test -p kara-fs --no-fail-fast: 74 fallidos, 2 ignorados, 2 pasan (las dos comprobaciones de codigo fuente cb_31, que ya se cumplen con los stubs). Los 74 fallos son los todo!() del contrato.",
     "notaIgnorados": "cb_24_exdev_real_... y cb_18_unidad_desconectada_... exigen montar un segundo volumen o desconectarlo; cada uno lleva en su #[ignore] la orden exacta para ejecutarlo, y ambos tienen companero no ignorado (cb_24_por_defecto_no_se_copia... y cb_18_un_destino_inalcanzable...)."
-  }
+  },
+  "auditoria": {
+    "quien": "sesion interactiva, tras rescatar el trabajo de la sesion que se quedo sin memoria",
+    "compila": true,
+    "tests": "76 pasan, 0 fallan, 2 ignorados",
+    "ignoradosLegitimos": "requieren un segundo volumen montado y una unidad desconectada",
+    "clippy": "0 avisos en todo el workspace",
+    "stubsRestantes": 0,
+    "unwrapEnSrc": 0,
+    "integridadPruebas": "los 4 sha256 cuadran: quien implemento no toco las pruebas"
+  },
+  "notaTimestamp": "El campo 'actualizado' que dejo la sesion anterior decia 14:40 cuando eran las 14:10: escribio una marca futura en vez de ejecutar date -Is."
 }
