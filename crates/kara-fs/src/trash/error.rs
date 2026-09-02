@@ -5,7 +5,7 @@
 //! (`ground/spec/06-contexto-power.md`, «Eliminar (papelera) y borrado
 //! permanente»).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Why a trash directory cannot be used for a given path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,17 +59,16 @@ pub enum TrashError {
         path: PathBuf,
         reason: UnavailableReason,
     },
-    #[error("{path} needs {needed_bytes} bytes but only {available_bytes} are available in the trash")]
+    #[error(
+        "{path} needs {needed_bytes} bytes but only {available_bytes} are available in the trash"
+    )]
     ExceedsTrashCapacity {
         path: PathBuf,
         needed_bytes: u64,
         available_bytes: u64,
     },
     #[error("{path} is on a different device than the trash at {trash_root}")]
-    CrossDevice {
-        path: PathBuf,
-        trash_root: PathBuf,
-    },
+    CrossDevice { path: PathBuf, trash_root: PathBuf },
     #[error("{path} is already inside the trash")]
     PathIsInsideTrash { path: PathBuf },
     #[error("refused to trash {path}")]
@@ -117,6 +116,27 @@ pub enum RestoreError {
         path: PathBuf,
         source: std::io::Error,
     },
+}
+
+/// Maps a raw I/O error into the [`TrashError`] variant its errno implies,
+/// keeping `source` so the original errno is never lost. `ENOENT` becomes
+/// [`TrashError::NotFound`]; `EACCES`/`EPERM` become
+/// [`TrashError::PermissionDenied`]; everything else is [`TrashError::Io`].
+pub(crate) fn classify_io_error(path: &Path, source: std::io::Error) -> TrashError {
+    match source.raw_os_error() {
+        Some(2) => TrashError::NotFound {
+            path: path.to_path_buf(),
+            source,
+        },
+        Some(1) | Some(13) => TrashError::PermissionDenied {
+            path: path.to_path_buf(),
+            source,
+        },
+        _ => TrashError::Io {
+            path: path.to_path_buf(),
+            source,
+        },
+    }
 }
 
 /// Failure of reading, parsing or writing a `.trashinfo` file.

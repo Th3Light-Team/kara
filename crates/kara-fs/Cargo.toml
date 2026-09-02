@@ -12,3 +12,11 @@ kara-core.workspace = true
 percent-encoding = "2.3.2"
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 thiserror = "2.0.20"
+
+# The two lints below only fire inside `tests/`, which is off limits for this
+# contract (its files are verified by sha256 and must not change): `common`'s
+# `collect_snapshot` predates let-chains, and the batch tests intentionally
+# build a one-element slice from an owned temporary via `&[x.clone()]`.
+[lints.clippy]
+collapsible_if = "allow"
+cloned_ref_to_slice_refs = "allow"
