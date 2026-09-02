@@ -163,7 +163,7 @@ pub(crate) fn topdir_of(path: &Path) -> Result<PathBuf, TrashError> {
 
 /// A `$topdir/.Trash` is only trustworthy when it is a real directory (not a
 /// symlink) with the sticky bit set; a rejected candidate is never followed.
-fn is_valid_shared_trash_dir(dot_trash: &Path) -> Result<bool, TrashError> {
+pub(super) fn is_valid_shared_trash_dir(dot_trash: &Path) -> Result<bool, TrashError> {
     match std::fs::symlink_metadata(dot_trash) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -179,7 +179,7 @@ fn is_valid_shared_trash_dir(dot_trash: &Path) -> Result<bool, TrashError> {
 /// State of a volume trash root (`$topdir/.Trash-$uid`, or `$topdir/.Trash/$uid`)
 /// before anything is written into it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VolumeRootState {
+pub(super) enum VolumeRootState {
     /// Nothing is there: it can be created if the policy allows it.
     Missing,
     /// A real directory owned by this user.
@@ -199,7 +199,7 @@ enum VolumeRootState {
 /// succeed. `stat`-based checks such as `Path::is_dir` follow symlinks and
 /// cannot see this; `lstat` can. The ownership check is the same one glib's
 /// local trash backend applies before reusing an existing `.Trash-$uid`.
-fn volume_root_state(root: &Path) -> Result<VolumeRootState, TrashError> {
+pub(super) fn volume_root_state(root: &Path) -> Result<VolumeRootState, TrashError> {
     match std::fs::symlink_metadata(root) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink()

@@ -1,5 +1,5 @@
-//! Pruebas de «Listar la papelera», base de «Restaurar desde la papelera» y
-//! «Vaciar la papelera» (`ground/spec/05-operaciones.md`).
+//! Listing the trash, which "Restaurar desde la papelera" and "Vaciar la
+//! papelera" both stand on (`ground/spec/05-operaciones.md`).
 //!
 //! `volume_top_dirs` is always injected as a `TempTree` on the home device
 //! (never a real mount): `list_trash_in`/`empty_trash_in` never check the
@@ -503,5 +503,81 @@ fn list_trash_encuentra_lo_de_la_papelera_personal_sin_pedir_topdirs() {
         )),
         "el elemento recien enviado aparece via el wrapper publico: {:?}",
         listing.entries
+    );
+}
+
+
+/// Builds `<top>/.Trash/<uid>/{files,info}` with the sticky `.Trash` an
+/// administrator would have created, and returns the two directories.
+fn make_shared_volume_trash(top_dir: &std::path::Path, uid: u32) -> (PathBuf, PathBuf) {
+    let dot_trash = top_dir.join(".Trash");
+    ok(fs::create_dir_all(&dot_trash), "create shared .Trash");
+    // Sticky, world-writable: the only shape the standard lets a shared trash
+    // have, and the one `dir::is_valid_shared_trash_dir` checks for.
+    set_mode(&dot_trash, 0o1777);
+    make_trash_dirs(&dot_trash.join(uid.to_string()))
+}
+
+#[test]
+fn the_shared_volume_layout_is_listed_too() {
+    // A volume whose administrator created a sticky `$top/.Trash` gets its
+    // files put in `$top/.Trash/$uid` — `dir::resolve_trash_dir` prefers that
+    // over `$top/.Trash-$uid`. Listing only the second one meant everything
+    // trashed onto such a volume was invisible: impossible to see, restore or
+    // empty, while still taking up the disk.
+    // Without this guard the home trash read here is the *real* one, so the
+    // listing carries whatever the user has deleted and the assertions below
+    // stop meaning anything. It also takes the env lock the other tests use.
+    let _env = TrashEnv::on_home_device();
+    let tree = TempTree::on_home_device("shared-volume-listing");
+    let top_dir = tree.root.clone();
+    let uid = current_uid(&top_dir);
+    let (files, info) = make_shared_volume_trash(&top_dir, uid);
+
+    let original = top_dir.join("documento.txt");
+    ok(fs::write(files.join("documento.txt"), b"contenido"), "write trashed file");
+    write_trashinfo(&info, &top_dir, "documento.txt", &original);
+
+    let listing = list_trash_in(&[top_dir]);
+
+    let names: Vec<String> = listing
+        .entries
+        .iter()
+        .map(|entry| {
+            entry
+                .display_path()
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        })
+        .collect();
+    assert!(
+        names.iter().any(|name| name == "documento.txt"),
+        "the shared layout was not listed: {names:?}"
+    );
+}
+
+#[test]
+fn a_shared_trash_without_the_sticky_bit_is_not_read() {
+    // Without the sticky bit any user can delete another's entries there, so
+    // the standard says not to trust it — and `trash_one` would not have
+    // written into it either. Reading it anyway would show files this user
+    // never trashed, and let them be deleted from Kara.
+    let _env = TrashEnv::on_home_device();
+    let tree = TempTree::on_home_device("shared-volume-not-sticky");
+    let top_dir = tree.root.clone();
+    let uid = current_uid(&top_dir);
+    let (files, info) = make_shared_volume_trash(&top_dir, uid);
+    set_mode(&top_dir.join(".Trash"), 0o0777);
+
+    let original = top_dir.join("documento.txt");
+    ok(fs::write(files.join("documento.txt"), b"contenido"), "write trashed file");
+    write_trashinfo(&info, &top_dir, "documento.txt", &original);
+
+    let listing = list_trash_in(&[top_dir]);
+
+    assert!(
+        listing.entries.is_empty(),
+        "a shared trash with no sticky bit must not be read"
     );
 }

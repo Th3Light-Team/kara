@@ -42,7 +42,6 @@
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use super::dir;
@@ -135,7 +134,7 @@ pub fn list_trash_in(volume_top_dirs: &[PathBuf]) -> TrashListing {
 
     let uid = dir::current_uid();
     for top_dir in volume_top_dirs {
-        if let Some(volume_dir) = volume_trash_dir_for(top_dir, uid) {
+        for volume_dir in volume_trash_dirs_for(top_dir, uid) {
             scan_trash_dir(
                 &volume_dir,
                 &mut entries,
@@ -182,34 +181,48 @@ fn home_trash_dir_location() -> Result<TrashDir, TrashError> {
     })
 }
 
-/// The same distrust `trash::dir`'s own (private, and so unreachable from
-/// here) `volume_root_state` applies before *writing* into
-/// `$topdir/.Trash-$uid`: a world-writable `$topdir` lets anybody pre-create
-/// that path as a symlink pointing wherever they like. Reading or deleting
-/// through it would hand this user's trashed files — and whatever else lives
-/// at the other end — to whoever planted it. Kept as a small, deliberate
-/// duplicate of that check rather than widening `dir`'s own visibility.
-fn is_trustworthy_volume_trash_root(root: &Path, uid: u32) -> bool {
-    match std::fs::symlink_metadata(root) {
-        Ok(metadata) => {
-            !metadata.file_type().is_symlink() && metadata.is_dir() && metadata.uid() == uid
-        }
-        Err(_) => false,
-    }
-}
+/// Every volume trash root that can be read for `top_dir`, most specific
+/// first.
+///
+/// There are two layouts, and listing has to look in both or it will hide
+/// files it was perfectly happy to put there. `$topdir/.Trash/$uid` is used
+/// when the administrator created a sticky `$topdir/.Trash`;
+/// `$topdir/.Trash-$uid` is the fallback each user creates for themselves.
+/// `dir::resolve_trash_dir` prefers the shared one when it is valid, so
+/// ignoring it here meant everything trashed onto such a volume became
+/// invisible — impossible to list, restore or empty from Kara, while still
+/// occupying the disk.
+///
+/// The trust checks are `dir`'s own, not a copy: a world-writable `$topdir`
+/// lets anybody pre-create either path as a symlink pointing wherever they
+/// like, and reading or deleting through it would hand this user's trashed
+/// files — and whatever else lives at the other end — to whoever planted it.
+/// Two copies of a security check are two chances for them to drift apart.
+fn volume_trash_dirs_for(top_dir: &Path, uid: u32) -> Vec<TrashDir> {
+    let mut roots = Vec::new();
 
-fn volume_trash_dir_for(top_dir: &Path, uid: u32) -> Option<TrashDir> {
-    let root = top_dir.join(format!(".Trash-{uid}"));
-    if !is_trustworthy_volume_trash_root(&root, uid) {
-        return None;
+    let dot_trash = top_dir.join(".Trash");
+    if super::dir::is_valid_shared_trash_dir(&dot_trash).unwrap_or(false) {
+        roots.push(dot_trash.join(uid.to_string()));
     }
-    Some(TrashDir {
-        files: root.join("files"),
-        info: root.join("info"),
-        root,
-        kind: TrashKind::Volume,
-        top_dir: Some(top_dir.to_path_buf()),
-    })
+    roots.push(top_dir.join(format!(".Trash-{uid}")));
+
+    roots
+        .into_iter()
+        .filter(|root| {
+            matches!(
+                super::dir::volume_root_state(root),
+                Ok(super::dir::VolumeRootState::Usable)
+            )
+        })
+        .map(|root| TrashDir {
+            files: root.join("files"),
+            info: root.join("info"),
+            root,
+            kind: TrashKind::Volume,
+            top_dir: Some(top_dir.to_path_buf()),
+        })
+        .collect()
 }
 
 const TRASHINFO_SUFFIX_BYTES: &[u8] = b".trashinfo";
