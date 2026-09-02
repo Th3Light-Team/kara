@@ -191,3 +191,101 @@ fn every_mode_is_reachable_from_the_picker() {
         assert_eq!(ViewSettings::for_mode(mode).mode, mode);
     }
 }
+
+// --- Sorting, remembered alongside the mode --------------------------------
+
+use kara_core::sort::{SortKey, SortOrder, SortOverrides, SortSpec};
+
+fn by_size_descending() -> SortOverrides {
+    SortOverrides {
+        key: Some(SortKey::Size),
+        order: Some(SortOrder::Descending),
+        ..SortOverrides::default()
+    }
+}
+
+#[test]
+fn a_folder_nobody_sorted_follows_the_global_default() {
+    let memory = ViewMemory::default();
+    let sort = memory.settings_for(Path::new("/home/ana"));
+    assert_eq!(sort.mode, ViewMode::Details);
+    assert!(memory.sort_for(Path::new("/home/ana")).is_empty());
+}
+
+#[test]
+fn sorting_is_remembered_per_folder() {
+    let mut memory = ViewMemory::default();
+    let folder = Path::new("/home/ana/Descargas");
+    memory.remember_sort(folder, by_size_descending());
+
+    let resolved = memory.sort_for(folder).resolve(&SortSpec::default());
+    assert_eq!(resolved.key, SortKey::Size);
+    assert_eq!(resolved.order, SortOrder::Descending);
+    // The folders-first grouping was never overridden, so it still follows the
+    // global setting.
+    assert_eq!(resolved.grouping, SortSpec::default().grouping);
+}
+
+#[test]
+fn choosing_a_mode_does_not_forget_the_sorting() {
+    // They are two separate gestures on the same folder, and one must not undo
+    // the other.
+    let mut memory = ViewMemory::default();
+    let folder = Path::new("/home/ana/Descargas");
+    memory.remember_sort(folder, by_size_descending());
+    memory.remember(folder, icons(128));
+
+    assert_eq!(memory.settings_for(folder), icons(128));
+    assert_eq!(memory.sort_for(folder), by_size_descending());
+}
+
+#[test]
+fn sorting_a_folder_does_not_pin_its_mode() {
+    // A folder that only ever chose a sort still follows the global default
+    // view; recording the sort must not silently freeze the mode too.
+    let mut memory = ViewMemory::new(ViewSettings::for_mode(ViewMode::Icons), 8);
+    let folder = Path::new("/home/ana/Fotos");
+    memory.remember_sort(folder, by_size_descending());
+
+    assert_eq!(
+        memory.settings_for(folder),
+        ViewSettings::for_mode(ViewMode::Icons)
+    );
+}
+
+#[test]
+fn sorting_counts_against_the_bounded_history_too() {
+    let mut memory = ViewMemory::new(ViewSettings::default(), 2);
+    memory.remember_sort(Path::new("/a"), by_size_descending());
+    memory.remember_sort(Path::new("/b"), by_size_descending());
+    memory.remember_sort(Path::new("/c"), by_size_descending());
+
+    assert_eq!(memory.len(), 2);
+    assert!(memory.sort_for(Path::new("/a")).is_empty());
+}
+
+#[test]
+fn clicking_a_header_sorts_ascending_and_clicking_again_inverts() {
+    // The exact gesture the Details view needs; the rule lives in `SortSpec`,
+    // and this pins it down from the caller's side.
+    use kara_core::sort::ColumnId;
+
+    let by_name = SortSpec::default();
+    let by_size = by_name
+        .on_header_click(&ColumnId("size".into()))
+        .expect("«size» is a sortable column");
+    assert_eq!(by_size.key, SortKey::Size);
+    assert_eq!(by_size.order, SortOrder::Ascending);
+
+    let inverted = by_size
+        .on_header_click(&ColumnId("size".into()))
+        .expect("the same column again");
+    assert_eq!(inverted.order, SortOrder::Descending);
+
+    // Moving to another column starts over ascending, even from descending.
+    let by_kind = inverted
+        .on_header_click(&ColumnId("kind".into()))
+        .expect("«kind» is sortable");
+    assert_eq!(by_kind.key, SortKey::Kind);
+    assert_eq!(by_kind.order, SortOrder::Ascending);
+}

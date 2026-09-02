@@ -21,7 +21,7 @@ use kara_core::breadcrumb;
 use kara_core::entry::EntryKind;
 use kara_core::filter::{NameFilter, Visibility};
 use kara_core::history::History;
-use kara_core::sort::SortSpec;
+use kara_core::sort::{ColumnId, SortOverrides, SortSpec, column_for_sort_key};
 use kara_core::tree::{Branch, Expandable, RowKind, Section, SectionId, Tree};
 use kara_core::view::{ViewMemory, ViewMode, ViewSettings};
 use kara_fs::icons::Icons;
@@ -51,6 +51,14 @@ pub mod qobject {
         /// URL de la miniatura de cada entrada, vacía mientras no haya una. Se
         /// rellena desde un hilo de fondo, así que cambia después del listado.
         #[qproperty(QStringList, entry_thumbs)]
+        /// Fecha de modificación de cada entrada, ya en hora local.
+        #[qproperty(QStringList, entry_dates)]
+        /// Columna por la que se está ordenando, con el identificador que
+        /// entiende `kara_core::sort` («name», «kind», «size», «modified»), o
+        /// vacía si no se ordena por ninguna. La cabecera la usa para saber
+        /// dónde pintar la flecha.
+        #[qproperty(QString, sort_column)]
+        #[qproperty(bool, sort_ascending)]
         /// Qué entradas son carpetas, en 1 y 0.
         ///
         /// La vista necesita saberlo para entrar al hacer doble clic, y no
@@ -152,6 +160,11 @@ pub mod qobject {
         #[qinvokable]
         fn toggle_sidebar(self: Pin<&mut App>);
 
+        /// Ordena por una columna de la vista de detalles. Un segundo clic en
+        /// la misma invierte el sentido.
+        #[qinvokable]
+        fn sort_by(self: Pin<&mut App>, column: &QString);
+
         /// Cambia de modo de vista. `icon_size` menor o igual que cero pide el
         /// tamaño con el que ese modo se enseña normalmente.
         #[qinvokable]
@@ -194,6 +207,9 @@ pub struct AppRust {
     entry_icons: QStringList,
     entry_thumbs: QStringList,
     entry_dirs: cxx_qt_lib::QList<i32>,
+    entry_dates: QStringList,
+    sort_column: QString,
+    sort_ascending: bool,
     entry_count: i32,
     total_count: i32,
     crumb_names: QStringList,
@@ -226,6 +242,8 @@ pub struct AppRust {
     icons: Icons,
     /// Descripciones de los tipos, para la columna «Tipo».
     descriptions: MimeDescriptions,
+    /// Criterio de ordenación de las carpetas que no han elegido otro.
+    sort_defaults: SortSpec,
     /// Modo y zoom de cada carpeta. Se pierde al cerrar: la spec lo quiere en
     /// disco, pero todavía no hay dónde guardar ajustes.
     views: ViewMemory,
@@ -262,6 +280,9 @@ impl Default for AppRust {
             entry_icons: QStringList::default(),
             entry_thumbs: QStringList::default(),
             entry_dirs: cxx_qt_lib::QList::<i32>::default(),
+            entry_dates: QStringList::default(),
+            sort_column: QString::from("name"),
+            sort_ascending: true,
             entry_count: 0,
             total_count: 0,
             crumb_names: QStringList::default(),
@@ -293,6 +314,7 @@ impl Default for AppRust {
             // tema sale el fichero, no la nitidez.
             icons: Icons::load(ICON_SIZE),
             descriptions: MimeDescriptions::new(TYPE_LANGUAGES.iter().map(|l| (*l).to_string()).collect()),
+            sort_defaults: SortSpec::default(),
             views: ViewMemory::default(),
             thumbnail_jobs: Vec::new(),
             listing: Arc::new(AtomicU64::new(0)),
@@ -310,6 +332,7 @@ impl Default for AppRust {
             app.entry_kinds = snapshot.kinds;
             app.entry_icons = snapshot.icons;
             app.entry_dirs = snapshot.dirs;
+            app.entry_dates = snapshot.dates;
             app.entry_count = snapshot.count;
             app.total_count = snapshot.total;
             app.crumb_names = snapshot.crumb_names;
@@ -399,6 +422,7 @@ struct Snapshot {
     kinds: QStringList,
     icons: QStringList,
     dirs: cxx_qt_lib::QList<i32>,
+    dates: QStringList,
     count: i32,
     /// Qué entradas pueden tener miniatura, para el hilo de fondo.
     jobs: Vec<ThumbnailJob>,
@@ -426,7 +450,11 @@ impl AppRust {
             entries.retain(|entry| filter.matches(entry));
         }
 
-        kara_core::sort::sort_entries(&mut entries, &SortSpec::default());
+        // El criterio sale de lo que esta carpeta decidió, resuelto contra el
+        // global: una carpeta que solo eligió el sentido sigue heredando el
+        // resto.
+        let sort = self.views.sort_for(target).resolve(&self.sort_defaults);
+        kara_core::sort::sort_entries(&mut entries, &sort);
 
         let names = entries.iter().map(|e| QString::from(&e.display)).collect();
         let sizes = entries
@@ -476,6 +504,10 @@ impl AppRust {
             sizes,
             kinds,
             icons,
+            dates: entries
+                .iter()
+                .map(|e| QString::from(&present::modified_label(e.modified)))
+                .collect(),
             dirs: ints(
                 entries
                     .iter()
@@ -719,6 +751,8 @@ impl qobject::App {
         self.as_mut().set_entry_kinds(view.kinds);
         self.as_mut().set_entry_icons(view.icons);
         self.as_mut().set_entry_dirs(view.dirs);
+        self.as_mut().set_entry_dates(view.dates);
+        self.as_mut().publish_sort(target);
 
         // La carpeta manda sobre la vista: se restaura como se dejó antes de
         // pedir miniaturas, porque la talla que se pide sale de ahí.
@@ -909,6 +943,56 @@ impl qobject::App {
             .map(QString::from)
             .collect();
         self.as_mut().set_entry_thumbs(list);
+    }
+
+    /// Refleja en las propiedades por qué columna se está ordenando.
+    ///
+    /// `column_for_sort_key` devuelve `None` para «sin ordenar», que no es
+    /// ninguna columna: entonces no se resalta ninguna cabecera ni se pinta
+    /// flecha, en vez de señalar una al azar.
+    fn publish_sort(mut self: Pin<&mut Self>, folder: &Path) {
+        let resolved = {
+            let state = self.rust();
+            state.views.sort_for(folder).resolve(&state.sort_defaults)
+        };
+        let column = column_for_sort_key(&resolved.key)
+            .map(|id| id.0.into_owned())
+            .unwrap_or_default();
+
+        self.as_mut().set_sort_column(QString::from(&column));
+        self.as_mut()
+            .set_sort_ascending(resolved.order == kara_core::sort::SortOrder::Ascending);
+    }
+
+    /// Un clic en una cabecera de columna.
+    ///
+    /// La semántica —primera vez ascendente, otra vez invierte, cambiar de
+    /// columna vuelve a ascendente— vive en `kara_core::sort`, no aquí: es una
+    /// regla del dominio y hay pruebas que la fijan.
+    fn sort_by(mut self: Pin<&mut Self>, column: &QString) {
+        let folder = PathBuf::from(self.path().to_string());
+        let id = ColumnId(column.to_string().into());
+
+        let (current, defaults) = {
+            let state = self.rust();
+            (
+                state.views.sort_for(&folder).resolve(&state.sort_defaults),
+                state.sort_defaults.clone(),
+            )
+        };
+        // Una columna que no ordena —una miniatura— se ignora sin más: el clic
+        // no puede dejar la vista en un estado que nadie pidió.
+        let Ok(next) = current.on_header_click(&id) else {
+            return;
+        };
+
+        let overrides = SortOverrides::overriding(&next, &defaults);
+        self.as_mut()
+            .rust_mut()
+            .get_mut()
+            .views
+            .remember_sort(&folder, overrides);
+        self.as_mut().render(&folder);
     }
 
     /// Aplica unos ajustes de vista y los recuerda para esta carpeta.

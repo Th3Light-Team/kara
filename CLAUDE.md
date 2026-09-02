@@ -192,10 +192,17 @@ que hace la rueda en el Explorador. Cada carpeta recuerda cómo se dejó, con la
 memoria acotada que pide la spec — en RAM, porque todavía no hay dónde guardar
 ajustes en disco.
 
-**Lo que falta de la vista:** ordenar pulsando en la cabecera, selección
-múltiple, anclar carpetas al panel (necesita dónde guardar ajustes), la vista
-«contenido» (Ctrl+Shift+8), y enchufar a la UI lo que el backend ya ofrece y
-nadie consume todavía (vigilancia, cola, deshacer).
+**Ordenar desde la cabecera.** Nombre, fecha de modificación, tipo y tamaño:
+un clic ordena ascendente, otro invierte, y cambiar de columna vuelve a
+ascendente. La regla vive en `kara_core::sort` —la vista solo dice qué columna
+se pulsó y pinta la flecha—, y el criterio se recuerda por carpeta junto al
+modo, como `SortOverrides` sobre un criterio global: una carpeta que solo
+eligió el sentido sigue heredando el resto.
+
+**Lo que falta de la vista:** selección múltiple, anclar carpetas al panel
+(necesita dónde guardar ajustes), redimensionar columnas y elegir cuáles se
+ven, la vista «contenido» (Ctrl+Shift+8), y enchufar a la UI lo que el backend
+ya ofrece y nadie consume todavía (vigilancia, cola, deshacer).
 
 ### Cabos sueltos conocidos
 

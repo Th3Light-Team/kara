@@ -19,6 +19,7 @@ fn main() {
             QmlFile::from("qml/FileDetails.qml"),
             QmlFile::from("qml/FileGrid.qml"),
             QmlFile::from("qml/ViewModeButton.qml"),
+            QmlFile::from("qml/ColumnHeader.qml"),
         ]),
     )
     .qt_module("Quick")

@@ -777,6 +777,7 @@ dependencies = [
 name = "kara-ui"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "cxx",
  "cxx-qt",
  "cxx-qt-build",

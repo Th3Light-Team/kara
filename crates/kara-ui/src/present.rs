@@ -108,6 +108,20 @@ pub fn crumb_label(segment: &Segment) -> String {
     }
 }
 
+/// Fecha de modificación, como la enseña el Explorador: día, mes, año y hora.
+///
+/// Se escribe en hora local, que es lo que el usuario reconoce; el sistema la
+/// guarda en UTC. Sin segundos: en una columna estrecha no aportan y hacen la
+/// lista más difícil de barrer con la vista.
+#[must_use]
+pub fn modified_label(modified: Option<std::time::SystemTime>) -> String {
+    let Some(modified) = modified else {
+        return String::new();
+    };
+    let local: chrono::DateTime<chrono::Local> = modified.into();
+    local.format("%d/%m/%Y %H:%M").to_string()
+}
+
 /// Cómo se lee una sección del panel de navegación.
 #[must_use]
 pub fn section_label(id: SectionId) -> &'static str {

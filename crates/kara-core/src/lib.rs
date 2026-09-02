@@ -25,7 +25,7 @@ pub use filter::{NameDisplay, NameFilter, Visibility, base_and_extension};
 pub use history::{History, HistoryEntry, ViewState};
 pub use naming::{split_name, unique_name};
 pub use tree::{Branch, Expandable, Row, RowKind, Section, SectionId, Tree};
-pub use view::{ViewMemory, ViewMode, ViewSettings};
+pub use view::{FolderView, ViewMemory, ViewMode, ViewSettings};
 pub use typeahead::TypeAhead;
 pub use sort::{
     Collation, CollationKey, ColumnId, DirectoryGrouping, SortError, SortKey, SortOrder,

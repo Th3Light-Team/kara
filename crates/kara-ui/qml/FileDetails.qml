@@ -16,8 +16,9 @@ Item {
 
     // Anchos compartidos por la cabecera y las filas. Si se separan, las
     // columnas dejan de alinearse en cuanto se toca una.
-    readonly property int typeWidth: 210
-    readonly property int sizeWidth: 110
+    readonly property int dateWidth: 150
+    readonly property int typeWidth: 180
+    readonly property int sizeWidth: 100
     readonly property int nameMinimum: 320
     readonly property int nameMaximum: 560
 
@@ -40,29 +41,36 @@ Item {
             Item {
                 Layout.preferredWidth: view.app.icon_size
             }
-            Text {
-                text: qsTr("Nombre")
+            ColumnHeader {
+                app: view.app
+                column: "name"
+                label: qsTr("Nombre")
                 Layout.fillWidth: true
+                Layout.fillHeight: true
                 Layout.preferredWidth: view.nameMinimum
                 Layout.maximumWidth: view.nameMaximum
-                color: Theme.headerText
-                font.family: Theme.family
-                font.pixelSize: Theme.sizeSmall
             }
-            Text {
-                text: qsTr("Tipo")
+            ColumnHeader {
+                app: view.app
+                column: "modified"
+                label: qsTr("Fecha de modificación")
+                Layout.preferredWidth: view.dateWidth
+                Layout.fillHeight: true
+            }
+            ColumnHeader {
+                app: view.app
+                column: "kind"
+                label: qsTr("Tipo")
                 Layout.preferredWidth: view.typeWidth
-                color: Theme.headerText
-                font.family: Theme.family
-                font.pixelSize: Theme.sizeSmall
+                Layout.fillHeight: true
             }
-            Text {
-                text: qsTr("Tamaño")
+            ColumnHeader {
+                app: view.app
+                column: "size"
+                label: qsTr("Tamaño")
+                alignment: Text.AlignRight
                 Layout.preferredWidth: view.sizeWidth
-                horizontalAlignment: Text.AlignRight
-                color: Theme.headerText
-                font.family: Theme.family
-                font.pixelSize: Theme.sizeSmall
+                Layout.fillHeight: true
             }
             // Lo que sobra a la derecha se deja en blanco: estirar las columnas
             // hasta el borde en una pantalla ancha separa el nombre de su
@@ -131,6 +139,7 @@ Item {
                 Text {
                     text: view.app.entry_names[row.index] ?? ""
                     Layout.fillWidth: true
+                    Layout.leftMargin: 6
                     Layout.preferredWidth: view.nameMinimum
                     Layout.maximumWidth: view.nameMaximum
                     elide: Text.ElideMiddle
@@ -139,8 +148,18 @@ Item {
                     font.pixelSize: Theme.sizeBase
                 }
                 Text {
+                    text: view.app.entry_dates[row.index] ?? ""
+                    Layout.preferredWidth: view.dateWidth
+                    Layout.leftMargin: 6
+                    elide: Text.ElideRight
+                    color: Theme.textDim
+                    font.family: Theme.family
+                    font.pixelSize: Theme.sizeBase
+                }
+                Text {
                     text: view.app.entry_kinds[row.index] ?? ""
                     Layout.preferredWidth: view.typeWidth
+                    Layout.leftMargin: 6
                     elide: Text.ElideRight
                     color: Theme.textDim
                     font.family: Theme.family
@@ -149,6 +168,7 @@ Item {
                 Text {
                     text: view.app.entry_sizes[row.index] ?? ""
                     Layout.preferredWidth: view.sizeWidth
+                    Layout.rightMargin: 6
                     horizontalAlignment: Text.AlignRight
                     color: Theme.textDim
                     font.family: Theme.family

@@ -18,6 +18,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::sort::SortOverrides;
+
 /// How a folder's contents are laid out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ViewMode {
@@ -161,11 +163,24 @@ pub const MEMORY_CAPACITY: usize = 256;
 // cero —la memoria dejaría de recordar— o en un millón, que no es un límite.
 const _: () = assert!(MEMORY_CAPACITY > 0 && MEMORY_CAPACITY <= 4096);
 
+/// Everything one folder remembers about how it was shown.
+///
+/// Mode and sorting are stored differently on purpose. A mode is a choice or it
+/// is nothing, so it is an `Option` over the global default; sorting already has
+/// a type for "this folder decided some of it and inherits the rest", which is
+/// what the spec asks for when it wants the folders-first toggle to persist
+/// globally *and* per folder.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FolderView {
+    pub settings: Option<ViewSettings>,
+    pub sort: SortOverrides,
+}
+
 /// What each folder was left looking like.
 #[derive(Debug, Clone)]
 pub struct ViewMemory {
     fallback: ViewSettings,
-    remembered: HashMap<PathBuf, ViewSettings>,
+    remembered: HashMap<PathBuf, FolderView>,
     /// Least recently remembered first, so eviction knows what to drop.
     order: Vec<PathBuf>,
     capacity: usize,
@@ -203,19 +218,41 @@ impl ViewMemory {
     pub fn settings_for(&self, folder: &Path) -> ViewSettings {
         self.remembered
             .get(folder)
-            .copied()
+            .and_then(|remembered| remembered.settings)
             .unwrap_or(self.fallback)
     }
 
-    /// Records how a folder was left.
+    /// What this folder decided about sorting. Empty means it follows the
+    /// global default in everything.
+    #[must_use]
+    pub fn sort_for(&self, folder: &Path) -> SortOverrides {
+        self.remembered
+            .get(folder)
+            .map(|remembered| remembered.sort.clone())
+            .unwrap_or_default()
+    }
+
+    /// Records the mode and zoom a folder was left in, without disturbing what
+    /// it had decided about sorting.
     pub fn remember(&mut self, folder: &Path, settings: ViewSettings) {
+        self.touch(folder, |remembered| remembered.settings = Some(settings));
+    }
+
+    /// Records what a folder decided about sorting, without disturbing its mode.
+    pub fn remember_sort(&mut self, folder: &Path, sort: SortOverrides) {
+        self.touch(folder, |remembered| remembered.sort = sort);
+    }
+
+    /// Brings a folder to the front of the history and lets the caller change
+    /// it, evicting the oldest if that overflows the bound.
+    fn touch(&mut self, folder: &Path, change: impl FnOnce(&mut FolderView)) {
         if self.capacity == 0 {
             return;
         }
 
         self.order.retain(|kept| kept != folder);
         self.order.push(folder.to_path_buf());
-        self.remembered.insert(folder.to_path_buf(), settings);
+        change(self.remembered.entry(folder.to_path_buf()).or_default());
 
         while self.order.len() > self.capacity {
             let oldest = self.order.remove(0);
