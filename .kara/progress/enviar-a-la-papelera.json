@@ -1,0 +1,538 @@
+{
+  "conveniencia": "Enviar a la papelera",
+  "crate": "kara-fs",
+  "slug": "enviar-a-la-papelera",
+  "estado": "pruebas_listas",
+  "intentos": 0,
+  "actualizado": "2026-09-02T13:23:11-04:00",
+  "historial": [
+    {
+      "fecha": "2026-09-02T13:06:24-04:00",
+      "estado": "contrato_listo",
+      "nota": "Contrato fijado por el arquitecto. kara-fs estaba vacio (solo el doc-comment de lib.rs): no hay nada que no duplicar ni que romper. Modulo nuevo `trash`, sin tocar `entry`/`sort` de kara-core."
+    },
+    {
+      "fecha": "2026-09-02T13:23:11-04:00",
+      "estado": "pruebas_listas",
+      "nota": "Stubs del modulo trash (tipos y errores implementados, funciones con todo!()) y 78 pruebas de integracion, al menos una por cada uno de los 31 casos borde, con el id en el nombre. Baseline verificado: la suite falla por los todo!()."
+    }
+  ],
+  "contrato": {
+    "resumen": "Primitiva de kara-fs que mueve rutas del usuario a la papelera FreeDesktop (home o por volumen), registra ruta original y fecha en un .trashinfo restaurable, no recorre bytes salvo cruce de volumen autorizado, reporta por elemento sin abortar el lote, es cancelable y devuelve el registro exacto que la pila de deshacer necesita para restaurar.",
+    "fuente": {
+      "documento": "ground/spec/05-operaciones.md",
+      "seccion": "## Enviar a la papelera",
+      "lineas": "217-233",
+      "prioridad": "🔴 Imprescindible",
+      "categoria": "Papelera y eliminación",
+      "encontradaConTituloExacto": true,
+      "secundarias": [
+        "ground/spec/02-seleccion.md — ## Eliminar a la papelera y borrado permanente (l. 385-403)",
+        "ground/spec/06-contexto-power.md — ## Eliminar (papelera) y borrado permanente (l. 70-87)",
+        "ground/spec/05-operaciones.md — ## Restaurar desde la papelera (l. 235-243)",
+        "ground/spec/05-operaciones.md — ## Eliminación permanente (Shift+Supr) (l. 245-263)",
+        "ground/spec/05-operaciones.md — ## Manejo de errores con reintentar / omitir / cancelar (l. 205-215)",
+        "ground/spec/05-operaciones.md — ## Deshacer y rehacer operaciones de archivo (l. 295-303)",
+        "ground/spec/00-filosofia.md — Reversibilidad por defecto (l. 12)"
+      ]
+    },
+    "conveniencasAbsorbidas": [
+      {
+        "nombre": "Restaurar desde la papelera (solo la primitiva de sistema de ficheros)",
+        "porQueInseparable": "La spec exige que enviar a la papelera «debe ser deshacible con Ctrl+Z» y que el .trashinfo registre «la ruta original y la fecha para poder restaurar». Un .trashinfo que no se sepa deshacer es un formato no verificado: sin `restore` en el mismo contrato, la prueba de que el registro es correcto no existe y habria que rehacer el escritor.",
+        "alcanceAbsorbido": "restore_item / restore_from_info: recrear directorios intermedios, rename inverso, deteccion de conflicto en destino, deteccion de entrada ausente.",
+        "alcanceNOAbsorbido": "La vista de papelera, las columnas «Ubicación original» y «Fecha de eliminación», y «Restaurar todo» son UI (kara-ui) sobre esta primitiva; el dialogo de conflicto es de kara-ops."
+      },
+      {
+        "nombre": "Eliminación permanente (solo la primitiva, sin confirmacion)",
+        "porQueInseparable": "La spec ordena que ante un volumen sin papelera «el explorador cae de facto en eliminación permanente y debe advertirlo aunque se haya usado la tecla Supr normal». Ese camino sale de la propia deteccion de kara-fs; sin `delete_permanently` en el mismo modulo, el caso borde de la conveniencia principal no es ejecutable de punta a punta.",
+        "alcanceAbsorbido": "delete_permanently(path) recursivo, cancelable, con reporte por elemento.",
+        "alcanceNOAbsorbido": "La confirmacion obligatoria de Shift+Supr, el foco en el boton seguro y el texto '¿Eliminar permanentemente estos N elementos?' viven en kara-ops/kara-ui. kara-fs NUNCA decide borrar por su cuenta: si no hay papelera devuelve un error, jamas escala a borrado."
+      },
+      {
+        "nombre": "Manejo de errores reintentar / omitir / cancelar (contrato por elemento)",
+        "porQueInseparable": "«Un fallo en un lote no aborta el lote» es regla de proyecto y caso borde explicito de la spec. Si `trash_batch` devolviera Result<(), E> habria que rediseñar la firma entera al implementar el dialogo.",
+        "alcanceAbsorbido": "Trait observador con decisiones Retry/Skip/SkipAll/Cancel, y BatchOutcome con la lista de omitidos y sus motivos.",
+        "alcanceNOAbsorbido": "El dialogo, los textos en lenguaje llano y el resumen final copiable son de kara-ui."
+      },
+      {
+        "nombre": "Registro para deshacer/rehacer",
+        "porQueInseparable": "«Al deshacer 'enviar a papelera', el archivo vuelve a su sitio». La pila vive en kara-ops, pero el dato que apila lo produce kara-fs; definirlo despues obliga a cambiar el tipo de retorno.",
+        "alcanceAbsorbido": "TrashedItem serializable y suficiente por si solo para restaurar (ruta original, ruta en files/, ruta del .trashinfo, fecha, tipo de papelera).",
+        "alcanceNOAbsorbido": "La pila, el etiquetado 'Deshacer enviar a la papelera' y el toast."
+      },
+      {
+        "nombre": "Deteccion de disponibilidad de papelera (probe)",
+        "porQueInseparable": "Los dos avisos que exige la spec (unidad sin papelera; elemento mayor que la capacidad) deben poder mostrarse ANTES de mover nada. Sin `probe`, el aviso solo podria darse a posteriori, que es exactamente el comportamiento que la spec prohibe.",
+        "alcanceAbsorbido": "probe_trash(path, policy) -> TrashAvailability, sin efectos secundarios salvo crear la papelera de volumen si la politica lo permite (y solo en trash_*, nunca en probe).",
+        "alcanceNOAbsorbido": "El texto del aviso y el boton 'Eliminar permanentemente'."
+      }
+    ],
+    "conveniencasNOAbsorbidas": [
+      "Confirmación antes de eliminar (configurable) — 05-operaciones l. 283-293: es ajuste + dialogo, vive en kara-ops/kara-ui. kara-fs no pregunta nada.",
+      "Vaciar la papelera — 05-operaciones l. 265-281: opera sobre el contenido de la papelera, no sobre la seleccion; contrato aparte que reutilizara `delete_permanently` y el lector de .trashinfo.",
+      "Seleccion del elemento adyacente tras eliminar (02-seleccion l. 393) — es estado de vista, kara-ui.",
+      "El atajo Supr / Shift+Supr (07-atajos-teclado l. 95) — keymap, kara-ui."
+    ],
+    "capas": {
+      "crate": "kara-fs",
+      "modulo": "crates/kara-fs/src/trash/ (mod.rs, dir.rs, info.rs, error.rs)",
+      "exportaEn": "crates/kara-fs/src/lib.rs -> pub mod trash;",
+      "dependenciasPermitidas": [
+        "kara-core",
+        "rustix",
+        "thiserror",
+        "percent-encoding",
+        "std"
+      ],
+      "prohibido": [
+        "Depender de kara-ops, kara-index o kara-ui (ui -> ops -> {fs,index} -> core).",
+        "unwrap() / expect() / panic! / indexado que pueda desbordar en cualquier ruta que toque ficheros del usuario, incluidos los tests-helpers que operan sobre rutas reales.",
+        "Mostrar, decidir o suponer confirmaciones.",
+        "Escribir en stdout/stderr.",
+        "Cualquier hilo propio o async: la funcion es sincrona y bloqueante; que no bloquee la UI es responsabilidad de kara-ops (worker), y este contrato lo hace posible exigiendo cancelacion cooperativa."
+      ]
+    },
+    "apiPublica": {
+      "nota": "Firmas normativas. Los nombres son parte del contrato. Todo tipo publico deriva Debug; TrashedItem y TrashInfo derivan ademas Clone y PartialEq.",
+      "items": [
+        {
+          "id": "api_01",
+          "firma": "pub fn trash_one(path: &Path, policy: &TrashPolicy) -> Result<TrashedItem, TrashError>",
+          "notas": "Camino de un solo elemento. No sigue enlaces simbolicos: envia el enlace, no su destino. No recorre el contenido de un directorio salvo que la politica autorice copia entre volumenes."
+        },
+        {
+          "id": "api_02",
+          "firma": "pub fn trash_batch(paths: &[PathBuf], policy: &TrashPolicy, observer: &mut dyn TrashObserver) -> BatchOutcome",
+          "notas": "No devuelve Result: un fallo por elemento nunca aborta el lote. Procesa en el orden dado. Consulta al observador antes de cada elemento (progreso) y en cada fallo (decision)."
+        },
+        {
+          "id": "api_03",
+          "firma": "pub fn probe_trash(path: &Path, policy: &TrashPolicy) -> Result<TrashAvailability, TrashError>",
+          "notas": "Sin efectos secundarios: NUNCA crea la papelera de volumen aunque policy.create_volume_trash sea true; si no existe pero podria crearse, devuelve TrashAvailability::Available { kind: Volume, would_create: true, .. }."
+        },
+        {
+          "id": "api_04",
+          "firma": "pub fn restore_item(item: &TrashedItem, on_conflict: ConflictPolicy) -> Result<PathBuf, RestoreError>",
+          "notas": "Devuelve la ruta final restaurada (puede diferir de original_path con ConflictPolicy::KeepBoth). Borra el .trashinfo solo si el rename final tuvo exito."
+        },
+        {
+          "id": "api_05",
+          "firma": "pub fn read_trash_info(info_path: &Path) -> Result<TrashInfo, TrashInfoError>",
+          "notas": "Lector del .trashinfo; base de la vista de papelera y del rehacer tras reiniciar la app."
+        },
+        {
+          "id": "api_06",
+          "firma": "pub fn delete_permanently(path: &Path, observer: &mut dyn TrashObserver) -> Result<u64, TrashError>",
+          "notas": "Recursivo y cancelable. Devuelve el numero de entradas eliminadas. Es la salida explicita para el caso 'volumen sin papelera'; kara-fs jamas la invoca por su cuenta desde trash_one/trash_batch."
+        },
+        {
+          "id": "api_07",
+          "firma": "pub fn home_trash_dir() -> Result<TrashDir, TrashError>",
+          "notas": "$XDG_DATA_HOME/Trash, con caida a $HOME/.local/share/Trash cuando XDG_DATA_HOME esta vacia o no es absoluta. Crea files/ e info/ con modo 0700 si faltan."
+        },
+        {
+          "id": "api_08",
+          "firma": "pub fn resolve_trash_dir(path: &Path, policy: &TrashPolicy) -> Result<TrashDir, TrashError>",
+          "notas": "Devuelve la papelera que corresponde a `path` segun su dispositivo: la home si comparte st_dev con la home trash, si no la del volumen ($topdir/.Trash/$uid validada, o $topdir/.Trash-$uid)."
+        }
+      ],
+      "tipos": [
+        {
+          "nombre": "TrashPolicy",
+          "definicion": "pub struct TrashPolicy { pub create_volume_trash: bool, pub allow_cross_device_copy: bool, pub max_item_bytes: Option<u64>, pub free_space_margin_bytes: u64 }",
+          "default": "impl Default: create_volume_trash = true, allow_cross_device_copy = false, max_item_bytes = None, free_space_margin_bytes = 0",
+          "notas": "allow_cross_device_copy = false hace que un elemento sin papelera en su propio volumen falle con NoTrashOnVolume en vez de copiarse en silencio."
+        },
+        {
+          "nombre": "TrashDir",
+          "definicion": "pub struct TrashDir { pub root: PathBuf, pub files: PathBuf, pub info: PathBuf, pub kind: TrashKind, pub top_dir: Option<PathBuf> }",
+          "notas": "top_dir es Some solo para TrashKind::Volume; determina que Path= del .trashinfo sea relativo."
+        },
+        {
+          "nombre": "TrashKind",
+          "definicion": "pub enum TrashKind { Home, Volume }"
+        },
+        {
+          "nombre": "TrashedItem",
+          "definicion": "pub struct TrashedItem { pub original_path: PathBuf, pub trashed_path: PathBuf, pub info_path: PathBuf, pub deletion_date: DeletionDate, pub kind: TrashKind, pub top_dir: Option<PathBuf>, pub bytes_copied: Option<u64> }",
+          "notas": "bytes_copied = None cuando fue rename(2) puro (el caso normal); Some(n) solo tras copia entre volumenes autorizada."
+        },
+        {
+          "nombre": "DeletionDate",
+          "definicion": "pub struct DeletionDate { pub year: i32, pub month: u8, pub day: u8, pub hour: u8, pub minute: u8, pub second: u8 }",
+          "notas": "Hora LOCAL sin zona, formato FreeDesktop `%Y-%m-%dT%H:%M:%S`. `DeletionDate::from_system_time_local(SystemTime, utc_offset_seconds: i32) -> Result<DeletionDate, TrashInfoError>` y `fn format(&self) -> String` / `fn parse(&str) -> Result<DeletionDate, TrashInfoError>`. El desplazamiento horario se INYECTA: kara-fs no lee la zona por si mismo, para que la prueba sea determinista."
+        },
+        {
+          "nombre": "TrashInfo",
+          "definicion": "pub struct TrashInfo { pub original_path: PathBuf, pub deletion_date: DeletionDate }",
+          "metodos": "pub fn serialize(&self, relative_to: Option<&Path>) -> Result<String, TrashInfoError>; pub fn parse(bytes: &[u8], top_dir: Option<&Path>) -> Result<TrashInfo, TrashInfoError>"
+        },
+        {
+          "nombre": "TrashAvailability",
+          "definicion": "pub enum TrashAvailability { Available { kind: TrashKind, would_create: bool, free_bytes: Option<u64> }, Unavailable { reason: UnavailableReason }, ExceedsCapacity { needed_bytes: u64, available_bytes: u64 } }"
+        },
+        {
+          "nombre": "UnavailableReason",
+          "definicion": "pub enum UnavailableReason { NoTopDir, TopDirReadOnly, TopDirNotWritable, StickyTrashRejected, VolumeTrashMissingAndCreationDisabled, PathIsInsideTrash, PathIsTopDir }"
+        },
+        {
+          "nombre": "TrashObserver",
+          "definicion": "pub trait TrashObserver { fn on_item_start(&mut self, path: &Path, index: usize, total: usize) -> Flow { Flow::Continue } fn on_bytes(&mut self, copied: u64, total: Option<u64>) -> Flow { Flow::Continue } fn on_error(&mut self, path: &Path, error: &TrashError) -> ErrorDecision { ErrorDecision::Skip } fn on_item_done(&mut self, item: &TrashedItem) {} }",
+          "notas": "Los metodos por defecto permiten un observador nulo. `on_bytes` es la unica via de progreso fino y solo se llama en copia entre volumenes o en delete_permanently."
+        },
+        {
+          "nombre": "Flow",
+          "definicion": "pub enum Flow { Continue, Cancel }"
+        },
+        {
+          "nombre": "ErrorDecision",
+          "definicion": "pub enum ErrorDecision { Retry, Skip, SkipAll, Cancel }"
+        },
+        {
+          "nombre": "BatchOutcome",
+          "definicion": "pub struct BatchOutcome { pub trashed: Vec<TrashedItem>, pub skipped: Vec<(PathBuf, TrashError)>, pub cancelled: bool }",
+          "notas": "trashed.len() + skipped.len() <= paths.len(); la diferencia son los no intentados por cancelacion."
+        },
+        {
+          "nombre": "ConflictPolicy",
+          "definicion": "pub enum ConflictPolicy { Fail, KeepBoth, Overwrite }",
+          "notas": "Default de la UI = Fail: la spec exige disparar el dialogo de conflicto, no decidir."
+        },
+        {
+          "nombre": "TrashError",
+          "definicion": "#[derive(Debug, thiserror::Error)] pub enum TrashError { NotFound { path: PathBuf, source: std::io::Error }, PermissionDenied { path: PathBuf, source: std::io::Error }, NoTrashOnVolume { path: PathBuf, reason: UnavailableReason }, ExceedsTrashCapacity { path: PathBuf, needed_bytes: u64, available_bytes: u64 }, CrossDevice { path: PathBuf, trash_root: PathBuf }, PathIsInsideTrash { path: PathBuf }, RefusedSpecialPath { path: PathBuf, reason: RefusalReason }, NameExhausted { path: PathBuf, attempts: u32 }, InfoWrite { info_path: PathBuf, source: std::io::Error }, Io { path: PathBuf, source: std::io::Error }, Cancelled }",
+          "notas": "Cada variante nombra la RUTA implicada: la spec exige que el error nombre el fichero. `source` conserva el errno; nada de String como unico dato."
+        },
+        {
+          "nombre": "RefusalReason",
+          "definicion": "pub enum RefusalReason { Root, MountPoint, TrashAncestor, Relative, Empty }"
+        },
+        {
+          "nombre": "RestoreError",
+          "definicion": "#[derive(Debug, thiserror::Error)] pub enum RestoreError { TrashEntryMissing { trashed_path: PathBuf }, DestinationExists { destination: PathBuf }, DestinationVolumeUnavailable { destination: PathBuf, source: std::io::Error }, ParentCreation { parent: PathBuf, source: std::io::Error }, Info(#[from] TrashInfoError), Io { path: PathBuf, source: std::io::Error } }"
+        },
+        {
+          "nombre": "TrashInfoError",
+          "definicion": "#[derive(Debug, thiserror::Error)] pub enum TrashInfoError { MissingHeader, MissingPath, MissingDeletionDate, MalformedDate { raw: String }, InvalidPercentEncoding { raw: String }, NotAbsolute { raw: String }, Io { path: PathBuf, source: std::io::Error } }"
+        }
+      ]
+    },
+    "casosBorde": [
+      {
+        "id": "cb_01",
+        "titulo": "Supr mueve la seleccion a la papelera (lote, no un solo elemento)",
+        "cita": "«La tecla Supr mueve la selección a la papelera.» (05-operaciones, Enviar a la papelera)",
+        "comportamiento": "trash_batch acepta N rutas y devuelve un TrashedItem por cada exito, en el mismo orden de entrada.",
+        "verificable": "Con 3 ficheros, BatchOutcome.trashed.len() == 3, skipped vacio, cancelled == false, y los tres desaparecen de su directorio origen."
+      },
+      {
+        "id": "cb_02",
+        "titulo": "Rapido: rename(2), sin recorrer bytes dentro del mismo volumen",
+        "cita": "«La operación es rápida (sin recorrer bytes salvo entre volúmenes)» (05-operaciones)",
+        "comportamiento": "Dentro del mismo dispositivo se usa renameat; jamas se abre ni se lee el contenido, ni siquiera para un directorio con muchos hijos.",
+        "verificable": "Enviar un directorio con 5.000 hijos a la papelera no llama nunca a on_bytes y TrashedItem.bytes_copied == None. El inodo del fichero en trash/files es el mismo (st_ino/st_dev) que tenia en origen."
+      },
+      {
+        "id": "cb_03",
+        "titulo": "Registra ruta original y fecha",
+        "cita": "«debe registrar la ruta original y la fecha para poder restaurar» (05-operaciones)",
+        "comportamiento": "Se escribe <trash>/info/<nombre>.trashinfo con exactamente `[Trash Info]\\nPath=<ruta percent-encoded>\\nDeletionDate=YYYY-MM-DDThh:mm:ss\\n`.",
+        "verificable": "read_trash_info(item.info_path) devuelve original_path == la ruta absoluta previa y deletion_date parseable; el fichero empieza por la linea literal `[Trash Info]`."
+      },
+      {
+        "id": "cb_04",
+        "titulo": "Papelera FreeDesktop en la ubicacion correcta",
+        "cita": "«En Linux la papelera sigue la especificación FreeDesktop (~/.local/share/Trash), con papeleras por volumen (.Trash-<uid>).» (05-operaciones, nota)",
+        "comportamiento": "Papelera home = $XDG_DATA_HOME/Trash (caida a $HOME/.local/share/Trash si XDG_DATA_HOME esta vacia o no es absoluta), con subdirectorios files/ e info/ creados en modo 0700. Papelera de volumen = $topdir/.Trash/$uid si $topdir/.Trash existe, es directorio real (no enlace) y tiene el bit sticky; en caso contrario $topdir/.Trash-$uid.",
+        "verificable": "Con XDG_DATA_HOME apuntando a un temporal, home_trash_dir().root termina en /Trash y existen files/ e info/ con permisos 0o700. Con un $topdir/.Trash sin sticky, resolve_trash_dir elige .Trash-<uid> (no la rechaza en silencio ni la usa)."
+      },
+      {
+        "id": "cb_05",
+        "titulo": "Path= relativo en papelera de volumen, absoluto en papelera home",
+        "cita": "«con papeleras por volumen (.Trash-<uid>)» (05-operaciones, nota) — la spec FreeDesktop que esa nota adopta exige Path relativo al topdir en las papeleras de volumen",
+        "comportamiento": "TrashInfo::serialize(Some(top_dir)) emite la ruta relativa al topdir sin barra inicial; con None, la absoluta.",
+        "verificable": "Fichero en <topdir>/data/x.txt enviado a la papelera de volumen produce `Path=data/x.txt`; el mismo fichero bajo $HOME produce `Path=/home/.../x.txt`."
+      },
+      {
+        "id": "cb_06",
+        "titulo": "Percent-encoding del Path=",
+        "cita": "«debe registrar la ruta original […] para poder restaurar» (05-operaciones): una ruta mal codificada no se restaura",
+        "comportamiento": "Se codifican los bytes crudos de la ruta (OsStr, no UTF-8 obligatorio) segun RFC 2396: se dejan sin escapar los no reservados y `/`; se escapan como minimo espacio, `%`, `#`, `?`, `[`, `]`, control y todo byte >= 0x80.",
+        "verificable": "Un fichero llamado `a b#c%d.txt` genera `Path=` con `a%20b%23c%25d.txt` y read_trash_info lo devuelve byte a byte identico. Un nombre con bytes no-UTF-8 (\\xff) sobrevive el viaje de ida y vuelta sin perdida ni panico."
+      },
+      {
+        "id": "cb_07",
+        "titulo": "DeletionDate en hora local sin zona",
+        "cita": "«debe registrar la ruta original y la fecha» (05-operaciones)",
+        "comportamiento": "Formato exacto `%Y-%m-%dT%H:%M:%S`, cero-rellenado, sin sufijo Z ni offset. El offset se inyecta como parametro.",
+        "verificable": "DeletionDate::from_system_time_local(t, 0).format() == \"2026-09-02T17:06:24\" para un t conocido; parse(format()) es identidad; una fecha con sufijo `Z` produce MalformedDate, no un valor a medias."
+      },
+      {
+        "id": "cb_08",
+        "titulo": "Colision de nombre dentro de la papelera: reserva atomica",
+        "cita": "«La tecla Supr mueve la selección a la papelera» — dos ficheros distintos con el mismo nombre base no pueden pisarse: perder datos rompe «Reversibilidad por defecto» (00-filosofia l. 12)",
+        "comportamiento": "El nombre se reserva creando primero el .trashinfo con O_EXCL|O_CREAT. Si existe, se prueba `base.2`, `base.3`… insertando el sufijo ANTES de la extension (`nota.2.txt`), hasta un limite; agotado, NameExhausted.",
+        "verificable": "Enviar /a/x.txt y luego /b/x.txt deja en files/ `x.txt` y `x.2.txt`, y dos .trashinfo con Path= distintos. Ninguno de los dos ficheros pierde contenido. Con 2 ficheros del MISMO lote y mismo nombre base, el resultado es el mismo (la desambiguacion no depende de que el lote sea uno o dos)."
+      },
+      {
+        "id": "cb_09",
+        "titulo": "Si falla el rename, no queda .trashinfo huerfano",
+        "cita": "«cancelar detiene de forma segura sin dejar estados a medias» (05-operaciones, Manejo de errores)",
+        "comportamiento": "Orden obligatorio: (1) crear info con O_EXCL, (2) renameat del fichero a files/, (3) si (2) falla, borrar el info recien creado antes de devolver el error.",
+        "verificable": "Forzado un fallo de rename (destino files/ sin permiso de escritura), el directorio info/ queda EXACTAMENTE como estaba antes de la llamada y el fichero sigue en su sitio."
+      },
+      {
+        "id": "cb_10",
+        "titulo": "Unidad externa/red sin papelera propia: avisar, nunca borrar",
+        "cita": "«archivos en unidades externas/red pueden no tener papelera propia y deben ofrecer eliminación directa CON aviso» (05-operaciones)",
+        "comportamiento": "Si no hay papelera utilizable en el volumen del elemento (topdir de solo lectura, sin permiso, o .Trash-$uid inexistente con create_volume_trash=false), se devuelve TrashError::NoTrashOnVolume con el UnavailableReason concreto. kara-fs NO borra ni cae a la papelera home copiando bytes.",
+        "verificable": "Con un topdir montado de solo lectura, trash_one devuelve Err(NoTrashOnVolume { reason: TopDirReadOnly }) y el fichero SIGUE EXISTIENDO en su ruta original. probe_trash sobre el mismo path devuelve Unavailable con el mismo reason y no crea nada."
+      },
+      {
+        "id": "cb_11",
+        "titulo": "Papelera de volumen creada solo si la politica lo permite",
+        "cita": "«pueden no tener papelera propia y deben ofrecer eliminación directa CON aviso» (05-operaciones)",
+        "comportamiento": "create_volume_trash=true crea $topdir/.Trash-$uid con modo 0700 y sus files/ e info/. Con false, UnavailableReason::VolumeTrashMissingAndCreationDisabled.",
+        "verificable": "Dos llamadas identicas con politicas distintas: una crea el directorio y mueve; la otra devuelve Err y no crea ninguna entrada nueva en el topdir."
+      },
+      {
+        "id": "cb_12",
+        "titulo": "$topdir/.Trash sospechosa se rechaza",
+        "cita": "«papeleras por volumen (.Trash-<uid>)» (05-operaciones, nota)",
+        "comportamiento": "Un $topdir/.Trash que sea enlace simbolico, que no sea directorio, o que no tenga el bit sticky, NO se usa: se pasa a .Trash-$uid. La razon queda expuesta como StickyTrashRejected en probe.",
+        "verificable": "Con $topdir/.Trash como symlink a /tmp, resolve_trash_dir devuelve una ruta que termina en .Trash-<uid> y nada se escribe a traves del symlink."
+      },
+      {
+        "id": "cb_13",
+        "titulo": "Elemento mayor que la capacidad de la papelera",
+        "cita": "«elementos mayores que la capacidad de la papelera deben avisar de que se borrarán permanentemente» (05-operaciones)",
+        "comportamiento": "Si policy.max_item_bytes es Some(l) y el tamaño aparente del elemento supera l, o si el espacio libre del sistema de ficheros de la papelera menos free_space_margin_bytes no alcanza (solo relevante cuando habra copia), se devuelve ExceedsTrashCapacity { needed_bytes, available_bytes } SIN mover nada. probe_trash lo anticipa con TrashAvailability::ExceedsCapacity.",
+        "verificable": "max_item_bytes = Some(1024) con un fichero de 4096: Err(ExceedsTrashCapacity { needed_bytes: 4096, .. }), el fichero intacto, la papelera sin nuevas entradas. Con max_item_bytes = None el mismo fichero se envia sin consultar tamaño alguno (no debe haber travesia para calcularlo)."
+      },
+      {
+        "id": "cb_14",
+        "titulo": "Deshacible: el resultado basta para restaurar",
+        "cita": "«la operación debe ser deshacible con Ctrl+Z» (05-operaciones) · «Al deshacer 'enviar a papelera', el archivo vuelve a su sitio» (05-operaciones, Deshacer)",
+        "comportamiento": "restore_item(&item, ConflictPolicy::Fail) devuelve el elemento a original_path y elimina el .trashinfo.",
+        "verificable": "trash_one seguido de restore_item deja el arbol byte a byte como al principio: el fichero en su ruta con su contenido, files/ e info/ sin la entrada, y la ruta devuelta == original_path."
+      },
+      {
+        "id": "cb_15",
+        "titulo": "Restaurar recrea directorios intermedios",
+        "cita": "«'Restaurar' recrea la ruta original (incluyendo carpetas intermedias si ya no existen)» (05-operaciones, Restaurar)",
+        "comportamiento": "restore_item crea los ancestros ausentes de original_path (modo 0755) antes del rename; si la creacion falla, RestoreError::ParentCreation y la entrada sigue en la papelera.",
+        "verificable": "Borrado el directorio padre tras enviar a la papelera, restore_item lo recrea y el fichero vuelve. Si el padre no se puede crear, el .trashinfo y el fichero en files/ SIGUEN existiendo (nada se pierde)."
+      },
+      {
+        "id": "cb_16",
+        "titulo": "Restaurar sobre un nombre ya ocupado dispara conflicto, no sobrescribe",
+        "cita": "«si ya existe un archivo con el mismo nombre en el destino, disparar el diálogo de conflicto normal» (05-operaciones, Restaurar)",
+        "comportamiento": "Con ConflictPolicy::Fail (el que usara la UI para poder preguntar), destino existente => RestoreError::DestinationExists sin tocar nada. KeepBoth genera `nombre (2).ext`. Overwrite solo si el llamador lo pide explicitamente.",
+        "verificable": "Recreado un fichero distinto en la ruta original, restore_item(Fail) devuelve DestinationExists y el contenido del fichero existente NO cambia; restore_item(KeepBoth) crea un segundo fichero y deja ambos."
+      },
+      {
+        "id": "cb_17",
+        "titulo": "La entrada ya no esta donde se dejo",
+        "cita": "«si el estado cambió (el archivo ya no existe donde se dejó), avisar en vez de fallar en silencio» (05-operaciones, Deshacer)",
+        "comportamiento": "Si trashed_path no existe (papelera vaciada por otro proceso), RestoreError::TrashEntryMissing con la ruta; nunca Ok(()) ni panico.",
+        "verificable": "Borrado a mano files/x.txt, restore_item devuelve TrashEntryMissing { trashed_path } y el .trashinfo NO se borra (queda evidencia para el reporte)."
+      },
+      {
+        "id": "cb_18",
+        "titulo": "Ubicacion original en unidad desconectada",
+        "cita": "«si la ubicación original está en una unidad desconectada, avisar» (05-operaciones, Restaurar)",
+        "comportamiento": "Errores ENOENT/ENXIO/ENODEV/EIO al alcanzar el ancestro montable de original_path se distinguen como RestoreError::DestinationVolumeUnavailable, no como ParentCreation.",
+        "verificable": "Con original_path bajo un punto de montaje inexistente y no creable, el error es DestinationVolumeUnavailable y no se crean directorios sueltos bajo /media."
+      },
+      {
+        "id": "cb_19",
+        "titulo": "Un fallo no aborta el lote",
+        "cita": "«Omitir continúa con el resto; cancelar detiene de forma segura sin dejar estados a medias.» (05-operaciones, Manejo de errores)",
+        "comportamiento": "Ante error, se consulta observer.on_error: Retry reintenta el mismo elemento; Skip lo anota en skipped y sigue; SkipAll anota este y todos los siguientes que fallen sin volver a preguntar; Cancel detiene tras el elemento actual.",
+        "verificable": "Lote de 5 con el 2º sin permiso y observador que responde Skip: trashed.len() == 4, skipped == [(ruta2, PermissionDenied)], cancelled == false, y los elementos 3,4,5 estan en la papelera. Con Retry que falla dos veces y luego funciona, el elemento acaba en trashed y on_error se llamo exactamente 2 veces."
+      },
+      {
+        "id": "cb_20",
+        "titulo": "Cancelacion segura, sin estados a medias",
+        "cita": "«cancelar detiene de forma segura sin dejar estados a medias» (05-operaciones) · «borrar carpetas grandes muestra progreso y permite cancelar» (06-contexto-power)",
+        "comportamiento": "Cancel nunca interrumpe un elemento a mitad: cada elemento es atomico (info + rename) o se revierte. BatchOutcome.cancelled = true y los no intentados NO aparecen ni en trashed ni en skipped.",
+        "verificable": "Lote de 5 cuyo observador devuelve Flow::Cancel en on_item_start del 3º: trashed.len() == 2, skipped vacio, cancelled == true, y los elementos 3,4,5 siguen en su ruta original con la papelera sin restos parciales suyos."
+      },
+      {
+        "id": "cb_21",
+        "titulo": "Error de permisos o fichero en uso: mensaje que nombra el fichero",
+        "cita": "«un archivo abierto/bloqueado o sin permisos falla con mensaje claro» (06-contexto-power, Eliminar (papelera) y borrado permanente)",
+        "comportamiento": "EACCES/EPERM => TrashError::PermissionDenied { path, source }; ENOENT => NotFound { path, source }. Ningun errno se convierte a String perdiendo el codigo.",
+        "verificable": "Directorio padre con modo 0o500: trash_one devuelve PermissionDenied cuyo `path` es exactamente la ruta pedida y cuyo `source.raw_os_error()` es EACCES o EPERM."
+      },
+      {
+        "id": "cb_22",
+        "titulo": "Enlaces simbolicos: se envia el enlace, nunca el destino",
+        "cita": "«La tecla Supr mueve la selección a la papelera» — la seleccion es el enlace; seguirlo destruiria datos ajenos, contra «Reversibilidad por defecto» (00-filosofia l. 12)",
+        "comportamiento": "Todas las operaciones usan rutas sin seguir el ultimo componente (renameat sobre el nombre, lstat para clasificar). Un enlace roto tambien se envia sin error.",
+        "verificable": "Enlace `l -> /etc/passwd` enviado a la papelera: /etc/passwd intacto, files/l es un enlace simbolico con el mismo destino, y el .trashinfo apunta a la ruta del enlace. Un enlace roto se envia con Ok."
+      },
+      {
+        "id": "cb_23",
+        "titulo": "Rutas que hay que rechazar",
+        "cita": "«Reversibilidad por defecto» (00-filosofia l. 12) — enviar la propia papelera o un punto de montaje a la papelera es irreversible de hecho",
+        "comportamiento": "Se rechazan sin efecto: la ruta vacia y las relativas (RefusedSpecialPath{Relative|Empty}), `/` (Root), un punto de montaje (MountPoint), un ancestro de la papelera activa (TrashAncestor), y cualquier ruta ya dentro de <trash>/files o <trash>/info (PathIsInsideTrash).",
+        "verificable": "trash_one(Path::new(\"/\")) => Err(RefusedSpecialPath { reason: Root }); trash_one sobre un fichero dentro de trash/files => Err(PathIsInsideTrash); en ambos casos el arbol no cambia."
+      },
+      {
+        "id": "cb_24",
+        "titulo": "Cruce de volumen: prohibido por defecto, con bytes y progreso si se autoriza",
+        "cita": "«sin recorrer bytes salvo entre volúmenes» (05-operaciones)",
+        "comportamiento": "rename EXDEV con allow_cross_device_copy=false => TrashError::CrossDevice sin copiar nada. Con true, copia recursiva preservando modo y mtime, reportando on_bytes, y solo tras copiar integramente se elimina el original; si se cancela o falla a mitad, se borra la copia parcial de la papelera y el original se conserva.",
+        "verificable": "Simulado EXDEV, la politica por defecto devuelve CrossDevice y on_bytes no se llamo nunca. Con la copia autorizada y cancelacion a mitad: original intacto, files/ e info/ sin restos del elemento, cancelled == true."
+      },
+      {
+        "id": "cb_25",
+        "titulo": "probe_trash no tiene efectos secundarios",
+        "cita": "«deben ofrecer eliminación directa CON aviso» (05-operaciones): el aviso precede a la accion, luego la consulta no puede actuar",
+        "comportamiento": "probe_trash nunca crea directorios, nunca escribe .trashinfo y nunca mueve nada, aunque la politica autorice crear la papelera de volumen (lo señala con would_create: true).",
+        "verificable": "Snapshot recursivo del arbol antes y despues de probe_trash: identico, incluidos mtimes de directorios."
+      },
+      {
+        "id": "cb_26",
+        "titulo": "delete_permanently es explicito, recursivo y cancelable",
+        "cita": "«al eliminar de una unidad SIN papelera, el explorador cae de facto en eliminación permanente y debe advertirlo» (05-operaciones, Eliminación permanente) · «carpetas grandes deben mostrar diálogo de progreso y poder cancelarse»",
+        "comportamiento": "Solo se ejecuta si el llamador la invoca. Recorre de hojas a raiz, no sigue enlaces (borra el enlace), reporta progreso por entrada y respeta Flow::Cancel deteniendose entre entradas.",
+        "verificable": "trash_one nunca invoca delete_permanently: con un volumen sin papelera el fichero sobrevive (cb_10). delete_permanently sobre un arbol de 3 niveles devuelve Ok(n) con n == numero de entradas y el arbol desaparece; cancelado a mitad devuelve Err(Cancelled) y lo ya borrado sigue borrado (documentado: no es transaccional)."
+      },
+      {
+        "id": "cb_27",
+        "titulo": "Sin unwrap/expect/panic en la ruta del usuario",
+        "cita": "CLAUDE.md, Operaciones de fichero: «Prohibido unwrap() / expect() en cualquier ruta que toque ficheros del usuario»",
+        "comportamiento": "Todo error de syscall se propaga tipado. Ninguna aritmetica de tamaños puede desbordar (usar checked_/saturating_).",
+        "verificable": "`grep -nE '\\.unwrap\\(|\\.expect\\(|panic!|unreachable!' crates/kara-fs/src/trash/` no devuelve nada, y `cargo clippy -p kara-fs --all-targets -- -D warnings` pasa."
+      },
+      {
+        "id": "cb_28",
+        "titulo": "Nombres extremos y NAME_MAX",
+        "cita": "«La tecla Supr mueve la selección a la papelera» — un nombre largo no puede convertir la operacion en perdida de datos",
+        "comportamiento": "Si `<nombre>.trashinfo` o el sufijo de desambiguacion superan NAME_MAX, el nombre base se trunca por BYTES (nunca a mitad si eso rompiera la extension del .trashinfo) antes de reservar; si aun asi no cabe, NameExhausted.",
+        "verificable": "Un fichero con nombre de 255 bytes se envia a la papelera con exito y read_trash_info recupera su ruta original COMPLETA (la ruta vive en el Path=, no en el nombre del info)."
+      },
+      {
+        "id": "cb_29",
+        "titulo": "Nada bloquea la UI",
+        "cita": "CLAUDE.md: «El listado de un directorio nunca bloquea la UI» + «borrar carpetas grandes muestra progreso y permite cancelar» (06-contexto-power)",
+        "comportamiento": "La API es sincrona y cancelable; el observador se consulta al menos una vez por elemento y, en copia, cada bloque copiado (bloque <= 1 MiB). No hay bucle capaz de correr sin consultar cancelacion.",
+        "verificable": "Lote de 10.000 rutas con observador que cuenta llamadas: on_item_start se llamo 10.000 veces (una por elemento) y devolver Cancel en la primera detiene el lote con trashed vacio."
+      },
+      {
+        "id": "cb_30",
+        "titulo": "El .trashinfo mal formado no rompe la lectura del resto",
+        "cita": "«si algún elemento está en uso o sin permisos, informar cuáles no se pudieron borrar y continuar con el resto» (05-operaciones, Vaciar) — mismo principio de no abortar por un elemento",
+        "comportamiento": "read_trash_info devuelve TrashInfoError tipado (MissingHeader / MissingPath / MissingDeletionDate / MalformedDate / InvalidPercentEncoding / NotAbsolute) por entrada, sin panico y sin consumir memoria proporcional a un fichero arbitrario (limite de lectura documentado).",
+        "verificable": "Un info sin `[Trash Info]` => MissingHeader; uno con `Path=` vacio => MissingPath; uno con `%zz` => InvalidPercentEncoding. Ninguno entra en panico."
+      },
+      {
+        "id": "cb_31",
+        "titulo": "kara-fs no confirma ni pregunta",
+        "cita": "«Debe existir un ajuste para pedir o no confirmación al enviar a la papelera» (06-contexto-power) — el ajuste y el dialogo son de la capa superior",
+        "comportamiento": "Ninguna funcion de kara-fs consulta configuracion de confirmacion ni bloquea esperando al usuario mas alla del trait observador.",
+        "verificable": "La API publica del modulo no expone ningun tipo con la palabra Confirm/Dialog, y `grep -rn 'confirm' crates/kara-fs/src/trash/` no devuelve codigo (solo comentarios, si acaso)."
+      }
+    ],
+    "criteriosDeAceptacion": [
+      {
+        "id": "ac_01",
+        "criterio": "`cargo test -p kara-fs` pasa al 100% (0 fallidos, 0 ignorados sin justificacion escrita en el propio test)."
+      },
+      {
+        "id": "ac_02",
+        "criterio": "`cargo clippy -p kara-fs --all-targets -- -D warnings` termina con codigo 0."
+      },
+      {
+        "id": "ac_03",
+        "criterio": "`grep -nE '\\.unwrap\\(|\\.expect\\(|panic!|unimplemented!|todo!' crates/kara-fs/src/` no produce ninguna linea."
+      },
+      {
+        "id": "ac_04",
+        "criterio": "Las 8 firmas de `apiPublica.items` existen con el nombre, los parametros y el tipo de retorno exactos; `cargo doc -p kara-fs` no emite avisos de enlaces rotos."
+      },
+      {
+        "id": "ac_05",
+        "criterio": "Cada uno de los 31 casos borde tiene al menos un test cuyo nombre contiene su id (`cb_01`…`cb_31`), y todos verifican efecto observable en un directorio temporal, no solo el tipo del Result."
+      },
+      {
+        "id": "ac_06",
+        "criterio": "En TODO test que espere un fallo se comprueba ademas que el fichero de origen sigue existiendo con su contenido original: ninguna ruta de error puede perder datos."
+      },
+      {
+        "id": "ac_07",
+        "criterio": "kara-fs/Cargo.toml no gana dependencias fuera de {kara-core, rustix, thiserror, percent-encoding} y no menciona kara-ops, kara-index ni kara-ui."
+      },
+      {
+        "id": "ac_08",
+        "criterio": "trash_batch nunca devuelve Result; su BatchOutcome cumple trashed.len() + skipped.len() <= paths.len() en todos los tests, con igualdad si y solo si cancelled == false."
+      },
+      {
+        "id": "ac_09",
+        "criterio": "Ronda completa verificada: para cada caso de exito, restore_item devuelve el arbol al estado previo (contenido, nombre y ruta) y deja files/ e info/ sin la entrada."
+      },
+      {
+        "id": "ac_10",
+        "criterio": "Ningun test depende de la papelera real del usuario: todos usan XDG_DATA_HOME redirigido a un temporal y limpian al terminar; los tests que tocan variables de entorno estan serializados para no interferirse."
+      },
+      {
+        "id": "ac_11",
+        "criterio": "Los tests que exigen root, un montaje real o un volumen de solo lectura estan marcados con `#[ignore]` y una nota que explica como ejecutarlos; su comportamiento equivalente se cubre ademas con una prueba no ignorada mediante inyeccion de error."
+      },
+      {
+        "id": "ac_12",
+        "criterio": "El doc-comment del modulo `trash` (en español) enumera las conveniencias absorbidas y enlaza a ground/spec/05-operaciones.md; el codigo, los identificadores y los comentarios en linea estan en ingles."
+      }
+    ],
+    "riesgosDeImplementacionPlausiblePeroIncorrecta": [
+      "Escribir el .trashinfo DESPUES del rename: pierde la reserva atomica del nombre y dos elementos pueden pisarse (cb_08, cb_09).",
+      "Usar std::fs::rename ignorando EXDEV y caer a copy+remove_file en silencio: viola «sin recorrer bytes salvo entre volúmenes» (cb_24).",
+      "Caer a la papelera home cuando el volumen no tiene papelera: convierte una operacion barata en una copia larga y contradice el aviso exigido (cb_10).",
+      "Borrar directamente cuando no hay papelera: kara-fs decidiendo lo irreversible (cb_10, cb_26).",
+      "DeletionDate en UTC o con sufijo Z: incompatible con Dolphin/Nautilus (cb_07).",
+      "Percent-encoding sobre String con to_string_lossy: destruye nombres no-UTF-8 y hace irrestaurable el fichero (cb_06).",
+      "Path= absoluto en una papelera de volumen: Dolphin restaura a la ruta equivocada (cb_05).",
+      "Seguir el enlace simbolico y enviar el destino (cb_22).",
+      "trash_batch devolviendo Result y abortando en el primer fallo (cb_19).",
+      "Calcular el tamaño del elemento siempre para comprobar capacidad: recorre bytes y rompe la promesa de rapidez cuando max_item_bytes es None (cb_13, cb_02)."
+    ]
+  },
+  "pruebas": {
+    "testFiles": [
+      {
+        "path": "crates/kara-fs/tests/trash_info.rs",
+        "sha256": "7bb18ea3152cb070b4beaa21c20788accf75c8efc63cb150eab590af8634a9b2",
+        "testCount": 22
+      },
+      {
+        "path": "crates/kara-fs/tests/trash_home.rs",
+        "sha256": "84c74b72611764256b6405ba1e4e79d056f95c4e28216d41711a9b7f19520757",
+        "testCount": 44
+      },
+      {
+        "path": "crates/kara-fs/tests/trash_volume.rs",
+        "sha256": "675c87e3e1ecae04116914dda4aceb040ce01cddf8d374f8f37becc7a757a84c",
+        "testCount": 12
+      },
+      {
+        "path": "crates/kara-fs/tests/common/mod.rs",
+        "sha256": "abf3c34115f7b496213db00ba4af8fbd583c3e55ddfb23d8ef6b0159d70d16d7",
+        "testCount": 0
+      }
+    ],
+    "stubFiles": [
+      "crates/kara-fs/src/lib.rs",
+      "crates/kara-fs/src/trash/mod.rs",
+      "crates/kara-fs/src/trash/dir.rs",
+      "crates/kara-fs/src/trash/info.rs",
+      "crates/kara-fs/src/trash/error.rs"
+    ],
+    "total": 78,
+    "ignorados": 2,
+    "baseline": "cargo test -p kara-fs --no-fail-fast: 74 fallidos, 2 ignorados, 2 pasan (las dos comprobaciones de codigo fuente cb_31, que ya se cumplen con los stubs). Los 74 fallos son los todo!() del contrato.",
+    "notaIgnorados": "cb_24_exdev_real_... y cb_18_unidad_desconectada_... exigen montar un segundo volumen o desconectarlo; cada uno lleva en su #[ignore] la orden exacta para ejecutarlo, y ambos tienen companero no ignorado (cb_24_por_defecto_no_se_copia... y cb_18_un_destino_inalcanzable...)."
+  }
+}

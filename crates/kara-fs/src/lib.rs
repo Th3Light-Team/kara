@@ -8,3 +8,5 @@
 //!   distinta y explícita.
 
 #![forbid(unsafe_code)]
+
+pub mod trash;
