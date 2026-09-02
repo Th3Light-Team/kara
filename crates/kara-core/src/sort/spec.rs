@@ -282,6 +282,171 @@ pub fn column_for_sort_key(key: &SortKey) -> Option<ColumnId> {
     Some(ColumnId(id))
 }
 
+/// What one folder overrides, as opposed to what it inherits from the global
+/// default.
+///
+/// The spec asks for two things that are really one mechanism: "El estado del
+/// toggle debe persistir (global y/o por carpeta)" for Carpetas primero
+/// (03-vistas.md:80) and "Debe existir un modo global por defecto para las
+/// carpetas sin ajuste previo" (03-vistas.md:296). Both need a way to say *this
+/// folder did not decide* — which a fully resolved [`SortSpec`] cannot express,
+/// because every one of its fields already holds a value.
+///
+/// So the two roles are split. [`SortSpec`] stays the resolved state that
+/// [`crate::sort::sort_entries`] consumes; this type is what gets persisted per
+/// folder, and [`SortOverrides::resolve`] combines it with the global default.
+/// A [`SortOverrides::default`] — every field `None` — is a folder that follows
+/// the global setting in everything, which is also the "restablecer" action the
+/// spec asks for.
+///
+/// # Propagación
+///
+/// Storing *absence* rather than a value is the whole point: flipping the global
+/// Carpetas primero toggle moves every folder that never overrode it, and leaves
+/// the ones that did alone. The cost of the diff model in
+/// [`SortOverrides::overriding`] is that a folder whose value merely coincides
+/// with the global default is indistinguishable from one that never chose, so it
+/// follows later global changes. Callers that must preserve that intent should
+/// set the field explicitly instead of diffing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SortOverrides {
+    /// Criterio propio de la carpeta, o `None` para heredar.
+    pub key: Option<SortKey>,
+    /// Sentido propio, o `None` para heredar.
+    pub order: Option<SortOrder>,
+    /// Agrupación propia, o `None` para heredar.
+    pub grouping: Option<DirectoryGrouping>,
+    /// Collation propia, o `None` para heredar.
+    pub collation: Option<Collation>,
+}
+
+impl SortOverrides {
+    /// Combines what this folder decided with the global default.
+    #[must_use]
+    pub fn resolve(&self, defaults: &SortSpec) -> SortSpec {
+        SortSpec {
+            key: self.key.clone().unwrap_or_else(|| defaults.key.clone()),
+            order: self.order.unwrap_or(defaults.order),
+            grouping: self.grouping.unwrap_or(defaults.grouping),
+            collation: self.collation.unwrap_or(defaults.collation),
+        }
+    }
+
+    /// `true` when the folder decided nothing and follows the global default
+    /// entirely — the state a "restablecer" action returns it to.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.key.is_none()
+            && self.order.is_none()
+            && self.grouping.is_none()
+            && self.collation.is_none()
+    }
+
+    /// Records only the fields where `resolved` departs from `defaults`.
+    ///
+    /// This is what a caller holding a freshly gestured [`SortSpec`] persists.
+    /// See the note on propagation in the type docs: a field that coincides with
+    /// the default is stored as inherited, so it will follow later changes to it.
+    #[must_use]
+    pub fn overriding(resolved: &SortSpec, defaults: &SortSpec) -> Self {
+        Self {
+            key: (resolved.key != defaults.key).then(|| resolved.key.clone()),
+            order: (resolved.order != defaults.order).then_some(resolved.order),
+            grouping: (resolved.grouping != defaults.grouping).then_some(resolved.grouping),
+            collation: (resolved.collation != defaults.collation).then_some(resolved.collation),
+        }
+    }
+}
+
+/// Mismo formato textual que [`SortSpec`], con `-` en cada campo heredado.
+impl fmt::Display for SortOverrides {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let key = self.key.as_ref().map_or("-".to_string(), key_to_text);
+        let order = match self.order {
+            Some(SortOrder::Ascending) => "asc",
+            Some(SortOrder::Descending) => "desc",
+            None => "-",
+        };
+        let grouping = match self.grouping {
+            Some(DirectoryGrouping::First) => "dirs-first",
+            Some(DirectoryGrouping::Last) => "dirs-last",
+            Some(DirectoryGrouping::Mixed) => "mixed",
+            None => "-",
+        };
+        let flags = match self.collation {
+            Some(c) => {
+                let case = if c.case_sensitive { "cs" } else { "ci" };
+                let natural = if c.natural_numeric { "natural" } else { "plain" };
+                format!("{case},{natural}")
+            }
+            None => "-".to_string(),
+        };
+        write!(f, "{key}:{order}:{grouping}:{flags}")
+    }
+}
+
+impl FromStr for SortOverrides {
+    type Err = SortError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let malformed = || SortError::MalformedSpec(s.to_string());
+
+        let fields: Vec<&str> = s.split(':').collect();
+        let [key_text, order_text, grouping_text, flags_text] =
+            <[&str; 4]>::try_from(fields.as_slice()).map_err(|_| malformed())?;
+
+        let key = match key_text {
+            "-" => None,
+            other => Some(key_from_text(other)?),
+        };
+
+        let order = match order_text {
+            "-" => None,
+            "asc" => Some(SortOrder::Ascending),
+            "desc" => Some(SortOrder::Descending),
+            _ => return Err(malformed()),
+        };
+
+        let grouping = match grouping_text {
+            "-" => None,
+            "dirs-first" => Some(DirectoryGrouping::First),
+            "dirs-last" => Some(DirectoryGrouping::Last),
+            "mixed" => Some(DirectoryGrouping::Mixed),
+            _ => return Err(malformed()),
+        };
+
+        let collation = match flags_text {
+            "-" => None,
+            other => {
+                let flags: Vec<&str> = other.split(',').collect();
+                let [case_text, natural_text] =
+                    <[&str; 2]>::try_from(flags.as_slice()).map_err(|_| malformed())?;
+                let case_sensitive = match case_text {
+                    "cs" => true,
+                    "ci" => false,
+                    _ => return Err(malformed()),
+                };
+                let natural_numeric = match natural_text {
+                    "natural" => true,
+                    "plain" => false,
+                    _ => return Err(malformed()),
+                };
+                Some(Collation {
+                    case_sensitive,
+                    natural_numeric,
+                })
+            }
+        };
+
+        Ok(SortOverrides {
+            key,
+            order,
+            grouping,
+            collation,
+        })
+    }
+}
+
 /// Serialización textual estable de un [`SortSpec`].
 ///
 /// Formato: `criterio:sentido:agrupacion:banderas`, por ejemplo

@@ -35,7 +35,7 @@ mod spec;
 pub use collation::{Collation, CollationKey, collation_key, compare_names};
 pub use permutation::{invert_permutation, remap_selection, sort_permutation};
 pub use spec::{
-    ColumnId, DirectoryGrouping, SortKey, SortOrder, SortSpec, column_for_sort_key,
+    ColumnId, DirectoryGrouping, SortKey, SortOrder, SortOverrides, SortSpec, column_for_sort_key,
     sort_key_for_column,
 };
 
