@@ -53,6 +53,7 @@ Rectangle {
             readonly property bool expandable: (panel.app.nav_expandable[row.index] ?? 0) !== 0
             readonly property bool expanded: (panel.app.nav_expanded[row.index] ?? 0) !== 0
             readonly property bool current: panel.app.nav_current === row.index
+            readonly property string iconUrl: panel.app.nav_icons[row.index] ?? ""
 
             width: rows.width
             // Las cabeceras respiran por arriba para que la sección se lea como
@@ -142,8 +143,19 @@ Rectangle {
                     }
                 }
 
+                Image {
+                    width: 16
+                    height: 16
+                    anchors.verticalCenter: parent.verticalCenter
+                    source: row.iconUrl
+                    sourceSize.width: 16
+                    sourceSize.height: 16
+                    visible: status === Image.Ready
+                    asynchronous: true
+                }
+
                 Text {
-                    width: parent.width - 20
+                    width: parent.width - 44
                     anchors.verticalCenter: parent.verticalCenter
                     text: row.label
                     elide: Text.ElideRight

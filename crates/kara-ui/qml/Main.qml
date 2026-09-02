@@ -309,6 +309,11 @@ Window {
                         anchors.rightMargin: 22
                         spacing: 12
 
+                        // Hueco del icono: la cabecera tiene que llevar el mismo
+                        // que las filas o las columnas dejan de alinearse.
+                        Item {
+                            Layout.preferredWidth: 16
+                        }
                         Text {
                             text: qsTr("Nombre")
                             Layout.fillWidth: true
@@ -368,6 +373,10 @@ Window {
 
                         required property int index
                         readonly property bool current: fileList.currentIndex === row.index
+                        // La URL se declara aparte y tipada: asignar directamente
+                        // el resultado de `??` a `source` deja un valor sin tipo
+                        // que QML no sabe convertir a URL.
+                        readonly property string iconUrl: app.entry_icons[row.index] ?? ""
 
                         width: fileList.width
                         height: Theme.rowHeight
@@ -390,6 +399,22 @@ Window {
                             anchors.rightMargin: 22
                             spacing: 12
 
+                            Image {
+                                Layout.preferredWidth: 16
+                                Layout.preferredHeight: 16
+                                source: row.iconUrl
+                                // El tema resuelve la talla, pero los ficheros
+                                // son SVG: sin `sourceSize` se rasterizan a su
+                                // tamaño nominal y se ven borrosos al escalar.
+                                sourceSize.width: 16
+                                sourceSize.height: 16
+                                // Un icono que no está no deja un hueco roto:
+                                // simplemente no se pinta.
+                                visible: status === Image.Ready
+                                // Cargar del disco no puede parar el desplazado
+                                // de una carpeta con miles de entradas.
+                                asynchronous: true
+                            }
                             Text {
                                 text: app.entry_names[row.index] ?? ""
                                 Layout.fillWidth: true

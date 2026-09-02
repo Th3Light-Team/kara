@@ -13,6 +13,10 @@ pub mod trash;
 
 pub mod listing;
 
+pub mod icons;
+
+pub mod mime;
+
 pub mod places;
 
 pub use listing::{EntryError, Listing, describe, list_directory, read_hidden_file};

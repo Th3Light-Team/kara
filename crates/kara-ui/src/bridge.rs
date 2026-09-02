@@ -23,7 +23,10 @@ use kara_core::filter::{NameFilter, Visibility};
 use kara_core::history::History;
 use kara_core::sort::SortSpec;
 use kara_core::tree::{Branch, Expandable, RowKind, Section, SectionId, Tree};
+use kara_fs::icons::Icons;
 use kara_fs::list_directory;
+use kara_fs::places::PlaceKind;
+use std::collections::HashMap;
 
 use crate::present;
 
@@ -37,6 +40,8 @@ pub mod qobject {
         #[qproperty(QStringList, entry_names)]
         #[qproperty(QStringList, entry_sizes)]
         #[qproperty(QStringList, entry_kinds)]
+        /// URL del icono de cada entrada, del tema del escritorio.
+        #[qproperty(QStringList, entry_icons)]
         /// Entradas que se enseñan: ya filtradas.
         #[qproperty(i32, entry_count)]
         /// Entradas que hay en la carpeta antes de aplicar el filtro. La barra de
@@ -55,6 +60,7 @@ pub mod qobject {
         /// sitio.
         #[qproperty(QStringList, nav_labels)]
         #[qproperty(QStringList, nav_paths)]
+        #[qproperty(QStringList, nav_icons)]
         #[qproperty(QList_i32, nav_depths)]
         #[qproperty(QList_i32, nav_expandable)]
         #[qproperty(QList_i32, nav_expanded)]
@@ -138,6 +144,7 @@ pub struct AppRust {
     entry_names: QStringList,
     entry_sizes: QStringList,
     entry_kinds: QStringList,
+    entry_icons: QStringList,
     entry_count: i32,
     total_count: i32,
     crumb_names: QStringList,
@@ -149,6 +156,7 @@ pub struct AppRust {
     filter_text: QString,
     nav_labels: QStringList,
     nav_paths: QStringList,
+    nav_icons: QStringList,
     nav_depths: cxx_qt_lib::QList<i32>,
     nav_expandable: cxx_qt_lib::QList<i32>,
     nav_expanded: cxx_qt_lib::QList<i32>,
@@ -161,6 +169,11 @@ pub struct AppRust {
     home: Option<PathBuf>,
     crumb_capacity: usize,
     tree: Tree,
+    /// Resuelve el icono de cada entrada y recuerda lo ya buscado.
+    icons: Icons,
+    /// Qué ubicación es cada raíz del panel, para darle su icono propio: la
+    /// carpeta de descargas no se enseña con la carpeta genérica.
+    place_kinds: HashMap<PathBuf, PlaceKind>,
 }
 
 impl Default for AppRust {
@@ -178,6 +191,7 @@ impl Default for AppRust {
             entry_names: QStringList::default(),
             entry_sizes: QStringList::default(),
             entry_kinds: QStringList::default(),
+            entry_icons: QStringList::default(),
             entry_count: 0,
             total_count: 0,
             crumb_names: QStringList::default(),
@@ -189,6 +203,7 @@ impl Default for AppRust {
             filter_text: QString::default(),
             nav_labels: QStringList::default(),
             nav_paths: QStringList::default(),
+            nav_icons: QStringList::default(),
             nav_depths: cxx_qt_lib::QList::<i32>::default(),
             nav_expandable: cxx_qt_lib::QList::<i32>::default(),
             nav_expanded: cxx_qt_lib::QList::<i32>::default(),
@@ -199,6 +214,11 @@ impl Default for AppRust {
             home: home.clone(),
             crumb_capacity: DEFAULT_CRUMB_CAPACITY,
             tree: Tree::new(sections(home.as_deref())),
+            // 16 píxeles es la talla de la vista de detalles. Los temas
+            // modernos son SVG, así que la talla solo decide de qué carpeta del
+            // tema sale el fichero, no la nitidez.
+            icons: Icons::load(ICON_SIZE),
+            place_kinds: place_kinds(home.as_deref()),
         };
 
         // Al arrancar no hay ninguna señal que emitir todavía, así que el
@@ -209,6 +229,7 @@ impl Default for AppRust {
             app.entry_names = snapshot.names;
             app.entry_sizes = snapshot.sizes;
             app.entry_kinds = snapshot.kinds;
+            app.entry_icons = snapshot.icons;
             app.entry_count = snapshot.count;
             app.total_count = snapshot.total;
             app.crumb_names = snapshot.crumb_names;
@@ -221,6 +242,7 @@ impl Default for AppRust {
         let nav = app.nav_view(&start);
         app.nav_labels = nav.labels;
         app.nav_paths = nav.paths;
+        app.nav_icons = nav.icons;
         app.nav_depths = nav.depths;
         app.nav_expandable = nav.expandable;
         app.nav_expanded = nav.expanded;
@@ -233,12 +255,16 @@ impl Default for AppRust {
 /// Migas visibles cuando la vista todavía no ha dicho cuántas caben.
 const DEFAULT_CRUMB_CAPACITY: usize = 6;
 
+/// Talla de icono que se pide al tema.
+const ICON_SIZE: u32 = 16;
+
 /// La vista entera de una carpeta, ya formateada.
 struct Snapshot {
     path: QString,
     names: QStringList,
     sizes: QStringList,
     kinds: QStringList,
+    icons: QStringList,
     count: i32,
     total: i32,
     crumb_names: QStringList,
@@ -252,7 +278,7 @@ impl AppRust {
     ///
     /// `None` si la carpeta no se puede leer, y entonces quien llame **no
     /// cambia nada**: enseñar una vista vacía haría creer que la carpeta lo está.
-    fn snapshot(&self, target: &Path) -> Option<Snapshot> {
+    fn snapshot(&mut self, target: &Path) -> Option<Snapshot> {
         let listing = list_directory(target).ok()?;
         let mut entries = listing.entries;
 
@@ -275,6 +301,13 @@ impl AppRust {
             .iter()
             .map(|e| QString::from(present::kind_label(e)))
             .collect();
+        let icons = entries
+            .iter()
+            .map(|e| {
+                let path = self.icons.of(&e.display, e.kind);
+                QString::from(&path.map(|p| present::file_url(&p)).unwrap_or_default())
+            })
+            .collect();
 
         let segments = breadcrumb::segments(target, self.home.as_deref());
         let split = breadcrumb::collapse(&segments, self.crumb_capacity);
@@ -284,6 +317,7 @@ impl AppRust {
             names,
             sizes,
             kinds,
+            icons,
             count: clamp_count(entries.len()),
             total: clamp_count(total),
             crumb_names: labels(&split.visible),
@@ -298,6 +332,7 @@ impl AppRust {
 struct NavView {
     labels: QStringList,
     paths: QStringList,
+    icons: QStringList,
     depths: cxx_qt_lib::QList<i32>,
     expandable: cxx_qt_lib::QList<i32>,
     expanded: cxx_qt_lib::QList<i32>,
@@ -327,6 +362,15 @@ fn sections(home: Option<&Path>) -> Vec<Section> {
     ]
 }
 
+/// Qué ubicación es cada raíz, para darle su icono.
+fn place_kinds(home: Option<&Path>) -> HashMap<PathBuf, PlaceKind> {
+    kara_fs::places::quick_access(home)
+        .into_iter()
+        .chain(kara_fs::places::this_computer())
+        .map(|place| (place.path, place.kind))
+        .collect()
+}
+
 fn ints(values: impl IntoIterator<Item = i32>) -> cxx_qt_lib::QList<i32> {
     let mut list = cxx_qt_lib::QList::<i32>::default();
     for value in values {
@@ -337,11 +381,12 @@ fn ints(values: impl IntoIterator<Item = i32>) -> cxx_qt_lib::QList<i32> {
 
 impl AppRust {
     /// Aplana el árbol a listas paralelas y localiza la fila de `current`.
-    fn nav_view(&self, current: &Path) -> NavView {
+    fn nav_view(&mut self, current: &Path) -> NavView {
         let rows = self.tree.rows();
 
         let mut labels = Vec::with_capacity(rows.len());
         let mut paths = Vec::with_capacity(rows.len());
+        let mut icons = Vec::with_capacity(rows.len());
         let mut depths = Vec::with_capacity(rows.len());
         let mut expandable = Vec::with_capacity(rows.len());
         let mut expanded = Vec::with_capacity(rows.len());
@@ -354,6 +399,7 @@ impl AppRust {
                     labels.push(QString::from(present::section_label(*id)));
                     // Sin ruta: es lo que distingue una cabecera de una carpeta.
                     paths.push(QString::default());
+                    icons.push(QString::default());
                     expandable.push(0);
                     expanded.push(0);
                 }
@@ -365,6 +411,18 @@ impl AppRust {
                 } => {
                     labels.push(QString::from(&name.to_string_lossy().into_owned()));
                     paths.push(QString::from(&path.to_string_lossy().into_owned()));
+
+                    // Una raíz conocida usa su icono propio; lo que cuelga del
+                    // árbol es siempre una carpeta.
+                    let found = match self.place_kinds.get(path).copied() {
+                        Some(kind) => self.icons.any_of(present::place_icons(kind)),
+                        None => self
+                            .icons
+                            .of(&name.to_string_lossy(), kara_core::entry::EntryKind::Directory),
+                    };
+                    icons.push(QString::from(
+                        &found.map(|p| present::file_url(&p)).unwrap_or_default(),
+                    ));
                     // Mientras no se sepa, se ofrece la flecha: averiguarlo exige
                     // leer la carpeta, que es justo lo que se difiere.
                     expandable.push(i32::from(*can_expand != Expandable::No));
@@ -385,6 +443,7 @@ impl AppRust {
             current: current_row,
             labels: labels.into_iter().collect(),
             paths: paths.into_iter().collect(),
+            icons: icons.into_iter().collect(),
             depths: ints(depths),
             expandable: ints(expandable),
             expanded: ints(expanded),
@@ -451,13 +510,14 @@ impl qobject::App {
     /// Vuelca una vista ya calculada usando los setters, para que QML reciba las
     /// señales de cambio. Devuelve `false` si la carpeta no se pudo leer.
     fn render(mut self: Pin<&mut Self>, target: &Path) -> bool {
-        let Some(view) = self.rust().snapshot(target) else {
+        let Some(view) = self.as_mut().rust_mut().get_mut().snapshot(target) else {
             return false;
         };
         self.as_mut().set_path(view.path);
         self.as_mut().set_entry_names(view.names);
         self.as_mut().set_entry_sizes(view.sizes);
         self.as_mut().set_entry_kinds(view.kinds);
+        self.as_mut().set_entry_icons(view.icons);
         self.as_mut().set_entry_count(view.count);
         self.as_mut().set_total_count(view.total);
         self.as_mut().set_crumb_names(view.crumb_names);
@@ -475,9 +535,10 @@ impl qobject::App {
     /// Vuelca las filas del panel de navegación.
     fn publish_nav(mut self: Pin<&mut Self>) {
         let current = PathBuf::from(self.path().to_string());
-        let nav = self.rust().nav_view(&current);
+        let nav = self.as_mut().rust_mut().get_mut().nav_view(&current);
         self.as_mut().set_nav_labels(nav.labels);
         self.as_mut().set_nav_paths(nav.paths);
+        self.as_mut().set_nav_icons(nav.icons);
         self.as_mut().set_nav_depths(nav.depths);
         self.as_mut().set_nav_expandable(nav.expandable);
         self.as_mut().set_nav_expanded(nav.expanded);

@@ -152,10 +152,17 @@ y barra de estado. Panel de navegación con Acceso rápido (XDG) y Este equipo
 (raíz y volúmenes montados), árbol con carga diferida que sigue a la carpeta que
 se enseña. El listado sale de `kara-fs`, no de datos falsos.
 
-**Lo que falta de la vista:** iconos y miniaturas, los cuatro modos de vista con
-zoom, ordenar pulsando en la cabecera, selección múltiple, anclar carpetas al
-panel (necesita dónde guardar ajustes), y enchufar a la UI lo que el backend ya
-ofrece y nadie consume todavía (vigilancia, cola, deshacer).
+**Iconos: los del escritorio, no un juego propio.** `kara-fs::mime` resuelve el
+tipo con `/usr/share/mime/globs2` —la misma base que Dolphin y Nautilus— y
+`kara-fs::icons` implementa la búsqueda de temas de FreeDesktop (herencia,
+tallas, `Fixed`/`Scalable`/`Threshold`). Lo que el usuario tenga puesto es lo que
+sale, incluidas las carpetas especiales del panel.
+
+**Lo que falta de la vista:** miniaturas, los cuatro modos de vista con zoom,
+ordenar pulsando en la cabecera, selección múltiple, anclar carpetas al panel
+(necesita dónde guardar ajustes), la columna «Tipo» con la descripción real del
+MIME en vez de «Archivo», y enchufar a la UI lo que el backend ya ofrece y nadie
+consume todavía (vigilancia, cola, deshacer).
 
 ### Cabos sueltos conocidos
 

@@ -98,6 +98,48 @@ pub fn place_label(place: &Place) -> String {
     }
 }
 
+/// Los nombres de icono de una ubicación, del más específico al genérico.
+///
+/// No todos los temas traen los especiales —una carpeta de descargas con su
+/// flecha, un disco— y por eso la lista acaba siempre en algo que sí existe.
+#[must_use]
+pub fn place_icons(kind: PlaceKind) -> &'static [&'static str] {
+    match kind {
+        PlaceKind::Home => &["user-home", "folder-home", "folder"],
+        PlaceKind::Desktop => &["user-desktop", "folder-desktop", "folder"],
+        PlaceKind::Downloads => &["folder-download", "folder-downloads", "folder"],
+        PlaceKind::Documents => &["folder-documents", "folder"],
+        PlaceKind::Pictures => &["folder-pictures", "folder-images", "folder"],
+        PlaceKind::Music => &["folder-music", "folder"],
+        PlaceKind::Videos => &["folder-videos", "folder-video", "folder"],
+        PlaceKind::Root => &["drive-harddisk", "computer", "folder"],
+        PlaceKind::Volume => &["drive-removable-media", "drive-harddisk", "folder"],
+    }
+}
+
+/// Convierte una ruta del disco en la URL que QML necesita para cargarla.
+///
+/// Hay que escapar: un tema de iconos puede vivir en una carpeta con espacios,
+/// y `file:///.../Tela ubuntu/folder.svg` sin escapar no carga y no dice por
+/// qué. Se conservan los caracteres que la RFC 3986 llama no reservados más la
+/// barra, que aquí es separador y no dato.
+#[must_use]
+pub fn file_url(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    let mut url = String::with_capacity(raw.len() + 8);
+    url.push_str("file://");
+
+    for byte in raw.as_bytes() {
+        let safe = byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/');
+        if safe {
+            url.push(*byte as char);
+        } else {
+            url.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    url
+}
+
 /// Convierte lo tecleado en la barra de direcciones en una ruta absoluta.
 ///
 /// Admite lo que pide la spec: `~`, `~/algo`, `$VAR`, `${VAR}` y rutas relativas
@@ -312,6 +354,30 @@ mod tests {
     #[test]
     fn el_texto_vacio_no_es_ninguna_ruta() {
         assert_eq!(expand_path("   ", Some(&home()), Path::new("/tmp")), None);
+    }
+
+    #[test]
+    fn una_ruta_corriente_da_una_url_corriente() {
+        assert_eq!(
+            file_url(Path::new("/usr/share/icons/breeze/places/16/folder.svg")),
+            "file:///usr/share/icons/breeze/places/16/folder.svg"
+        );
+    }
+
+    #[test]
+    fn los_espacios_y_los_acentos_se_escapan() {
+        // Sin escapar, QML no carga el fichero y no dice por que.
+        assert_eq!(
+            file_url(Path::new("/home/ana/Mis cosas/á.svg")),
+            "file:///home/ana/Mis%20cosas/%C3%A1.svg"
+        );
+    }
+
+    #[test]
+    fn la_almohadilla_no_parte_la_url() {
+        // `#` abre el fragmento de una URL: sin escapar, todo lo que va detras
+        // se pierde.
+        assert_eq!(file_url(Path::new("/a/b#c.png")), "file:///a/b%23c.png");
     }
 
     #[test]
