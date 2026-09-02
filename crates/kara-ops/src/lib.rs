@@ -12,6 +12,8 @@
 
 pub mod batch;
 pub mod clock;
+pub mod progress;
+pub mod queue;
 pub mod undo;
 pub mod conflict;
 
@@ -23,3 +25,5 @@ pub use conflict::{
 // Reexportados desde kara-core, donde viven para que kara-fs pueda usarlos.
 pub use kara_core::{split_name, unique_name};
 pub use undo::{Action, UndoError, UndoStack};
+pub use progress::{Eta, Meter, Phase, humanize};
+pub use queue::{Concurrency, Job, JobId, JobState, Kind, Queue};
