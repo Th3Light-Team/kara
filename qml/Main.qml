@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Window
 import QtQuick.Layouts
+import QtQuick.Controls
 import com.kara.ui
 
 Window {
@@ -31,6 +32,12 @@ Window {
                 anchors.margins: 5
                 spacing: 5
 
+                Button {
+                    text: "\u2191"
+                    implicitWidth: 32
+                    enabled: app.path !== "/"
+                    onClicked: app.up()
+                }
                 Text {
                     text: "Path:"
                     font.bold: true
@@ -57,9 +64,20 @@ Window {
                 model: app.entry_names.length
 
                 delegate: Rectangle {
+                    id: row
+                    required property int index
+
                     width: listView.width
                     height: 30
-                    color: index % 2 === 0 ? "#f5f5f5" : "white"
+                    color: row.index % 2 === 0 ? "#f5f5f5" : "white"
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onDoubleClicked: {
+                            if (app.entry_kinds[row.index] === "Folder")
+                                app.cd(app.entry_names[row.index]);
+                        }
+                    }
 
                     RowLayout {
                         anchors.fill: parent
@@ -68,18 +86,18 @@ Window {
                         spacing: 10
 
                         Text {
-                            text: app.entry_names[index]
+                            text: app.entry_names[row.index]
                             Layout.fillWidth: true
                             elide: Text.ElideRight
                         }
                         Text {
-                            text: app.entry_sizes[index]
+                            text: app.entry_sizes[row.index]
                             Layout.preferredWidth: 80
                             horizontalAlignment: Text.AlignRight
                             color: "#666666"
                         }
                         Text {
-                            text: app.entry_kinds[index]
+                            text: app.entry_kinds[row.index]
                             Layout.preferredWidth: 60
                             color: "#666666"
                         }

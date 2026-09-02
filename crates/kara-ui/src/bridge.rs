@@ -3,7 +3,8 @@
 //! El QML **no** contiene lógica de negocio; todo lo que la UI necesita entra por
 //! aquí desde `kara-ops` / `kara-index` / `kara-fs`.
 
-use std::path::PathBuf;
+use core::pin::Pin;
+use std::path::{Path, PathBuf};
 use kara_core::filter::Visibility;
 use kara_core::sort::SortSpec;
 use kara_fs::list_directory;
@@ -20,6 +21,16 @@ pub mod qobject {
         #[qproperty(QStringList, entry_kinds)]
         #[qproperty(i32, entry_count)]
         type App = super::AppRust;
+
+        /// Entra en una subcarpeta de la actual. Si no se puede listar, no se
+        /// mueve: dejar la ruta apuntando a un sitio ilegible dejaria la vista
+        /// vacia sin forma de volver.
+        #[qinvokable]
+        fn cd(self: Pin<&mut App>, name: &QString);
+
+        /// Sube a la carpeta padre. En la raiz no hace nada.
+        #[qinvokable]
+        fn up(self: Pin<&mut App>);
     }
 
     unsafe extern "C++" {
@@ -145,5 +156,84 @@ fn format_size(bytes: u64) -> String {
         format!("{} {}", bytes, UNITS[0])
     } else {
         format!("{:.1} {}", size, UNITS[unit_idx])
+    }
+}
+
+impl qobject::App {
+    /// Navega a `target` solo si se puede listar, y actualiza las propiedades
+    /// por sus setters para que QML reciba las senales de cambio.
+    fn navigate_to(mut self: Pin<&mut Self>, target: &Path) {
+        let Some(view) = build_view(target) else {
+            return;
+        };
+        self.as_mut()
+            .set_path(cxx_qt_lib::QString::from(&target.to_string_lossy().into_owned()));
+        self.as_mut().set_entry_names(view.names);
+        self.as_mut().set_entry_sizes(view.sizes);
+        self.as_mut().set_entry_kinds(view.kinds);
+        self.as_mut().set_entry_count(view.count);
+    }
+
+    fn cd(mut self: Pin<&mut Self>, name: &cxx_qt_lib::QString) {
+        let mut target = PathBuf::from(self.path().to_string());
+        target.push(name.to_string());
+        self.navigate_to(&target);
+    }
+
+    fn up(mut self: Pin<&mut Self>) {
+        let current = PathBuf::from(self.path().to_string());
+        if let Some(parent) = current.parent() {
+            let parent = parent.to_path_buf();
+            self.navigate_to(&parent);
+        }
+    }
+}
+
+/// Las columnas ya formateadas de una carpeta.
+struct View {
+    names: cxx_qt_lib::QStringList,
+    sizes: cxx_qt_lib::QStringList,
+    kinds: cxx_qt_lib::QStringList,
+    count: i32,
+}
+
+/// Lista, filtra, ordena y formatea. `None` si la carpeta no se puede leer.
+fn build_view(path: &Path) -> Option<View> {
+    let listing = list_directory(path).ok()?;
+    let mut entries = listing.entries;
+    Visibility::default().retain_visible(&mut entries);
+    kara_core::sort::sort_entries(&mut entries, &SortSpec::default());
+
+    let names: Vec<cxx_qt_lib::QString> = entries
+        .iter()
+        .map(|e| cxx_qt_lib::QString::from(&e.display))
+        .collect();
+    let sizes: Vec<cxx_qt_lib::QString> = entries
+        .iter()
+        .map(|e| cxx_qt_lib::QString::from(&size_label(e)))
+        .collect();
+    let kinds: Vec<cxx_qt_lib::QString> = entries
+        .iter()
+        .map(|e| {
+            cxx_qt_lib::QString::from(match e.kind {
+                kara_core::entry::EntryKind::Directory => "Folder",
+                kara_core::entry::EntryKind::File => "File",
+            })
+        })
+        .collect();
+
+    Some(View {
+        count: i32::try_from(entries.len()).unwrap_or(i32::MAX),
+        names: names.into_iter().collect(),
+        sizes: sizes.into_iter().collect(),
+        kinds: kinds.into_iter().collect(),
+    })
+}
+
+/// El tamano de una carpeta se muestra vacio, no cero: calcularlo es recursivo.
+fn size_label(entry: &kara_core::FileEntry) -> String {
+    match entry.size {
+        Some(bytes) => format_size(bytes),
+        None => String::new(),
     }
 }
