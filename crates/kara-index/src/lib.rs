@@ -10,7 +10,9 @@
 pub mod search;
 pub mod size;
 pub mod walk;
+pub mod watch;
 
 pub use search::{Query, SearchEvent, SearchScope, fold_for_search, search};
 pub use size::{SizeProgress, SizeReport, folder_size};
 pub use walk::{Cancel, WalkError, WalkItem, WalkOptions, WalkSummary, walk};
+pub use watch::{Change, Coalescer, Watcher};
