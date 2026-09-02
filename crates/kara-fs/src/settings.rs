@@ -112,6 +112,15 @@ impl Settings {
     /// Removes one key. Drops the section entirely once it is left empty, so
     /// an emptied-out `Settings` serializes back to nothing rather than a
     /// dangling `[section]` header.
+    /// Drops a whole section.
+    ///
+    /// Needed by any setting stored as a numbered list: rewriting it key by
+    /// key would leave the stale tail of a longer previous list behind, and
+    /// those entries would come back on the next load.
+    pub fn remove_section(&mut self, section: &str) -> bool {
+        self.sections.remove(section).is_some()
+    }
+
     pub fn remove(&mut self, section: &str, key: &str) -> Option<String> {
         let values = self.sections.get_mut(section)?;
         let removed = values.remove(key);

@@ -16,7 +16,9 @@
 //!   the view's problem.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use crate::sort::SortOverrides;
 
@@ -120,6 +122,43 @@ impl Default for ViewSettings {
     /// files in it.
     fn default() -> Self {
         Self::for_mode(ViewMode::Details)
+    }
+}
+
+impl fmt::Display for ViewMode {
+    /// A stable name for the mode, for settings that outlive the process.
+    ///
+    /// Deliberately not the ordinal: the ordinals are an accident of
+    /// declaration order, and reordering the enum would silently reinterpret
+    /// everything already written to disk. `SortSpec` writes itself the same
+    /// way, for the same reason.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Details => "details",
+            Self::List => "list",
+            Self::Tiles => "tiles",
+            Self::Icons => "icons",
+        };
+        formatter.write_str(name)
+    }
+}
+
+/// A settings value that names no mode Kara knows.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}: not a view mode")]
+pub struct UnknownViewMode(pub String);
+
+impl FromStr for ViewMode {
+    type Err = UnknownViewMode;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text.trim() {
+            "details" => Ok(Self::Details),
+            "list" => Ok(Self::List),
+            "tiles" => Ok(Self::Tiles),
+            "icons" => Ok(Self::Icons),
+            other => Err(UnknownViewMode(other.to_string())),
+        }
     }
 }
 

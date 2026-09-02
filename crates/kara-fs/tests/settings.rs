@@ -305,3 +305,29 @@ fn resolve_path_never_touches_the_disk() {
         .expect("absolute is enough, existence is irrelevant here");
     assert_eq!(path, Path::new("/does/not/exist/kara/settings.conf"));
 }
+
+#[test]
+fn removing_a_section_takes_every_key_with_it() {
+    // A numbered list rewritten key by key would keep the tail of a longer
+    // previous list, and those entries would come back on the next load.
+    let mut settings = Settings::new();
+    settings.set("pinned", "0", "/home/ana/a");
+    settings.set("pinned", "1", "/home/ana/b");
+    settings.set("window", "sidebar_width", "240");
+
+    assert!(settings.remove_section("pinned"));
+
+    assert_eq!(settings.get("pinned", "0"), None);
+    assert_eq!(settings.get("pinned", "1"), None);
+    assert_eq!(
+        settings.get("window", "sidebar_width"),
+        Some("240"),
+        "other sections are untouched"
+    );
+}
+
+#[test]
+fn removing_a_section_that_is_not_there_says_so() {
+    let mut settings = Settings::new();
+    assert!(!settings.remove_section("pinned"));
+}

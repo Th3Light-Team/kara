@@ -289,3 +289,41 @@ fn clicking_a_header_sorts_ascending_and_clicking_again_inverts() {
     assert_eq!(by_kind.key, SortKey::Kind);
     assert_eq!(by_kind.order, SortOrder::Ascending);
 }
+
+// --- The names settings write to disk --------------------------------------
+
+#[test]
+fn every_mode_survives_a_trip_through_its_written_name() {
+    // Settings outlive the process, so the name has to round-trip exactly.
+    for mode in ViewMode::all() {
+        let written = mode.to_string();
+        let read: ViewMode = written.parse().expect("a mode names itself");
+        assert_eq!(read, mode, "{written} did not come back as itself");
+    }
+}
+
+#[test]
+fn the_written_names_are_not_the_ordinals() {
+    // The ordinals are an accident of declaration order; writing them would
+    // mean reordering the enum silently reinterprets everything on disk.
+    for mode in ViewMode::all() {
+        let written = mode.to_string();
+        assert!(
+            written.parse::<u32>().is_err(),
+            "{written} is a number, which is exactly what must not be stored"
+        );
+    }
+}
+
+#[test]
+fn a_settings_value_from_a_newer_version_is_rejected_not_guessed() {
+    // A mode this build does not know must fall back to the default, not be
+    // silently turned into whichever mode happens to be first.
+    assert!("content".parse::<ViewMode>().is_err());
+    assert!("".parse::<ViewMode>().is_err());
+}
+
+#[test]
+fn surrounding_blanks_do_not_change_the_mode() {
+    assert_eq!("  icons ".parse::<ViewMode>(), Ok(ViewMode::Icons));
+}

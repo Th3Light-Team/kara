@@ -165,15 +165,33 @@ Rectangle {
                 }
             }
 
+            Menu {
+                id: rowMenu
+                MenuItem {
+                    // El rótulo se pregunta al abrir el menú, no se ata a una
+                    // propiedad: anclar y desanclar es el mismo gesto y el
+                    // texto tiene que decir cuál toca.
+                    text: rowMenu.pinned ? qsTr("Quitar del Acceso rápido") : qsTr("Anclar a Acceso rápido")
+                    onTriggered: panel.app.toggle_pinned(row.path)
+                }
+                property bool pinned: false
+                onAboutToShow: rowMenu.pinned = panel.app.is_pinned(row.path)
+            }
+
             MouseArea {
                 id: rowArea
                 anchors.fill: parent
                 hoverEnabled: true
                 enabled: !row.section
+                acceptedButtons: Qt.LeftButton | Qt.RightButton
                 // La flecha va por encima: su área se declara después y gana.
                 z: -1
-                onClicked: {
+                onClicked: mouse => {
                     rows.currentIndex = row.index;
+                    if (mouse.button === Qt.RightButton) {
+                        rowMenu.popup();
+                        return;
+                    }
                     panel.app.nav_activate(row.index);
                 }
                 onDoubleClicked: if (row.expandable)

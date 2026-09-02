@@ -1,6 +1,7 @@
 //! Binario principal de Kara: arranca Qt y carga el módulo QML.
 
 mod bridge;
+mod prefs;
 mod present;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};

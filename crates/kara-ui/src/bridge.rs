@@ -38,6 +38,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::prefs::Prefs;
 use crate::present;
 
 #[cxx_qt::bridge]
@@ -105,6 +106,8 @@ pub mod qobject {
         /// Fila de la carpeta que se está viendo, o -1 si no sale en el panel.
         #[qproperty(i32, nav_current)]
         #[qproperty(bool, sidebar_visible)]
+        /// Ancho del panel de navegación, recordado entre sesiones.
+        #[qproperty(i32, sidebar_width)]
         /// Si hay algo que deshacer o rehacer, y **qué**: la spec pide decir
         /// «Deshacer mover», no solo ofrecer deshacer.
         #[qproperty(bool, can_undo)]
@@ -189,6 +192,21 @@ pub mod qobject {
         /// Navega a la carpeta de una fila del panel.
         #[qinvokable]
         fn nav_activate(self: Pin<&mut App>, row: i32);
+
+        /// Recuerda el ancho al que el usuario dejó el panel.
+        ///
+        /// No se llama `set_sidebar_width`: ese nombre ya lo genera la
+        /// propiedad, y este además guarda en disco.
+        #[qinvokable]
+        fn remember_sidebar_width(self: Pin<&mut App>, width: i32);
+
+        /// Ancla una carpeta al Acceso rápido, o la quita si ya lo estaba.
+        #[qinvokable]
+        fn toggle_pinned(self: Pin<&mut App>, path: &QString);
+
+        /// Si una carpeta está anclada, para el rótulo del menú.
+        #[qinvokable]
+        fn is_pinned(self: Pin<&mut App>, path: &QString) -> bool;
 
         /// Enseña u oculta el panel de navegación (F9).
         #[qinvokable]
@@ -314,6 +332,7 @@ pub struct AppRust {
     nav_count: i32,
     nav_current: i32,
     sidebar_visible: bool,
+    sidebar_width: i32,
     can_undo: bool,
     can_redo: bool,
     undo_label: QString,
@@ -333,6 +352,8 @@ pub struct AppRust {
     icons: Icons,
     /// Descripciones de los tipos, para la columna «Tipo».
     descriptions: MimeDescriptions,
+    /// Lo que Kara recuerda entre sesiones.
+    prefs: Prefs,
     /// Qué está seleccionado y qué tiene el cursor.
     selection: Selection,
     /// Las entradas que se están enseñando, en su orden. Se guardan para poder
@@ -374,6 +395,11 @@ impl Default for AppRust {
         // seguro existe, y arrancar con la vista vacia no orienta a nadie.
         let start = starting_folder().or_else(|| home.clone()).unwrap_or_else(|| PathBuf::from("/"));
 
+        let mut prefs = Prefs::load();
+        let complaint = prefs.take_complaint();
+        let pinned = prefs.pinned();
+        let initial_view = prefs.default_view();
+
         let mut app = Self {
             version: QString::from(env!("CARGO_PKG_VERSION")),
             path: QString::from(&start.to_string_lossy().into_owned()),
@@ -407,20 +433,25 @@ impl Default for AppRust {
             nav_expanded: cxx_qt_lib::QList::<i32>::default(),
             nav_count: 0,
             nav_current: -1,
-            sidebar_visible: true,
+            sidebar_visible: prefs.sidebar_visible(),
+            sidebar_width: prefs.sidebar_width(),
             can_undo: false,
             can_redo: false,
             undo_label: QString::default(),
             redo_label: QString::default(),
             last_error: QString::default(),
-            view_mode: mode_ordinal(ViewSettings::default().mode),
-            icon_size: clamp_count(ViewSettings::default().icon_size as usize),
-            can_zoom_out: false,
-            can_zoom_in: true,
+            // Del fichero de ajustes, no de la constante: el modo que el
+            // usuario dejó puesto tiene que estar aplicado ya en el primer
+            // fotograma. `render` lo restaura al navegar, pero al arrancar
+            // nadie ha navegado todavía.
+            view_mode: mode_ordinal(initial_view.mode),
+            icon_size: clamp_count(initial_view.icon_size as usize),
+            can_zoom_out: !initial_view.is_smallest(),
+            can_zoom_in: !initial_view.is_largest(),
             history: History::new(start.clone()),
             home: home.clone(),
             crumb_capacity: DEFAULT_CRUMB_CAPACITY,
-            tree: Tree::new(sections(home.as_deref())),
+            tree: Tree::new(sections(home.as_deref(), &pinned)),
             // 16 píxeles es la talla de la vista de detalles. Los temas
             // modernos son SVG, así que la talla solo decide de qué carpeta del
             // tema sale el fichero, no la nitidez.
@@ -430,13 +461,21 @@ impl Default for AppRust {
             visible: Vec::new(),
             visible_path: None,
             undo: UndoStack::new(),
-            sort_defaults: SortSpec::default(),
-            views: ViewMemory::default(),
+            sort_defaults: prefs.sort_defaults(),
+            views: ViewMemory::new(prefs.default_view(), kara_core::view::MEMORY_CAPACITY),
             thumbnail_jobs: Vec::new(),
             listing: Arc::new(AtomicU64::new(0)),
             thumbs: Vec::new(),
             place_kinds: place_kinds(home.as_deref()),
+            prefs,
         };
+
+        // Un fichero de ajustes ilegible no impide arrancar, pero tampoco se
+        // calla: se enseña una vez y la sesión sigue con los valores por
+        // defecto, sin sobrescribir lo que hubiera.
+        if let Some(complaint) = complaint {
+            app.last_error = QString::from(&complaint);
+        }
 
         // Al arrancar no hay ninguna señal que emitir todavía, así que el
         // volcado va directo a los campos.
@@ -707,19 +746,27 @@ struct NavView {
 }
 
 /// Las dos secciones del panel, con las ubicaciones que hay ahora mismo.
-fn sections(home: Option<&Path>) -> Vec<Section> {
+fn sections(home: Option<&Path>, pinned: &[PathBuf]) -> Vec<Section> {
     let branch = |place: &kara_fs::places::Place| Branch {
         name: std::ffi::OsString::from(present::place_label(place)),
         path: place.path.clone(),
     };
 
+    // Lo que el usuario ancló va primero, como en el Explorador: es lo que
+    // eligió él, y las carpetas XDG son las que vienen de serie.
+    let mut quick: Vec<Branch> = pinned.iter().map(Branch::at).collect();
+    quick.extend(
+        kara_fs::places::quick_access(home)
+            .iter()
+            .map(branch)
+            // Anclar una carpeta que ya salía no la duplica.
+            .filter(|place| !pinned.contains(&place.path)),
+    );
+
     vec![
         Section {
             id: SectionId::QuickAccess,
-            roots: kara_fs::places::quick_access(home)
-                .iter()
-                .map(branch)
-                .collect(),
+            roots: quick,
         },
         Section {
             id: SectionId::ThisComputer,
@@ -987,6 +1034,54 @@ impl qobject::App {
     fn toggle_sidebar(mut self: Pin<&mut Self>) {
         let visible = *self.sidebar_visible();
         self.as_mut().set_sidebar_visible(!visible);
+        self.as_mut().rust_mut().get_mut().prefs.set_sidebar_visible(!visible);
+        self.as_mut().persist();
+    }
+
+    fn remember_sidebar_width(mut self: Pin<&mut Self>, width: i32) {
+        if *self.sidebar_width() == width {
+            return;
+        }
+        self.as_mut().set_sidebar_width(width);
+        self.as_mut().rust_mut().get_mut().prefs.set_sidebar_width(width);
+        self.as_mut().persist();
+    }
+
+    fn is_pinned(self: Pin<&mut Self>, path: &QString) -> bool {
+        self.rust().prefs.is_pinned(Path::new(&path.to_string()))
+    }
+
+    fn toggle_pinned(mut self: Pin<&mut Self>, path: &QString) {
+        let path = PathBuf::from(path.to_string());
+        if !path.is_absolute() {
+            return;
+        }
+
+        {
+            let state = self.as_mut().rust_mut().get_mut();
+            if state.prefs.is_pinned(&path) {
+                state.prefs.unpin(&path);
+            } else {
+                state.prefs.pin(&path);
+            }
+
+            // Cambiar las raíces no cierra lo que el usuario tenía desplegado:
+            // `set_sections` conserva la expansión y lo ya leído.
+            let pinned = state.prefs.pinned();
+            state.tree.set_sections(sections(state.home.as_deref(), &pinned));
+        }
+
+        self.as_mut().persist();
+        self.as_mut().publish_nav();
+    }
+
+    /// Escribe los ajustes. Que no se puedan guardar se cuenta y no detiene
+    /// nada: perder una preferencia no puede costar la sesión.
+    fn persist(mut self: Pin<&mut Self>) {
+        if let Err(error) = self.rust().prefs.save() {
+            self.as_mut()
+                .report(&format!("No se pudieron guardar los ajustes: {error}"));
+        }
     }
 
     /// Arranca la búsqueda de miniaturas de la carpeta recién enseñada.
@@ -1437,11 +1532,16 @@ impl qobject::App {
         self.as_mut().set_can_zoom_in(!settings.is_largest());
 
         let folder = PathBuf::from(self.path().to_string());
-        self.as_mut()
-            .rust_mut()
-            .get_mut()
-            .views
-            .remember(&folder, settings);
+        {
+            let state = self.as_mut().rust_mut().get_mut();
+            state.views.remember(&folder, settings);
+            // Y pasa a ser el modo con el que se abren las carpetas que nadie
+            // ha configurado: sin un «aplicar a todas» explícito, lo que el
+            // usuario acaba de elegir es la mejor apuesta para la siguiente.
+            state.views.set_fallback(settings);
+            state.prefs.set_default_view(settings);
+        }
+        self.as_mut().persist();
 
         // Solo se vuelve a mirar la caché si el zoom cruza a otra talla del
         // estándar; dentro de la misma, las miniaturas que hay ya sirven.

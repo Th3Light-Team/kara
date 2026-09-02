@@ -48,6 +48,15 @@ MouseArea {
 
     Menu {
         id: entryMenu
+
+        /// Ruta absoluta de la entrada, que es lo que entiende `toggle_pinned`.
+        property string folder: ""
+        property bool pinned: false
+        onAboutToShow: {
+            const separador = control.app.path.endsWith("/") ? "" : "/";
+            entryMenu.folder = control.app.path + separador + control.app.entry_names[control.index];
+            entryMenu.pinned = control.app.is_pinned(entryMenu.folder);
+        }
         MenuItem {
             text: qsTr("Renombrar")
             // Renombrar es de una en una: con varias seleccionadas hace falta
@@ -58,6 +67,14 @@ MouseArea {
         MenuItem {
             text: control.app.selected_count > 1 ? qsTr("Enviar %1 elementos a la papelera").arg(control.app.selected_count) : qsTr("Enviar a la papelera")
             onTriggered: control.app.trash_selected()
+        }
+        MenuSeparator {}
+        MenuItem {
+            text: entryMenu.pinned ? qsTr("Quitar del Acceso rápido") : qsTr("Anclar a Acceso rápido")
+            // Solo las carpetas se anclan: el Acceso rápido son ubicaciones.
+            visible: (control.app.entry_dirs[control.index] ?? 0) !== 0
+            height: visible ? implicitHeight : 0
+            onTriggered: control.app.toggle_pinned(entryMenu.folder)
         }
         MenuSeparator {}
         MenuItem {

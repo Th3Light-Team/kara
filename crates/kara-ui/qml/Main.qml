@@ -132,10 +132,8 @@ Window {
         }
     }
 
-    // Ancho del panel de navegación. La spec lo quiere persistente entre
-    // sesiones; hoy no hay dónde guardarlo, así que vuelve a su sitio al
-    // arrancar.
-    property int sidebarWidth: 240
+    // Los límites tienen que coincidir con los que `prefs.rs` aplica al leer:
+    // ahí se recortan los valores absurdos de un fichero editado a mano.
     readonly property int sidebarMin: 160
     readonly property int sidebarMax: 480
 
@@ -377,7 +375,7 @@ Window {
             Sidebar {
                 app: app
                 visible: app.sidebar_visible
-                Layout.preferredWidth: win.sidebarWidth
+                Layout.preferredWidth: app.sidebar_width
                 Layout.fillHeight: true
             }
 
@@ -407,8 +405,8 @@ Window {
                     onPositionChanged: mouse => {
                         if (!splitter.pressed)
                             return;
-                        const propuesto = win.sidebarWidth + mouse.x - splitter.grabbedAt;
-                        win.sidebarWidth = Math.max(win.sidebarMin, Math.min(win.sidebarMax, propuesto));
+                        const propuesto = app.sidebar_width + mouse.x - splitter.grabbedAt;
+                        app.remember_sidebar_width(Math.max(win.sidebarMin, Math.min(win.sidebarMax, propuesto)));
                     }
                 }
             }
