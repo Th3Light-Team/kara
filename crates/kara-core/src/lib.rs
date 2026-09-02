@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod breadcrumb;
+pub mod columns;
 pub mod completion;
 pub mod entry;
 pub mod filter;
@@ -21,6 +22,10 @@ pub mod view;
 pub mod typeahead;
 
 pub use breadcrumb::{Collapsed, Segment, SegmentKind, collapse, segments};
+pub use columns::{
+    Column, ColumnLayout, ColumnMemory, ColumnPolicy, ColumnsError, clamp_width, is_removable,
+    known_columns, policy_for,
+};
 pub use entry::{EntryKind, FileEntry, MetadataBag, MetadataKey, MetadataValue};
 pub use completion::{Completer, PathInput, Source, Suggestion, Suggestions, split_input};
 pub use filter::{NameDisplay, NameFilter, Visibility, base_and_extension};
