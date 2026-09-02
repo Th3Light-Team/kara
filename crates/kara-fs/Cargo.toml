@@ -1,0 +1,14 @@
+[package]
+name = "kara-fs"
+description = "Syscalls de Kara: listado, stat, copia, movimiento, permisos POSIX y papelera FreeDesktop."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kara-core.workspace = true
+percent-encoding = "2.3.2"
+rustix = { version = "1.1.4", features = ["fs", "process"] }
+thiserror = "2.0.20"

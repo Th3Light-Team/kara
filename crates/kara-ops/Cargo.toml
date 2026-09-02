@@ -1,0 +1,14 @@
+[package]
+name = "kara-ops"
+description = "Cola de operaciones, progreso, conflictos y pila de deshacer de Kara."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+crossbeam-channel = "0.5.16"
+kara-core.workspace = true
+kara-fs.workspace = true
+thiserror = "2.0.20"

@@ -1,0 +1,13 @@
+/target/
+**/*.rs.bk
+*.pdb
+
+# Artefactos de build de Qt/cxx-qt
+/build/
+.qmlls.ini
+
+# Editor / SO
+.vscode/
+.idea/
+*.swp
+.DS_Store

@@ -1,0 +1,11 @@
+[package]
+name = "kara-core"
+description = "Dominio puro de Kara: entradas, ordenacion, agrupacion y filtros. Sin I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror = "2.0.20"

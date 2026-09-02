@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/kara-core",
+    "crates/kara-fs",
+    "crates/kara-index",
+    "crates/kara-ops",
+    "crates/kara-ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/oliverv/kara"
+
+[workspace.dependencies]
+kara-core = { path = "crates/kara-core" }
+kara-fs = { path = "crates/kara-fs" }
+kara-index = { path = "crates/kara-index" }
+kara-ops = { path = "crates/kara-ops" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
