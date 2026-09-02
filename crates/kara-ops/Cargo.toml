@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 crossbeam-channel = "0.5.16"
 kara-core.workspace = true
 kara-fs.workspace = true

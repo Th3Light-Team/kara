@@ -1,0 +1,245 @@
+//! Resolución de conflictos de nombre y generación de nombres únicos.
+//!
+//! Conveniencias de referencia: `ground/spec/05-operaciones.md` — «Resolución de
+//! conflictos», «Aplicar la misma acción a todos» y «Mantener ambos».
+//!
+//! Es la capa de **decisión**, no la de ejecución: aquí no se copia ni se mueve
+//! nada. Quien toca el disco pregunta qué hacer y esta capa responde.
+
+use std::collections::BTreeMap;
+
+/// Qué choca contra qué. La spec separa estos casos a propósito: no es lo mismo
+/// pisar un fichero con otro que pisar una carpeta con un fichero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConflictKind {
+    /// Fichero entrante contra fichero existente: el caso corriente.
+    FileOverFile,
+    /// Entra un fichero donde hay una carpeta. **Nunca** se resuelve solo.
+    FileOverDirectory,
+    /// Entra una carpeta donde hay un fichero. Tampoco.
+    DirectoryOverFile,
+    /// Carpeta contra carpeta: aquí sí tiene sentido combinar.
+    DirectoryOverDirectory,
+}
+
+/// Qué se decide hacer con un conflicto.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolution {
+    /// Pisar lo que hay en el destino.
+    Replace,
+    /// Dejar el destino como está y seguir con el resto.
+    Skip,
+    /// Quedarse con los dos, renombrando el entrante.
+    KeepBoth,
+    /// Fusionar recursivamente. Solo entre carpetas.
+    Merge,
+    /// Nombre tecleado a mano en el diálogo, como ofrece Dolphin.
+    RenameTo(String),
+}
+
+impl ConflictKind {
+    /// La opción que debe llevar el foco al abrir el diálogo.
+    ///
+    /// Siempre **la menos destructiva**, que es lo que exige la spec: nunca
+    /// `Replace`. Entre tipos distintos ni siquiera se ofrece conservar ambos por
+    /// defecto, porque un fichero y una carpeta con el mismo nombre casi siempre
+    /// significan que alguien se ha equivocado de destino.
+    #[must_use]
+    pub fn default_resolution(self) -> Resolution {
+        match self {
+            Self::FileOverFile | Self::DirectoryOverDirectory => Resolution::Skip,
+            Self::FileOverDirectory | Self::DirectoryOverFile => Resolution::Skip,
+        }
+    }
+
+    /// Acciones que tienen sentido para este tipo de choque.
+    ///
+    /// `Merge` solo aparece entre carpetas; ofrecerlo entre tipos distintos no
+    /// significa nada. `Replace` sigue estando disponible entre tipos distintos,
+    /// pero nunca es el defecto: la spec pide que no se sobrescriba una carpeta
+    /// con un fichero «sin aviso explícito», no que se prohíba.
+    #[must_use]
+    pub fn offers(self) -> Vec<Resolution> {
+        match self {
+            Self::DirectoryOverDirectory => vec![
+                Resolution::Skip,
+                Resolution::Merge,
+                Resolution::KeepBoth,
+                Resolution::Replace,
+            ],
+            _ => vec![Resolution::Skip, Resolution::KeepBoth, Resolution::Replace],
+        }
+    }
+
+    /// `true` si la acción es aplicable a este tipo de conflicto.
+    #[must_use]
+    pub fn allows(self, resolution: &Resolution) -> bool {
+        match resolution {
+            Resolution::RenameTo(_) => true,
+            other => self.offers().contains(other),
+        }
+    }
+}
+
+/// Cuántos conflictos se resolvieron de cada manera, para el resumen final que
+/// pide la spec.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResolutionCounts {
+    pub replaced: usize,
+    pub skipped: usize,
+    pub kept_both: usize,
+    pub merged: usize,
+    pub renamed: usize,
+}
+
+impl ResolutionCounts {
+    pub fn record(&mut self, resolution: &Resolution) {
+        match resolution {
+            Resolution::Replace => self.replaced += 1,
+            Resolution::Skip => self.skipped += 1,
+            Resolution::KeepBoth => self.kept_both += 1,
+            Resolution::Merge => self.merged += 1,
+            Resolution::RenameTo(_) => self.renamed += 1,
+        }
+    }
+
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.replaced + self.skipped + self.kept_both + self.merged + self.renamed
+    }
+}
+
+/// Decisiones «para todos los conflictos restantes».
+///
+/// Se guardan **por tipo de conflicto**, no una sola global: la spec sugiere
+/// poder decidir distinto según el tipo, y aplicar a un choque carpeta-contra-
+/// fichero lo que se eligió para dos ficheros sería justo la sorpresa
+/// destructiva que se quiere evitar.
+#[derive(Debug, Clone, Default)]
+pub struct ConflictPolicy {
+    blanket: BTreeMap<ConflictKind, Resolution>,
+    counts: ResolutionCounts,
+}
+
+impl ConflictPolicy {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Qué hacer sin preguntar, o `None` si hay que abrir el diálogo.
+    #[must_use]
+    pub fn decide(&self, kind: ConflictKind) -> Option<&Resolution> {
+        self.blanket.get(&kind)
+    }
+
+    /// Marca «hacer esto para todos los conflictos de este tipo».
+    ///
+    /// Se puede volver a llamar mientras queden conflictos: la spec pide
+    /// explícitamente poder cambiar de opinión a mitad.
+    pub fn apply_to_all(&mut self, kind: ConflictKind, resolution: Resolution) {
+        self.blanket.insert(kind, resolution);
+    }
+
+    /// Vuelve a preguntar por este tipo.
+    pub fn clear(&mut self, kind: ConflictKind) {
+        self.blanket.remove(&kind);
+    }
+
+    /// Anota una resolución ya aplicada, para el resumen.
+    pub fn record(&mut self, resolution: &Resolution) {
+        self.counts.record(resolution);
+    }
+
+    #[must_use]
+    pub fn counts(&self) -> ResolutionCounts {
+        self.counts
+    }
+}
+
+/// Extensiones compuestas que se tratan como una sola.
+///
+/// Es una lista explícita y no una regla general porque no la hay: `a.tar.gz`
+/// tiene extensión compuesta y `informe.v2.pdf` no, y nada en el nombre los
+/// distingue. La spec nombra `.tar.gz`; el resto son sus parientes directos.
+const COMPOSITE_EXTENSIONS: &[&str] = &[
+    "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "tar.lz", "tar.lzma", "tar.z",
+];
+
+/// Parte un nombre en cuerpo y extensión, respetando las compuestas.
+///
+/// Un nombre que empieza por punto y no tiene más puntos (`.bashrc`) no tiene
+/// extensión: ese punto marca «oculto».
+#[must_use]
+pub fn split_name(name: &str) -> (&str, Option<&str>) {
+    let lower = name.to_ascii_lowercase();
+    for composite in COMPOSITE_EXTENSIONS {
+        let suffix = format!(".{composite}");
+        if lower.ends_with(&suffix) && lower.len() > suffix.len() {
+            let cut = name.len() - suffix.len();
+            return (&name[..cut], Some(&name[cut + 1..]));
+        }
+    }
+    match name.rfind('.') {
+        Some(0) | None => (name, None),
+        Some(dot) if dot + 1 == name.len() => (name, None),
+        Some(dot) => (&name[..dot], Some(&name[dot + 1..])),
+    }
+}
+
+/// Límite de longitud de un nombre en la mayoría de sistemas de ficheros Linux.
+const NAME_MAX: usize = 255;
+
+/// Genera el nombre del «Conservar ambos»: `informe (2).pdf`, `informe (3).pdf`…
+///
+/// `exists` responde si un nombre ya está ocupado en el destino; se recibe como
+/// función porque mirarlo es I/O y esta capa no lo hace.
+///
+/// Se incrementa hasta encontrar uno libre, y si el resultado excede el límite
+/// del sistema se recorta el **cuerpo**, conservando el sufijo y la extensión:
+/// perder el `(2)` o el `.pdf` sería peor que perder unas letras del nombre.
+///
+/// # Un matiz de la spec que conviene conocer
+///
+/// El sufijo se añade siempre al nombre original, así que `informe (2).pdf`
+/// genera `informe (2) (2).pdf`. Es la lectura literal de la spec, que dice
+/// «añadir un sufijo numérico» e «incrementar hasta encontrar uno libre», sin
+/// mencionar que haya que interpretar un sufijo previo. Windows sí lo
+/// interpretaría y produciría `informe (3).pdf`; queda anotado como decisión
+/// pendiente en vez de inventarla aquí.
+#[must_use]
+pub fn unique_name(name: &str, exists: impl Fn(&str) -> bool) -> String {
+    if !exists(name) {
+        return name.to_string();
+    }
+    let (stem, extension) = split_name(name);
+    for n in 2..usize::MAX {
+        let candidate = compose(stem, &format!(" ({n})"), extension);
+        if !exists(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("el bucle encuentra un hueco mucho antes de agotar usize")
+}
+
+/// Monta `cuerpo` + `sufijo` + `.extensión` recortando el cuerpo si hace falta.
+fn compose(stem: &str, suffix: &str, extension: Option<&str>) -> String {
+    let tail_len = suffix.len() + extension.map_or(0, |e| e.len() + 1);
+    let room = NAME_MAX.saturating_sub(tail_len);
+
+    let mut body = stem;
+    if body.len() > room {
+        // Recorta en un límite de carácter: cortar un UTF-8 por la mitad
+        // produciría un nombre inválido.
+        let mut cut = room;
+        while cut > 0 && !body.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        body = &body[..cut];
+    }
+
+    match extension {
+        Some(ext) => format!("{body}{suffix}.{ext}"),
+        None => format!("{body}{suffix}"),
+    }
+}

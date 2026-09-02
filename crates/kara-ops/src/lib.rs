@@ -9,3 +9,13 @@
 //! - Nada silencioso: fase "Calculando…", progreso y conflictos explícitos.
 
 #![forbid(unsafe_code)]
+
+pub mod batch;
+pub mod clock;
+pub mod conflict;
+
+pub use clock::local_utc_offset_seconds;
+pub use batch::{BatchPolicy, BatchReport, Failure, FailureAction, FailureKind};
+pub use conflict::{
+    ConflictKind, ConflictPolicy, Resolution, ResolutionCounts, split_name, unique_name,
+};
