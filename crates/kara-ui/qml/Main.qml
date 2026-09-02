@@ -62,6 +62,51 @@ Window {
         onActivated: app.toggle_sidebar()
     }
 
+    // Modos de vista, con la numeración del Explorador de Windows: 1 a 4 son
+    // los cuatro tamaños de icono, 5 lista, 6 detalles, 7 mosaico. Falta el 8,
+    // «contenido», que todavía no existe.
+    Shortcut {
+        sequence: "Ctrl+Shift+1"
+        onActivated: app.set_view(3, 256)
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+2"
+        onActivated: app.set_view(3, 128)
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+3"
+        onActivated: app.set_view(3, 96)
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+4"
+        onActivated: app.set_view(3, 48)
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+5"
+        onActivated: app.set_view(1, 0)
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+6"
+        onActivated: app.set_view(0, 0)
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+7"
+        onActivated: app.set_view(2, 0)
+    }
+
+    Shortcut {
+        sequences: ["Ctrl++", "Ctrl+="]
+        onActivated: app.zoom_in()
+    }
+    Shortcut {
+        sequence: "Ctrl+-"
+        onActivated: app.zoom_out()
+    }
+    Shortcut {
+        sequence: "Ctrl+0"
+        onActivated: app.reset_zoom()
+    }
+
     // Ancho del panel de navegación. La spec lo quiere persistente entre
     // sesiones; hoy no hay dónde guardarlo, así que vuelve a su sitio al
     // arrancar.
@@ -169,6 +214,43 @@ Window {
                     onClicked: app.reload()
                 }
 
+                // Conmutador de modo de vista. Windows lo esconde en un menú
+                // «Ver»; aquí está a la vista porque todavía no hay menú y un
+                // modo que no se encuentra es un modo que no existe.
+                Row {
+                    Layout.leftMargin: 8
+                    Layout.rightMargin: 2
+                    spacing: 1
+
+                    Repeater {
+                        model: [
+                            {
+                                mode: 0,
+                                tip: qsTr("Detalles (Ctrl+Shift+6)")
+                            },
+                            {
+                                mode: 1,
+                                tip: qsTr("Lista (Ctrl+Shift+5)")
+                            },
+                            {
+                                mode: 2,
+                                tip: qsTr("Mosaico (Ctrl+Shift+7)")
+                            },
+                            {
+                                mode: 3,
+                                tip: qsTr("Iconos (Ctrl+Shift+3)")
+                            }
+                        ]
+                        delegate: ViewModeButton {
+                            required property var modelData
+                            mode: modelData.mode
+                            tip: modelData.tip
+                            currentMode: app.view_mode
+                            onClicked: app.set_view(modelData.mode, 0)
+                        }
+                    }
+                }
+
                 AddressBar {
                     id: address
                     app: app
@@ -224,7 +306,12 @@ Window {
                                 filterField.text = "";
                                 filterDelay.stop();
                                 app.apply_filter("");
-                                fileList.forceActiveFocus();
+                                // El Loader no declara el tipo de lo que
+                                // carga; el molde le dice a las herramientas
+                                // que es un Item, que es lo único que se pide.
+                                const vista = fileView.item as Item;
+                                if (vista)
+                                    vista.forceActiveFocus();
                             }
                         }
                         Timer {
@@ -293,188 +380,40 @@ Window {
                 Layout.fillHeight: true
                 color: Theme.content
 
-                // Cabecera de columnas. Todavía es un rótulo: ordenar pulsando aquí
-                // llega con la vista de detalles completa.
-                Rectangle {
-                    id: columnHeader
-                    anchors.top: parent.top
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    height: 30
-                    color: Theme.content
+                // Detalles es una tabla con cabecera y el resto son rejillas:
+                // dos vistas distintas, no una con banderas. El Loader deja
+                // viva solo la que se enseña, para que la otra no cree
+                // delegados de miles de entradas que nadie mira.
+                Loader {
+                    id: fileView
+                    anchors.fill: parent
+                    sourceComponent: app.view_mode === 0 ? detailsMode : gridMode
+                }
 
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.leftMargin: 14
-                        anchors.rightMargin: 22
-                        spacing: 12
-
-                        // Hueco del icono: la cabecera tiene que llevar el mismo
-                        // que las filas o las columnas dejan de alinearse.
-                        Item {
-                            Layout.preferredWidth: 20
-                        }
-                        Text {
-                            text: qsTr("Nombre")
-                            Layout.fillWidth: true
-                            Layout.preferredWidth: 320
-                            Layout.maximumWidth: 560
-                            color: Theme.headerText
-                            font.family: Theme.family
-                            font.pixelSize: Theme.sizeSmall
-                        }
-                        Text {
-                            text: qsTr("Tipo")
-                            Layout.preferredWidth: 210
-                            color: Theme.headerText
-                            font.family: Theme.family
-                            font.pixelSize: Theme.sizeSmall
-                        }
-                        Text {
-                            text: qsTr("Tamaño")
-                            Layout.preferredWidth: 110
-                            horizontalAlignment: Text.AlignRight
-                            color: Theme.headerText
-                            font.family: Theme.family
-                            font.pixelSize: Theme.sizeSmall
-                        }
-                        // Lo que sobra a la derecha se deja en blanco: estirar las
-                        // columnas hasta el borde en una pantalla ancha separa el
-                        // nombre de su tamaño hasta hacerlos ilegibles juntos.
-                        Item {
-                            Layout.fillWidth: true
-                            Layout.preferredWidth: 0
-                        }
+                Component {
+                    id: detailsMode
+                    FileDetails {
+                        app: app
                     }
-
-                    Rectangle {
-                        anchors.bottom: parent.bottom
-                        width: parent.width
-                        height: 1
-                        color: Theme.divider
+                }
+                Component {
+                    id: gridMode
+                    FileGrid {
+                        app: app
                     }
                 }
 
-                ListView {
-                    id: fileList
-                    anchors.top: columnHeader.bottom
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.bottom: parent.bottom
-                    clip: true
-                    focus: true
-                    model: app.entry_count
-                    currentIndex: -1
-                    highlightMoveDuration: 0
-                    ScrollBar.vertical: ScrollBar {}
-
-                    delegate: Item {
-                        id: row
-
-                        required property int index
-                        readonly property bool current: fileList.currentIndex === row.index
-                        // La URL se declara aparte y tipada: asignar directamente
-                        // el resultado de `??` a `source` deja un valor sin tipo
-                        // que QML no sabe convertir a URL.
-                        readonly property string iconUrl: app.entry_icons[row.index] ?? ""
-                        // La miniatura llega después que el listado, desde un
-                        // hilo de fondo; mientras no esté, manda el icono.
-                        readonly property string thumbUrl: app.entry_thumbs[row.index] ?? ""
-
-                        width: fileList.width
-                        height: Theme.rowHeight
-
-                        Rectangle {
-                            anchors.fill: parent
-                            anchors.leftMargin: 4
-                            anchors.rightMargin: 4
-                            radius: Theme.radius
-                            color: {
-                                if (row.current)
-                                    return Theme.selection;
-                                return rowArea.containsMouse ? Theme.hover : "transparent";
-                            }
-                        }
-
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 14
-                            anchors.rightMargin: 22
-                            spacing: 12
-
-                            Image {
-                                Layout.preferredWidth: 20
-                                Layout.preferredHeight: 20
-                                source: row.thumbUrl !== "" ? row.thumbUrl : row.iconUrl
-                                // Una miniatura no es cuadrada; sin esto se
-                                // estiraría, que es el modo por defecto de Image.
-                                fillMode: Image.PreserveAspectFit
-                                // El tema resuelve la talla, pero los ficheros
-                                // son SVG: sin `sourceSize` se rasterizan a su
-                                // tamaño nominal y se ven borrosos al escalar.
-                                sourceSize.width: 20
-                                sourceSize.height: 20
-                                // Un icono que no está no deja un hueco roto:
-                                // simplemente no se pinta.
-                                visible: status === Image.Ready
-                                // Cargar del disco no puede parar el desplazado
-                                // de una carpeta con miles de entradas.
-                                asynchronous: true
-                            }
-                            Text {
-                                text: app.entry_names[row.index] ?? ""
-                                Layout.fillWidth: true
-                                Layout.preferredWidth: 320
-                                Layout.maximumWidth: 560
-                                elide: Text.ElideMiddle
-                                color: Theme.text
-                                font.family: Theme.family
-                                font.pixelSize: Theme.sizeBase
-                            }
-                            Text {
-                                text: app.entry_kinds[row.index] ?? ""
-                                Layout.preferredWidth: 210
-                                color: Theme.textDim
-                                font.family: Theme.family
-                                font.pixelSize: Theme.sizeBase
-                            }
-                            Text {
-                                text: app.entry_sizes[row.index] ?? ""
-                                Layout.preferredWidth: 110
-                                horizontalAlignment: Text.AlignRight
-                                color: Theme.textDim
-                                font.family: Theme.family
-                                font.pixelSize: Theme.sizeBase
-                            }
-                            Item {
-                                Layout.fillWidth: true
-                                Layout.preferredWidth: 0
-                            }
-                        }
-
-                        MouseArea {
-                            id: rowArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            acceptedButtons: Qt.LeftButton | Qt.RightButton
-                            onClicked: mouse => {
-                                fileList.currentIndex = row.index;
-                                if (mouse.button === Qt.RightButton)
-                                    rowMenu.popup();
-                            }
-                            onDoubleClicked: {
-                                if (app.entry_kinds[row.index] === "Carpeta")
-                                    app.cd(app.entry_names[row.index]);
-                            }
-                        }
-
-                        Menu {
-                            id: rowMenu
-                            MenuItem {
-                                text: qsTr("Enviar a la papelera")
-                                onTriggered: app.trash(app.entry_names[row.index])
-                            }
-                        }
+                // Ctrl+rueda sobre el area de ficheros: la conveniencia de zoom
+                // de la spec. Va por encima de la vista y solo se queda los
+                // eventos con Ctrl; el resto siguen hasta la barra de
+                // desplazamiento.
+                WheelHandler {
+                    acceptedModifiers: Qt.ControlModifier
+                    onWheel: event => {
+                        if (event.angleDelta.y > 0)
+                            app.zoom_in();
+                        else if (event.angleDelta.y < 0)
+                            app.zoom_out();
                     }
                 }
 

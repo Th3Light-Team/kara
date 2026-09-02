@@ -23,6 +23,7 @@ use kara_core::filter::{NameFilter, Visibility};
 use kara_core::history::History;
 use kara_core::sort::SortSpec;
 use kara_core::tree::{Branch, Expandable, RowKind, Section, SectionId, Tree};
+use kara_core::view::{ViewMemory, ViewMode, ViewSettings};
 use kara_fs::icons::Icons;
 use kara_fs::mime::MimeDescriptions;
 use kara_fs::list_directory;
@@ -50,6 +51,14 @@ pub mod qobject {
         /// URL de la miniatura de cada entrada, vacía mientras no haya una. Se
         /// rellena desde un hilo de fondo, así que cambia después del listado.
         #[qproperty(QStringList, entry_thumbs)]
+        /// Qué entradas son carpetas, en 1 y 0.
+        ///
+        /// La vista necesita saberlo para entrar al hacer doble clic, y no
+        /// puede deducirlo de la columna «Tipo»: ese texto es una descripción
+        /// traducida del sistema, y compararla sería atar el comportamiento al
+        /// idioma. Ya ocurrió: al pasar de «Carpeta» a «Carpeta de archivos»
+        /// dejó de abrirse ninguna carpeta.
+        #[qproperty(QList_i32, entry_dirs)]
         /// Entradas que se enseñan: ya filtradas.
         #[qproperty(i32, entry_count)]
         /// Entradas que hay en la carpeta antes de aplicar el filtro. La barra de
@@ -76,6 +85,14 @@ pub mod qobject {
         /// Fila de la carpeta que se está viendo, o -1 si no sale en el panel.
         #[qproperty(i32, nav_current)]
         #[qproperty(bool, sidebar_visible)]
+        /// Modo de vista actual, como el ordinal de `kara_core::view::ViewMode`:
+        /// 0 detalles, 1 lista, 2 mosaico, 3 iconos.
+        #[qproperty(i32, view_mode)]
+        /// Lado del icono o la miniatura, en píxeles lógicos.
+        #[qproperty(i32, icon_size)]
+        /// Si queda sitio para seguir alejando o acercando.
+        #[qproperty(bool, can_zoom_out)]
+        #[qproperty(bool, can_zoom_in)]
         type App = super::AppRust;
 
         /// Entra en una subcarpeta de la actual. Si no se puede listar, no se
@@ -134,6 +151,23 @@ pub mod qobject {
         /// Enseña u oculta el panel de navegación (F9).
         #[qinvokable]
         fn toggle_sidebar(self: Pin<&mut App>);
+
+        /// Cambia de modo de vista. `icon_size` menor o igual que cero pide el
+        /// tamaño con el que ese modo se enseña normalmente.
+        #[qinvokable]
+        fn set_view(self: Pin<&mut App>, mode: i32, icon_size: i32);
+
+        /// Un paso de la escala de zoom. Al quedarse sin tamaños de icono se
+        /// pasa a los modos más densos, que es lo que hace la rueda en Windows.
+        #[qinvokable]
+        fn zoom_in(self: Pin<&mut App>);
+
+        #[qinvokable]
+        fn zoom_out(self: Pin<&mut App>);
+
+        /// Vuelve al tamaño normal **del modo actual**, sin cambiar de modo.
+        #[qinvokable]
+        fn reset_zoom(self: Pin<&mut App>);
     }
 
     // Las miniaturas se leen y se generan fuera del hilo de la interfaz, y
@@ -159,6 +193,7 @@ pub struct AppRust {
     entry_kinds: QStringList,
     entry_icons: QStringList,
     entry_thumbs: QStringList,
+    entry_dirs: cxx_qt_lib::QList<i32>,
     entry_count: i32,
     total_count: i32,
     crumb_names: QStringList,
@@ -177,6 +212,10 @@ pub struct AppRust {
     nav_count: i32,
     nav_current: i32,
     sidebar_visible: bool,
+    view_mode: i32,
+    icon_size: i32,
+    can_zoom_out: bool,
+    can_zoom_in: bool,
 
     // Estado que no se expone a QML.
     history: History,
@@ -187,8 +226,12 @@ pub struct AppRust {
     icons: Icons,
     /// Descripciones de los tipos, para la columna «Tipo».
     descriptions: MimeDescriptions,
-    /// La caché de miniaturas del escritorio. `None` si no hay dónde ponerla.
-    thumbnails: Option<Thumbnails>,
+    /// Modo y zoom de cada carpeta. Se pierde al cerrar: la spec lo quiere en
+    /// disco, pero todavía no hay dónde guardar ajustes.
+    views: ViewMemory,
+    /// Los encargos de miniatura de la carpeta que se enseña, para poder
+    /// rehacerlos si el zoom cambia de talla sin volver a listar el disco.
+    thumbnail_jobs: Vec<ThumbnailJob>,
     /// Sube en cada navegación. Un hilo cuyo número ya no es el actual tira su
     /// trabajo: el usuario se fue de esa carpeta y nadie va a mirar el
     /// resultado.
@@ -218,6 +261,7 @@ impl Default for AppRust {
             entry_kinds: QStringList::default(),
             entry_icons: QStringList::default(),
             entry_thumbs: QStringList::default(),
+            entry_dirs: cxx_qt_lib::QList::<i32>::default(),
             entry_count: 0,
             total_count: 0,
             crumb_names: QStringList::default(),
@@ -236,6 +280,10 @@ impl Default for AppRust {
             nav_count: 0,
             nav_current: -1,
             sidebar_visible: true,
+            view_mode: mode_ordinal(ViewSettings::default().mode),
+            icon_size: clamp_count(ViewSettings::default().icon_size as usize),
+            can_zoom_out: false,
+            can_zoom_in: true,
             history: History::new(start.clone()),
             home: home.clone(),
             crumb_capacity: DEFAULT_CRUMB_CAPACITY,
@@ -245,7 +293,8 @@ impl Default for AppRust {
             // tema sale el fichero, no la nitidez.
             icons: Icons::load(ICON_SIZE),
             descriptions: MimeDescriptions::new(TYPE_LANGUAGES.iter().map(|l| (*l).to_string()).collect()),
-            thumbnails: Thumbnails::shared(THUMBNAIL_SIZE),
+            views: ViewMemory::default(),
+            thumbnail_jobs: Vec::new(),
             listing: Arc::new(AtomicU64::new(0)),
             thumbs: Vec::new(),
             place_kinds: place_kinds(home.as_deref()),
@@ -260,6 +309,7 @@ impl Default for AppRust {
             app.entry_sizes = snapshot.sizes;
             app.entry_kinds = snapshot.kinds;
             app.entry_icons = snapshot.icons;
+            app.entry_dirs = snapshot.dirs;
             app.entry_count = snapshot.count;
             app.total_count = snapshot.total;
             app.crumb_names = snapshot.crumb_names;
@@ -302,12 +352,26 @@ const DEFAULT_CRUMB_CAPACITY: usize = 6;
 /// Talla de icono que se pide al tema.
 const ICON_SIZE: u32 = 16;
 
-/// Talla de miniatura que se pide a la caché compartida.
-///
-/// 128 píxeles es la talla «normal» del estándar, la que más probabilidades
-/// tiene de estar ya generada por otro programa, y sobra para la vista de
-/// detalles. Cuando haya vista de iconos con zoom, la talla saldrá del zoom.
-const THUMBNAIL_SIZE: ThumbnailSize = ThumbnailSize::Normal;
+/// El ordinal con el que un modo viaja a QML.
+fn mode_ordinal(mode: ViewMode) -> i32 {
+    match mode {
+        ViewMode::Details => 0,
+        ViewMode::List => 1,
+        ViewMode::Tiles => 2,
+        ViewMode::Icons => 3,
+    }
+}
+
+/// Vuelta del ordinal al modo. Un valor que no existe deja el modo por defecto
+/// en vez de fallar: viene de QML, no del dominio.
+fn mode_from_ordinal(ordinal: i32) -> ViewMode {
+    match ordinal {
+        1 => ViewMode::List,
+        2 => ViewMode::Tiles,
+        3 => ViewMode::Icons,
+        _ => ViewMode::Details,
+    }
+}
 
 /// Cuántas miniaturas se juntan antes de enseñarlas.
 ///
@@ -334,6 +398,7 @@ struct Snapshot {
     sizes: QStringList,
     kinds: QStringList,
     icons: QStringList,
+    dirs: cxx_qt_lib::QList<i32>,
     count: i32,
     /// Qué entradas pueden tener miniatura, para el hilo de fondo.
     jobs: Vec<ThumbnailJob>,
@@ -411,6 +476,11 @@ impl AppRust {
             sizes,
             kinds,
             icons,
+            dirs: ints(
+                entries
+                    .iter()
+                    .map(|e| i32::from(e.kind == EntryKind::Directory)),
+            ),
             jobs,
             count: clamp_count(entries.len()),
             total: clamp_count(total),
@@ -423,6 +493,7 @@ impl AppRust {
 }
 
 /// Una entrada a la que mirarle la miniatura.
+#[derive(Clone)]
 struct ThumbnailJob {
     row: usize,
     path: PathBuf,
@@ -647,7 +718,19 @@ impl qobject::App {
         self.as_mut().set_entry_sizes(view.sizes);
         self.as_mut().set_entry_kinds(view.kinds);
         self.as_mut().set_entry_icons(view.icons);
-        self.as_mut().start_thumbnails(view.jobs, clamp_count_usize(view.count));
+        self.as_mut().set_entry_dirs(view.dirs);
+
+        // La carpeta manda sobre la vista: se restaura como se dejó antes de
+        // pedir miniaturas, porque la talla que se pide sale de ahí.
+        let remembered = self.rust().views.settings_for(target);
+        self.as_mut().set_view_mode(mode_ordinal(remembered.mode));
+        self.as_mut()
+            .set_icon_size(clamp_count(remembered.icon_size as usize));
+        self.as_mut().set_can_zoom_out(!remembered.is_smallest());
+        self.as_mut().set_can_zoom_in(!remembered.is_largest());
+
+        self.as_mut()
+            .start_thumbnails(view.jobs, clamp_count_usize(view.count), true);
         self.as_mut().set_entry_count(view.count);
         self.as_mut().set_total_count(view.total);
         self.as_mut().set_crumb_names(view.crumb_names);
@@ -717,18 +800,31 @@ impl qobject::App {
     /// casi de inmediato. La segunda genera lo que falta, que es lento, y va
     /// goteando. Encadenarlas al revés dejaría la carpeta sin nada visible
     /// mientras se decodifica la primera foto.
-    fn start_thumbnails(mut self: Pin<&mut Self>, jobs: Vec<ThumbnailJob>, rows: usize) {
+    fn start_thumbnails(
+        mut self: Pin<&mut Self>,
+        jobs: Vec<ThumbnailJob>,
+        rows: usize,
+        clear: bool,
+    ) {
         // Cualquier hilo anterior queda invalidado por este número: el usuario
-        // ya no está en aquella carpeta.
+        // ya no está en aquella carpeta, o pidió otra talla.
         let generation = {
             let state = self.as_mut().rust_mut().get_mut();
-            state.thumbs = vec![String::new(); rows];
+            state.thumbnail_jobs = jobs.clone();
+            if clear {
+                state.thumbs = vec![String::new(); rows];
+            }
             state.listing.fetch_add(1, Ordering::SeqCst) + 1
         };
-        self.as_mut()
-            .set_entry_thumbs(QStringList::default());
+        if clear {
+            self.as_mut().set_entry_thumbs(QStringList::default());
+        }
 
-        let Some(thumbnails) = self.rust().thumbnails.clone() else {
+        // La talla sale del zoom: pedir 128 píxeles para un icono de 256 los
+        // enseñaría emborronados, y pedir 256 para una fila de detalles sería
+        // generar cuatro veces los píxeles que se ven.
+        let wanted = u32::try_from(*self.icon_size()).unwrap_or(128);
+        let Some(thumbnails) = Thumbnails::shared(ThumbnailSize::covering(wanted)) else {
             return;
         };
         if jobs.is_empty() {
@@ -813,6 +909,64 @@ impl qobject::App {
             .map(QString::from)
             .collect();
         self.as_mut().set_entry_thumbs(list);
+    }
+
+    /// Aplica unos ajustes de vista y los recuerda para esta carpeta.
+    fn apply_view(mut self: Pin<&mut Self>, settings: ViewSettings) {
+        let previous = ThumbnailSize::covering(u32::try_from(*self.icon_size()).unwrap_or(128));
+
+        self.as_mut().set_view_mode(mode_ordinal(settings.mode));
+        self.as_mut()
+            .set_icon_size(clamp_count(settings.icon_size as usize));
+        self.as_mut().set_can_zoom_out(!settings.is_smallest());
+        self.as_mut().set_can_zoom_in(!settings.is_largest());
+
+        let folder = PathBuf::from(self.path().to_string());
+        self.as_mut()
+            .rust_mut()
+            .get_mut()
+            .views
+            .remember(&folder, settings);
+
+        // Solo se vuelve a mirar la caché si el zoom cruza a otra talla del
+        // estándar; dentro de la misma, las miniaturas que hay ya sirven.
+        if ThumbnailSize::covering(settings.icon_size) != previous {
+            let jobs = self.rust().thumbnail_jobs.clone();
+            let rows = self.rust().thumbs.len();
+            self.as_mut().start_thumbnails(jobs, rows, false);
+        }
+    }
+
+    /// Ajustes actuales, tal y como los ven las propiedades.
+    fn current_view(&self) -> ViewSettings {
+        ViewSettings::new(
+            mode_from_ordinal(*self.view_mode()),
+            u32::try_from(*self.icon_size()).unwrap_or(20),
+        )
+    }
+
+    fn set_view(mut self: Pin<&mut Self>, mode: i32, icon_size: i32) {
+        let mode = mode_from_ordinal(mode);
+        let settings = match u32::try_from(icon_size) {
+            Ok(size) if size > 0 => ViewSettings::new(mode, size),
+            _ => ViewSettings::for_mode(mode),
+        };
+        self.as_mut().apply_view(settings);
+    }
+
+    fn zoom_in(mut self: Pin<&mut Self>) {
+        let next = self.current_view().zoom_in();
+        self.as_mut().apply_view(next);
+    }
+
+    fn zoom_out(mut self: Pin<&mut Self>) {
+        let next = self.current_view().zoom_out();
+        self.as_mut().apply_view(next);
+    }
+
+    fn reset_zoom(mut self: Pin<&mut Self>) {
+        let next = self.current_view().reset_zoom();
+        self.as_mut().apply_view(next);
     }
 
     /// Refleja en las propiedades si el historial puede ir atrás o adelante.

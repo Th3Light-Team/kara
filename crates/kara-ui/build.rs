@@ -14,6 +14,11 @@ fn main() {
             QmlFile::from("qml/AddressBar.qml"),
             QmlFile::from("qml/Sidebar.qml"),
             QmlFile::from("qml/ResizeHandle.qml"),
+            QmlFile::from("qml/EntryMouse.qml"),
+            QmlFile::from("qml/EntryIcon.qml"),
+            QmlFile::from("qml/FileDetails.qml"),
+            QmlFile::from("qml/FileGrid.qml"),
+            QmlFile::from("qml/ViewModeButton.qml"),
         ]),
     )
     .qt_module("Quick")

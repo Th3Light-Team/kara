@@ -185,10 +185,17 @@ listado invalida el trabajo en cuanto el usuario cambia de carpeta.
 `kara-ui` acepta la carpeta a enseñar como argumento: `cargo run -p kara-ui --
 ~/Descargas`.
 
-**Lo que falta de la vista:** los cuatro modos de vista con zoom,
-ordenar pulsando en la cabecera, selección múltiple, anclar carpetas al panel
-(necesita dónde guardar ajustes), y enchufar a la UI lo que el backend ya ofrece
-y nadie consume todavía (vigilancia, cola, deshacer).
+**Cuatro modos de vista con zoom.** Detalles, lista, mosaico e iconos.
+`kara-core::view` los modela como **una sola escala**: subir de zoom agranda el
+icono y, al quedarse sin tamaños, se cae hacia los modos más densos, que es lo
+que hace la rueda en el Explorador. Cada carpeta recuerda cómo se dejó, con la
+memoria acotada que pide la spec — en RAM, porque todavía no hay dónde guardar
+ajustes en disco.
+
+**Lo que falta de la vista:** ordenar pulsando en la cabecera, selección
+múltiple, anclar carpetas al panel (necesita dónde guardar ajustes), la vista
+«contenido» (Ctrl+Shift+8), y enchufar a la UI lo que el backend ya ofrece y
+nadie consume todavía (vigilancia, cola, deshacer).
 
 ### Cabos sueltos conocidos
 
