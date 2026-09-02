@@ -19,6 +19,8 @@ pub mod mime;
 
 pub mod places;
 
+pub mod settings;
+
 pub mod thumbnails;
 
 pub use thumbnails::{ThumbnailSize, Thumbnails};
@@ -32,6 +34,11 @@ pub use listing::{EntryError, Listing, describe, list_directory, read_hidden_fil
 pub use mime::{MimeDatabase, MimeDescriptions};
 
 pub use places::{Place, PlaceKind, quick_access, this_computer};
+
+pub use settings::{
+    LoadOutcome, LoadedSettings, Sections, Settings, SettingsError, default_path, load, parse,
+    save, serialize,
+};
 
 pub mod transfer;
 
