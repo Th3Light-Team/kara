@@ -32,7 +32,7 @@ mod collation;
 mod permutation;
 mod spec;
 
-pub use collation::{Collation, CollationKey, collation_key, compare_names};
+pub use collation::{Collation, CollationKey, collation_key, compare_names, fold_for_match};
 pub use permutation::{invert_permutation, remap_selection, sort_permutation};
 pub use spec::{
     ColumnId, DirectoryGrouping, SortKey, SortOrder, SortOverrides, SortSpec, column_for_sort_key,
