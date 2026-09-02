@@ -11,3 +11,6 @@
 .idea/
 *.swp
 .DS_Store
+
+# El lock es estado de ejecución, no del proyecto
+.kara/lock/

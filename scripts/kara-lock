@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# Lock de exclusión mutua para el árbol de trabajo de Kara.
+#
+# Existe porque hay más de un proceso autónomo capaz de escribir aquí: la tarea
+# programada `kara-backend-mvp`, los workflows kara-tdd lanzados a mano, y una
+# sesión interactiva. Dos de ellos a la vez sobre el mismo árbol produce commits
+# entrelazados y builds corruptos.
+#
+# Uso:
+#   kara-lock acquire <dueño> [ttl_min]   toma el lock (por defecto 60 min)
+#   kara-lock refresh <dueño>             renueva el latido; OBLIGATORIO entre pasos
+#                                          largos: sin latido el lock caduca y otro
+#                                          proceso puede entrar mientras trabajas
+#   kara-lock release <dueño>             lo suelta
+#   kara-lock status                      quién lo tiene y desde cuándo
+#   kara-lock release --force             rompe el lock a mano (último recurso)
+#
+# Salida: 0 si la operación tuvo éxito, 1 si el lock está tomado por otro.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOCK="$REPO/.kara/lock"
+INFO="$LOCK/info"
+DEFAULT_TTL=60
+
+now() { date +%s; }
+
+read_info() {
+    # shellcheck disable=SC1090
+    [ -f "$INFO" ] && . "$INFO" || return 1
+}
+
+# El lock caduca SOLO por latido, nunca por liveness del PID.
+#
+# Cada llamada a una herramienta bash abre una shell nueva que muere al terminar
+# el comando, así que el PID registrado siempre está muerto en la llamada
+# siguiente: usarlo para detectar rancidez hacía que cualquier otra sesión
+# robase el lock al instante. Está medido. El PID queda solo como dato
+# informativo para diagnosticar quién lo tenía.
+#
+# La contrapartida es que un proceso que muera sin liberar bloquea el árbol
+# hasta que caduque el TTL. Por eso el TTL por defecto (60 min) es menor que el
+# periodo de la tarea programada (2 h): como mucho se pierde un ciclo.
+is_stale() {
+    read_info || return 0
+    local age=$(( $(now) - ${BEAT:-0} ))
+    [ "$age" -gt $(( ${TTL:-$DEFAULT_TTL} * 60 )) ]
+}
+
+write_info() {
+    cat > "$INFO" <<INFOEOF
+OWNER='$1'
+OWNER_PID=$2
+TTL=$3
+STARTED=$(now)
+BEAT=$(now)
+INFOEOF
+}
+
+cmd="${1:-status}"
+
+case "$cmd" in
+  acquire)
+    owner="${2:?falta el dueño}"; ttl="${3:-$DEFAULT_TTL}"
+    mkdir -p "$REPO/.kara"
+    if mkdir "$LOCK" 2>/dev/null; then
+        write_info "$owner" "$PPID" "$ttl"
+        echo "lock tomado por '$owner' (pid $PPID, ttl ${ttl}m)"
+        exit 0
+    fi
+    if is_stale; then
+        read_info || true
+        echo "AVISO: rompiendo lock rancio de '${OWNER:-?}' — sin latido desde hace $(( ($(now) - ${BEAT:-0}) / 60 ))m (ttl ${TTL:-?}m)" >&2
+        write_info "$owner" "$PPID" "$ttl"
+        echo "lock tomado por '$owner' tras romper el anterior"
+        exit 0
+    fi
+    read_info || true
+    echo "OCUPADO: lo tiene '${OWNER:-?}' (pid ${OWNER_PID:-?}) desde $(date -d "@${STARTED:-0}" '+%H:%M:%S'), último latido hace $(( ($(now) - ${BEAT:-0}) / 60 ))m" >&2
+    exit 1
+    ;;
+
+  refresh)
+    owner="${2:?falta el dueño}"
+    read_info 2>/dev/null || { echo "no hay lock que renovar" >&2; exit 1; }
+    [ "${OWNER:-}" = "$owner" ] || { echo "el lock es de '${OWNER:-?}', no de '$owner'" >&2; exit 1; }
+    sed -i "s/^BEAT=.*/BEAT=$(now)/" "$INFO"
+    echo "latido renovado por '$owner'"
+    ;;
+
+  release)
+    if [ "${2:-}" = "--force" ]; then
+        rm -rf "$LOCK"; echo "lock roto a la fuerza"; exit 0
+    fi
+    owner="${2:?falta el dueño}"
+    read_info 2>/dev/null || { echo "no había lock"; exit 0; }
+    [ "${OWNER:-}" = "$owner" ] || { echo "el lock es de '${OWNER:-?}', no de '$owner'; usa --force si de verdad quieres romperlo" >&2; exit 1; }
+    rm -rf "$LOCK"
+    echo "lock liberado por '$owner' (lo tuvo $(( ($(now) - ${STARTED:-0}) / 60 ))m)"
+    ;;
+
+  status)
+    if ! read_info 2>/dev/null; then echo "libre"; exit 0; fi
+    if is_stale; then
+        echo "RANCIO: '${OWNER:-?}' sin latido desde hace $(( ($(now) - ${BEAT:-0}) / 60 ))m — el siguiente acquire lo romperá"
+    else
+        echo "ocupado por '${OWNER:-?}' (pid ${OWNER_PID:-?}) desde $(date -d "@${STARTED:-0}" '+%H:%M:%S'), latido hace $(( ($(now) - ${BEAT:-0}) / 60 ))m, ttl ${TTL:-?}m"
+    fi
+    ;;
+
+  *) echo "uso: kara-lock {acquire|refresh|release|status}" >&2; exit 2 ;;
+esac

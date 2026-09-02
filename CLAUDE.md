@@ -89,6 +89,25 @@ Para revisar el QML hace falta apuntar a la ruta del módulo que genera cxx-qt, 
 
 Sin el `-I` falla con "Failed to import com.kara.ui", que es un falso positivo.
 
+## Concurrencia: el lock del árbol
+
+Más de un proceso autónomo puede escribir aquí: la tarea programada
+`kara-backend-mvp`, los workflows `kara-tdd` lanzados a mano y una sesión
+interactiva. Dos a la vez producen commits entrelazados y builds corruptos —
+ocurrió el 2026-09-02. **Antes de escribir en el árbol, toma el lock:**
+
+```bash
+./scripts/kara-lock acquire <dueño>   # 1 = ocupado, no insistas
+./scripts/kara-lock refresh <dueño>   # entre pasos largos, o caduca
+./scripts/kara-lock release <dueño>   # siempre, incluso al abortar
+```
+
+Caduca **solo por latido** (60 min por defecto), nunca por liveness del PID: cada
+llamada bash abre una shell que muere al terminar, así que el PID registrado
+siempre está muerto en la llamada siguiente y usarlo dejaba que cualquiera
+robase el lock al instante. El TTL es menor que el periodo de la tarea
+programada, así que un proceso muerto cuesta como mucho un ciclo.
+
 ## Reglas del proyecto
 
 **Operaciones de fichero — no negociable.**
