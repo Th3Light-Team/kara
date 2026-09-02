@@ -14,8 +14,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use kara_core::{
     Collation, ColumnId, DirectoryGrouping, EntryKind, FileEntry, MetadataBag, MetadataKey,
     MetadataValue, SortError, SortKey, SortOrder, SortSpec, available_keys, collation_key,
-    compare_entries, compare_names, insertion_index, invert_permutation, remap_selection,
-    sort_entries, sort_key_for_column, sort_permutation,
+    column_for_sort_key, compare_entries, compare_names, insertion_index, invert_permutation,
+    remap_selection, sort_entries, sort_key_for_column, sort_permutation,
 };
 
 // ---------------------------------------------------------------- helpers ---
@@ -915,12 +915,87 @@ fn case_30_toggling_the_order_keeps_key_and_selection() {
     );
 }
 
-/// Caso 31: el menú «Ordenar por» solo ofrece los metadatos presentes.
+/// Caso 31: el menú «Ordenar por» solo ofrece los criterios cuyo dato aporta al menos
+/// una entrada, sean metadatos o campos intrínsecos.
+///
+/// La spec (`03-vistas.md:50`) no distingue: «Los criterios disponibles dependen de los
+/// metadatos (fecha, tamaño, tipo, etiquetas; dimensiones para imágenes;
+/// duración/álbum para vídeo/música)» nombra *fecha* y *tamaño* en la misma lista que
+/// *dimensiones*. Ofrecer «Fecha de creación» en un volumen sin `btime` da un elemento
+/// de menú muerto: se pulsa y no pasa nada, que es la «operación silenciosa» que
+/// `00-filosofia.md` prohíbe.
 #[test]
 fn case_31_available_keys_depend_on_present_metadata() {
+    // Nothing but the name: every `Option`-derived key is absent, so the menu is
+    // trimmed to what `display` alone can order. This is the assert that used to
+    // encode the wrong contract (`INTRINSIC_KEYS.to_vec()`).
     let plain = vec![file("a.txt"), dir("carpeta")];
-    assert_eq!(available_keys(&plain), INTRINSIC_KEYS.to_vec());
-    assert_eq!(available_keys(&[]), INTRINSIC_KEYS.to_vec());
+    assert_eq!(
+        available_keys(&plain),
+        vec![SortKey::Name, SortKey::Extension, SortKey::Unsorted],
+        "sin ningun dato presente el menu se queda en lo que `display` puede ordenar"
+    );
+
+    // Empty listing: the deliberate exception. Nothing is present, but nothing is
+    // sortable either, so trimming costs the shape of the menu and buys nothing.
+    assert_eq!(
+        available_keys(&[]),
+        INTRINSIC_KEYS.to_vec(),
+        "una carpeta vacia ofrece el juego intrinseco completo"
+    );
+
+    // One dated entry among several is enough: sorting by date does something (the
+    // undated ones fall to the end under the availability rule of `compare_entries`).
+    let partial = vec![
+        file("sin-fecha.txt"),
+        timed("con-fecha.txt", 100),
+        file("otro.txt"),
+    ];
+    assert_eq!(
+        available_keys(&partial),
+        vec![
+            SortKey::Name,
+            SortKey::Extension,
+            SortKey::Modified,
+            SortKey::Unsorted
+        ],
+        "basta con que una entrada aporte el dato"
+    );
+
+    // `Kind` follows `type_label`, not `EntryKind`: a listing with labels but no
+    // timestamps offers «Tipo» y ninguna fecha.
+    let mut labelled = dir("carpeta");
+    labelled.type_label = Some("Carpeta".to_string());
+    assert_eq!(
+        available_keys(&[labelled]),
+        vec![
+            SortKey::Name,
+            SortKey::Extension,
+            SortKey::Kind,
+            SortKey::Unsorted
+        ],
+        "`Kind` sale de `type_label`, que es un `Option` como los demas"
+    );
+
+    // Each intrinsic field gates its own key, and the output keeps the declaration
+    // order of `SortKey` however sparse the listing is.
+    let mut found = file("hallado.txt");
+    found.created = Some(at(5));
+    found.accessed = Some(at(10));
+    found.location = Some(PathBuf::from("/home/u/docs"));
+    assert_eq!(
+        available_keys(&[sized("grande.bin", 4096), found]),
+        vec![
+            SortKey::Name,
+            SortKey::Extension,
+            SortKey::Size,
+            SortKey::Created,
+            SortKey::Accessed,
+            SortKey::Location,
+            SortKey::Unsorted
+        ],
+        "cada campo abre su propio criterio y el orden de salida no cambia"
+    );
 
     let mut jpeg = file("foto.jpg");
     jpeg.extra
@@ -933,22 +1008,29 @@ fn case_31_available_keys_depend_on_present_metadata() {
         MetadataValue::Unsigned(128),
     );
 
+    // Metadata obeys the same rule it always did, and the intrinsic keys are trimmed
+    // right alongside it: these three entries carry no `stat` data at all.
     let rich = vec![file("a.txt"), jpeg, song];
     let expected = vec![
         SortKey::Name,
         SortKey::Extension,
-        SortKey::Size,
-        SortKey::Modified,
-        SortKey::Created,
-        SortKey::Accessed,
-        SortKey::Kind,
-        SortKey::Location,
         SortKey::Metadata(MetadataKey::Dimensions),
         SortKey::Metadata(MetadataKey::Duration),
         SortKey::Metadata(MetadataKey::Custom(Cow::Borrowed("bpm"))),
         SortKey::Unsorted,
     ];
     assert_eq!(available_keys(&rich), expected);
+
+    // A full listing offers everything: the rule never *removes* a criterion whose
+    // data is there.
+    let mut complete = file("completo.pdf");
+    complete.size = Some(10);
+    complete.modified = Some(at(1));
+    complete.created = Some(at(2));
+    complete.accessed = Some(at(3));
+    complete.type_label = Some("Documento PDF".to_string());
+    complete.location = Some(PathBuf::from("/home/u"));
+    assert_eq!(available_keys(&[complete]), INTRINSIC_KEYS.to_vec());
 }
 
 /// Caso 32: la ordenación es composable por grupos («Agrupar por»).
@@ -1744,5 +1826,143 @@ fn dimensions_sort_by_area_then_width() {
             )
         ),
         vec!["mini", "cuadrada", "ancha", "sin-metadato"]
+    );
+}
+
+// -------------------------------------------------- specGaps (regresión) ---
+
+/// Caso 49: `column_for_sort_key` es el inverso exacto de `sort_key_for_column`.
+///
+/// Regresión del specGap 1. La vista Detalles necesita el mapeo inverso para pintar la
+/// flecha ▲/▼ de la columna activa (`03-vistas.md:68` y `:92`) sin recorrer las
+/// columnas visibles preguntando cuál casa, que sería lógica de ordenación en la capa
+/// de presentación. El round-trip tiene que ser total: cada id que devuelve vuelve a
+/// mapear a su propio criterio, y los dos criterios sin columna devuelven `None`.
+#[test]
+fn case_49_column_and_sort_key_round_trip() {
+    const COLUMNS: [&str; 15] = [
+        "name",
+        "extension",
+        "size",
+        "modified",
+        "created",
+        "accessed",
+        "kind",
+        "location",
+        "dimensions",
+        "duration",
+        "album",
+        "artist",
+        "tags",
+        "rating",
+        "meta/bpm",
+    ];
+
+    for id in COLUMNS {
+        let column = ColumnId(Cow::Borrowed(id));
+        let key = sort_key_for_column(&column).expect("columna normativa ordenable");
+        assert_eq!(
+            column_for_sort_key(&key),
+            Some(column.clone()),
+            "la columna {id:?} debe volver de su propio criterio"
+        );
+        // And back again: the id it yields is the id we started from, so a round-trip
+        // of any length is a fixed point.
+        let again = column_for_sort_key(&key).and_then(|c| sort_key_for_column(&c).ok());
+        assert_eq!(again, Some(key), "round-trip no idempotente para {id:?}");
+    }
+
+    // The two keys no column can represent.
+    assert_eq!(
+        column_for_sort_key(&SortKey::Unsorted),
+        None,
+        "«sin ordenar» es un estado, no una columna: no se resalta ninguna cabecera"
+    );
+    assert_eq!(
+        column_for_sort_key(&SortKey::Metadata(MetadataKey::Custom(Cow::Borrowed("")))),
+        None,
+        "un metadato de nombre vacio renderizaria el id `meta/`, que no es una columna"
+    );
+    // …and `meta/` is indeed rejected on the way in, which is what makes returning
+    // `None` above the only answer that keeps the round-trip total.
+    assert!(matches!(
+        sort_key_for_column(&ColumnId(Cow::Borrowed("meta/"))),
+        Err(SortError::UnknownColumn(_))
+    ));
+
+    // A user column whose name collides with an intrinsic one keeps its own identity
+    // in both directions.
+    let custom = ColumnId(Cow::Borrowed("meta/dimensions"));
+    let key = sort_key_for_column(&custom).expect("columna de usuario");
+    assert_eq!(
+        key,
+        SortKey::Metadata(MetadataKey::Custom(Cow::Borrowed("dimensions")))
+    );
+    assert_eq!(column_for_sort_key(&key), Some(custom));
+
+    // Non-sortable columns have no criterion at all, so there is nothing to invert.
+    for id in ["thumbnail", "preview", "icon"] {
+        assert!(matches!(
+            sort_key_for_column(&ColumnId(Cow::Borrowed(id))),
+            Err(SortError::UnsortableColumn(_))
+        ));
+    }
+}
+
+/// Caso 50: una carpeta con punto en el nombre no tiene extensión.
+///
+/// Regresión del specGap 6. `extract_value` aplicaba `extension_of` sin mirar
+/// `entry.kind`, así que `My.folder` se intercalaba entre los ficheros `.folder` al
+/// ordenar por extensión con las carpetas mezcladas. Una carpeta no es un fichero de
+/// tipo `folder`: recibe la cadena vacía, que es un *valor* y no un ausente, y agrupa
+/// con los ficheros sin extensión.
+#[test]
+fn case_50_directories_have_no_extension() {
+    let entries = vec![
+        file("archivo.folder"),
+        dir("My.folder"),
+        file("Makefile"),
+        dir("normal"),
+        file("zeta.folder"),
+    ];
+    assert_eq!(
+        sorted_names(
+            &entries,
+            &spec(
+                SortKey::Extension,
+                SortOrder::Ascending,
+                DirectoryGrouping::Mixed
+            )
+        ),
+        vec![
+            "Makefile",
+            "My.folder",
+            "normal",
+            "archivo.folder",
+            "zeta.folder"
+        ],
+        "la carpeta `My.folder` agrupa con lo que no tiene extension, no con los `.folder`"
+    );
+
+    // The empty string is a value, not an absent one: with the directories mixed in,
+    // they sort *before* the extensions ascending instead of falling to the end, and
+    // descending they lead — an absent value would stay last in both directions.
+    assert_eq!(
+        sorted_names(
+            &entries,
+            &spec(
+                SortKey::Extension,
+                SortOrder::Descending,
+                DirectoryGrouping::Mixed
+            )
+        ),
+        vec![
+            "zeta.folder",
+            "archivo.folder",
+            "normal",
+            "My.folder",
+            "Makefile"
+        ],
+        "la cadena vacia se invierte con el sentido; un ausente se quedaria al final"
     );
 }

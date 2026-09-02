@@ -381,23 +381,95 @@ pub fn insertion_index(sorted: &[FileEntry], entry: &FileEntry, spec: &SortSpec)
 
 /// Criterios ofrecibles para este listado.
 ///
-/// Devuelve todos los criterios intrínsecos más un [`SortKey::Metadata`] por cada
-/// clave que aporte al menos una entrada. Evita ofrecer «Dimensiones» en una carpeta
-/// sin imágenes.
+/// Devuelve un criterio por cada dato que **al menos una entrada del listado aporte**,
+/// más los que no dependen de ningún dato. Evita ofrecer «Dimensiones» en una carpeta
+/// sin imágenes y «Fecha de creación» en un volumen sin `btime`.
 ///
-/// El orden de salida es determinista y es exactamente el de declaración de
-/// [`SortKey`], con las variantes [`SortKey::Metadata`] expandidas en su posición y
-/// ordenadas entre sí por [`crate::entry::MetadataKey`]:
-/// `Name`, `Extension`, `Size`, `Modified`, `Created`, `Accessed`, `Kind`,
-/// `Location`, los metadatos presentes, y `Unsorted`.
+/// # La regla de presencia y su alcance
 ///
-/// Con un listado vacío devuelve solo los criterios intrínsecos.
+/// `03-vistas.md:50` dice que «los criterios disponibles dependen de los metadatos
+/// (fecha, tamaño, tipo, etiquetas; dimensiones para imágenes; duración/álbum para
+/// vídeo/música)». Esa frase nombra *fecha* y *tamaño* en la misma lista que
+/// *dimensiones*, así que la regla se aplica **igual a todos** los criterios derivados
+/// de un `Option` de [`FileEntry`] — [`SortKey::Size`], [`SortKey::Modified`],
+/// [`SortKey::Created`], [`SortKey::Accessed`], [`SortKey::Kind`] (que sale de
+/// `type_label`, no de [`EntryKind`]) y [`SortKey::Location`] — sin exceptuar el
+/// tamaño ni la fecha de modificación por «en la práctica siempre existen»:
+///
+/// - Exceptuarlos sería inventar una distinción que la spec no hace.
+/// - «En la práctica siempre existen» es falso justo donde importa: el tamaño de una
+///   carpeta se calcula en segundo plano (ver [`FileEntry::size`]), y `kara-core` no
+///   puede distinguir un dato *pendiente* de uno *inexistente*: ambos son `None`.
+/// - Ofrecer un criterio cuyo valor no tiene ninguna entrada es un elemento de menú
+///   muerto: se pulsa y no pasa nada, porque todas las entradas empatan en la etapa de
+///   valor y el listado se queda como estaba. Es la «operación silenciosa» que
+///   `00-filosofia.md` prohíbe.
+///
+/// Basta **una** entrada con el dato, no todas: ordenar por fecha con un solo fichero
+/// fechado entre quinientos sin fechar sí hace algo — el resto cae al final por la
+/// regla de disponibilidad de [`compare_entries`].
+///
+/// Siempre se ofrecen, porque no dependen de ningún `Option`:
+///
+/// - [`SortKey::Name`] y [`SortKey::Extension`], que se derivan de `display`.
+/// - [`SortKey::Unsorted`], que es un estado y no un dato.
+///
+/// # Listado vacío
+///
+/// Devuelve el juego intrínseco **completo**. Es una excepción deliberada: con cero
+/// entradas ningún criterio tiene dato, pero tampoco hay nada que ordenar, así que
+/// recortar el menú a «Nombre» solo cuesta —el menú cambia de forma sin que el usuario
+/// haya hecho nada— y no evita ningún no-op que no lo fuese ya. Además, fijar el orden
+/// de una carpeta vacía que se está a punto de llenar (una copia en curso, una carpeta
+/// recién creada) es legítimo: el estado se recuerda por carpeta.
+///
+/// # Orden de salida
+///
+/// Determinista y exactamente el de declaración de [`SortKey`], con las variantes
+/// [`SortKey::Metadata`] expandidas en su posición y ordenadas entre sí por
+/// [`crate::entry::MetadataKey`]: `Name`, `Extension`, `Size`, `Modified`, `Created`,
+/// `Accessed`, `Kind`, `Location`, los metadatos presentes, y `Unsorted`. Quitar un
+/// criterio no reordena los demás.
+///
+/// # Lo que esta función *no* decide
+///
+/// No conoce el criterio activo, así que no puede garantizar que el
+/// [`SortSpec`] restaurado de una vista persistida esté en la lista: un `created`
+/// guardado en un volumen con `btime` sigue ordenando si el volumen cambia, pero no se
+/// ofrecería en el menú. Que el criterio activo se muestre siempre —resaltado— es
+/// decisión de la capa que pinta el menú.
 #[must_use]
 pub fn available_keys(entries: &[FileEntry]) -> Vec<SortKey> {
+    if entries.is_empty() {
+        return vec![
+            SortKey::Name,
+            SortKey::Extension,
+            SortKey::Size,
+            SortKey::Modified,
+            SortKey::Created,
+            SortKey::Accessed,
+            SortKey::Kind,
+            SortKey::Location,
+            SortKey::Unsorted,
+        ];
+    }
+
+    let mut size = false;
+    let mut modified = false;
+    let mut created = false;
+    let mut accessed = false;
+    let mut kind = false;
+    let mut location = false;
     // Collect borrowed keys first: with many entries sharing few distinct metadata
     // keys, this clones at most once per *distinct* key instead of once per entry.
     let mut present: std::collections::BTreeSet<&MetadataKey> = std::collections::BTreeSet::new();
     for entry in entries {
+        size |= entry.size.is_some();
+        modified |= entry.modified.is_some();
+        created |= entry.created.is_some();
+        accessed |= entry.accessed.is_some();
+        kind |= entry.type_label.is_some();
+        location |= entry.location.is_some();
         for key in entry.extra.keys() {
             present.insert(key);
         }
@@ -406,12 +478,18 @@ pub fn available_keys(entries: &[FileEntry]) -> Vec<SortKey> {
     let mut keys = Vec::with_capacity(9 + present.len());
     keys.push(SortKey::Name);
     keys.push(SortKey::Extension);
-    keys.push(SortKey::Size);
-    keys.push(SortKey::Modified);
-    keys.push(SortKey::Created);
-    keys.push(SortKey::Accessed);
-    keys.push(SortKey::Kind);
-    keys.push(SortKey::Location);
+    for (available, key) in [
+        (size, SortKey::Size),
+        (modified, SortKey::Modified),
+        (created, SortKey::Created),
+        (accessed, SortKey::Accessed),
+        (kind, SortKey::Kind),
+        (location, SortKey::Location),
+    ] {
+        if available {
+            keys.push(key);
+        }
+    }
     for key in present {
         keys.push(SortKey::Metadata(key.clone()));
     }
