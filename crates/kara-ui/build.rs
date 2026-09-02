@@ -23,6 +23,10 @@ fn main() {
         ]),
     )
     .qt_module("Quick")
+    .include_dir("cpp")
+    // El portapapeles es de Qt y `cxx-qt-lib` no envuelve `QClipboard` ni
+    // `QMimeData`: este trozo de C++ es el mínimo puente para llegar a ellos.
+    .cpp_file("cpp/clipboard.cpp")
     .file("src/bridge.rs")
     .build();
 }

@@ -108,6 +108,18 @@ Window {
     }
 
     Shortcut {
+        sequence: "Ctrl+C"
+        onActivated: app.copy_selection()
+    }
+    Shortcut {
+        sequence: "Ctrl+X"
+        onActivated: app.cut_selection()
+    }
+    Shortcut {
+        sequence: "Ctrl+V"
+        onActivated: app.paste()
+    }
+    Shortcut {
         sequence: "Ctrl+Z"
         onActivated: app.undo()
     }

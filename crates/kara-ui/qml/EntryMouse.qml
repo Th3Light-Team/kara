@@ -58,6 +58,19 @@ MouseArea {
             entryMenu.pinned = control.app.is_pinned(entryMenu.folder);
         }
         MenuItem {
+            text: qsTr("Cortar")
+            onTriggered: control.app.cut_selection()
+        }
+        MenuItem {
+            text: qsTr("Copiar")
+            onTriggered: control.app.copy_selection()
+        }
+        MenuItem {
+            text: qsTr("Pegar")
+            onTriggered: control.app.paste()
+        }
+        MenuSeparator {}
+        MenuItem {
             text: qsTr("Renombrar")
             // Renombrar es de una en una: con varias seleccionadas hace falta
             // el renombrado por lotes, que es otra conveniencia.

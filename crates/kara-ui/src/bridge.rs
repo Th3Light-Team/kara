@@ -39,6 +39,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::bridge::qobject::{
+    clipboard_clear, clipboard_gnome, clipboard_kde_cut, clipboard_uri_list, clipboard_write,
+};
 use crate::prefs::Prefs;
 use crate::present;
 
@@ -150,6 +153,19 @@ pub mod qobject {
         /// Sube a la carpeta padre. En la raiz no hace nada.
         #[qinvokable]
         fn up(self: Pin<&mut App>);
+
+        /// Copia la selección al portapapeles del escritorio.
+        #[qinvokable]
+        fn copy_selection(self: Pin<&mut App>);
+
+        /// Corta la selección: no mueve nada hasta que se pega.
+        #[qinvokable]
+        fn cut_selection(self: Pin<&mut App>);
+
+        /// Pega en la carpeta actual lo que haya en el portapapeles, venga de
+        /// Kara o de cualquier otro gestor del escritorio.
+        #[qinvokable]
+        fn paste(self: Pin<&mut App>);
 
         /// Envía a la papelera **todo lo seleccionado**.
         ///
@@ -322,6 +338,21 @@ pub mod qobject {
         include!("cxx-qt-lib/qstring.h");
         include!("cxx-qt-lib/qstringlist.h");
         include!("cxx-qt-lib/qlist.h");
+        // El portapapeles del escritorio. `cxx-qt-lib` no envuelve
+        // `QClipboard` ni `QMimeData`, así que se llega por un trozo de C++
+        // que no decide nada: mueve cadenas opacas y ya.
+        include!("clipboard.h");
+        #[namespace = "kara"]
+        fn clipboard_write(uri_list: &str, gnome: &str, cut: bool);
+        #[namespace = "kara"]
+        fn clipboard_clear();
+        #[namespace = "kara"]
+        fn clipboard_uri_list() -> String;
+        #[namespace = "kara"]
+        fn clipboard_gnome() -> String;
+        #[namespace = "kara"]
+        fn clipboard_kde_cut() -> bool;
+
         type QString = cxx_qt_lib::QString;
         type QStringList = cxx_qt_lib::QStringList;
         type QList_i32 = cxx_qt_lib::QList<i32>;
@@ -1480,6 +1511,135 @@ impl qobject::App {
                 QString::default()
             }
         }
+    }
+
+    /// Las rutas seleccionadas, en el orden en que se ven.
+    fn selected_paths(&self) -> Vec<PathBuf> {
+        let current = PathBuf::from(self.path().to_string());
+        let state = self.rust();
+        state
+            .selection
+            .selected()
+            .iter()
+            .filter_map(|index| state.visible.get(*index))
+            .map(|entry| current.join(&entry.name))
+            .collect()
+    }
+
+    fn put_on_clipboard(mut self: Pin<&mut Self>, action: kara_fs::clipboard::ClipboardAction) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            return;
+        }
+
+        let state = match action {
+            kara_fs::clipboard::ClipboardAction::Cut => {
+                kara_fs::clipboard::ClipboardState::cut(paths)
+            }
+            kara_fs::clipboard::ClipboardAction::Copy => {
+                kara_fs::clipboard::ClipboardState::copy(paths)
+            }
+        };
+        let payload = state.to_formats();
+        clipboard_write(
+            &payload.uri_list,
+            &payload.gnome_copied_files,
+            state.is_cut(),
+        );
+        self.as_mut().clear_error();
+    }
+
+    fn copy_selection(mut self: Pin<&mut Self>) {
+        self.as_mut()
+            .put_on_clipboard(kara_fs::clipboard::ClipboardAction::Copy);
+    }
+
+    fn cut_selection(mut self: Pin<&mut Self>) {
+        self.as_mut()
+            .put_on_clipboard(kara_fs::clipboard::ClipboardAction::Cut);
+    }
+
+    fn paste(mut self: Pin<&mut Self>) {
+        let uri_list = clipboard_uri_list();
+        let gnome = clipboard_gnome();
+        let cut_marker = clipboard_kde_cut();
+        let kde = if cut_marker { "1" } else { "0" };
+
+        let formats = kara_fs::clipboard::ClipboardFormats {
+            uri_list: (!uri_list.is_empty()).then_some(uri_list.as_bytes()),
+            gnome_copied_files: (!gnome.is_empty()).then_some(gnome.as_bytes()),
+            kde_cut_selection: Some(kde.as_bytes()),
+        };
+        let Some(state) = kara_fs::clipboard::parse(formats) else {
+            return;
+        };
+
+        let destination = PathBuf::from(self.path().to_string());
+        let mut failures = Vec::new();
+        let mut done: Vec<Action> = Vec::new();
+
+        for source in &state.paths {
+            // `paste_target` decide si esto se pega: devuelve `None` para un
+            // corte en su propia carpeta, que no es un error sino un gesto sin
+            // efecto. El nombre que calcula no se usa —`copy_to` y `move_to`
+            // resuelven el suyo con la política— pero se le da un `exists` de
+            // verdad para que la decisión sea la que el dominio tomaría.
+            let target = state.paste_target(source, &destination, |name| {
+                destination.join(name).exists()
+            });
+            if target.is_none() {
+                continue;
+            }
+
+            // `KeepBoth`: sin diálogo de conflictos todavía, conservar los dos
+            // es la única opción que no puede destruir nada. Cuando el diálogo
+            // exista, aquí se preguntará.
+            let outcome = if state.is_cut() {
+                kara_fs::move_to(source, &destination, ConflictPolicy::KeepBoth).map(|moved| {
+                    Action::Moved {
+                        from: moved.source,
+                        to: moved.destination,
+                    }
+                })
+            } else {
+                kara_fs::copy_to(source, &destination, ConflictPolicy::KeepBoth).map(|copied| {
+                    Action::Copied {
+                        created: copied.destination,
+                    }
+                })
+            };
+
+            match outcome {
+                Ok(action) => done.push(action),
+                Err(error) => failures.push(format!("{}: {error}", source.display())),
+            }
+        }
+
+        for action in done {
+            self.as_mut().rust_mut().get_mut().undo.push(action);
+        }
+
+        if failures.is_empty() {
+            self.as_mut().clear_error();
+        } else {
+            let resumen = format!(
+                "No se pudieron pegar {} de {}: {}",
+                failures.len(),
+                state.paths.len(),
+                failures.join("; ")
+            );
+            self.as_mut().report(&resumen);
+        }
+
+        // Un corte es de un solo uso: una vez movido no queda nada en el
+        // origen que volver a mover.
+        if state.after_paste().is_none() {
+            clipboard_clear();
+        }
+
+        self.as_mut().rust_mut().get_mut().tree.forget(&destination);
+        self.as_mut().publish_undo();
+        self.as_mut().render(&destination);
     }
 
     fn focused_name(self: Pin<&mut Self>) -> QString {
