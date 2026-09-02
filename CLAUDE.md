@@ -91,9 +91,9 @@ Sin el `-I` falla con "Failed to import com.kara.ui", que es un falso positivo.
 
 ## Concurrencia: el lock del árbol
 
-Más de un proceso autónomo puede escribir aquí: la tarea programada
-`kara-backend-mvp`, los workflows `kara-tdd` lanzados a mano y una sesión
-interactiva. Dos a la vez producen commits entrelazados y builds corruptos —
+Más de un proceso puede escribir aquí: los workflows `kara-tdd`, que lanzan
+agentes que editan ficheros y hacen commits, y la sesión interactiva desde la que
+los lanzas. Dos a la vez producen commits entrelazados y builds corruptos —
 ocurrió el 2026-09-02. **Antes de escribir en el árbol, toma el lock:**
 
 ```bash
@@ -105,8 +105,8 @@ ocurrió el 2026-09-02. **Antes de escribir en el árbol, toma el lock:**
 Caduca **solo por latido** (60 min por defecto), nunca por liveness del PID: cada
 llamada bash abre una shell que muere al terminar, así que el PID registrado
 siempre está muerto en la llamada siguiente y usarlo dejaba que cualquiera
-robase el lock al instante. El TTL es menor que el periodo de la tarea
-programada, así que un proceso muerto cuesta como mucho un ciclo.
+robase el lock al instante. La contrapartida es que un proceso que muera sin
+liberar bloquea el árbol hasta que caduque el TTL.
 
 ## Reglas del proyecto
 
