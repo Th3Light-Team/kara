@@ -79,6 +79,10 @@ pub mod qobject {
         /// exponer a QML, y una propiedad por columna obligaría a conocerlas de
         /// antemano, que es justo lo que «configurables» impide.
         #[qproperty(QStringList, entry_values)]
+        /// Si lo que se enseña es la papelera y no una carpeta. Cambia lo que
+        /// significan las acciones: ahí no se borra, se restaura o se elimina
+        /// para siempre.
+        #[qproperty(bool, in_trash)]
         #[qproperty(QString, sort_column)]
         #[qproperty(bool, sort_ascending)]
         /// Qué entradas están seleccionadas, en 1 y 0.
@@ -166,6 +170,19 @@ pub mod qobject {
         /// Kara o de cualquier otro gestor del escritorio.
         #[qinvokable]
         fn paste(self: Pin<&mut App>);
+
+        /// Enseña la papelera del escritorio.
+        #[qinvokable]
+        fn show_trash(self: Pin<&mut App>);
+
+        /// Devuelve a su sitio lo seleccionado en la papelera.
+        #[qinvokable]
+        fn restore_selected(self: Pin<&mut App>);
+
+        /// Vacía la papelera entera. **Irreversible**: quien llame ha tenido
+        /// que confirmar antes.
+        #[qinvokable]
+        fn empty_trash(self: Pin<&mut App>);
 
         /// Envía a la papelera **todo lo seleccionado**.
         ///
@@ -371,6 +388,7 @@ pub struct AppRust {
     entry_dates: QStringList,
     entry_selected: cxx_qt_lib::QList<i32>,
     entry_values: QStringList,
+    in_trash: bool,
     column_ids: QStringList,
     column_labels: QStringList,
     column_widths: cxx_qt_lib::QList<i32>,
@@ -426,6 +444,9 @@ pub struct AppRust {
     prefs: Prefs,
     /// Qué está seleccionado y qué tiene el cursor.
     selection: Selection,
+    /// Las entradas de la papelera del último listado, en el orden en que
+    /// llegaron. Las filas guardan su posición aquí en la bolsa de metadatos.
+    trash: Vec<kara_fs::trash::TrashEntry>,
     /// Las entradas que se están enseñando, en su orden. Se guardan para poder
     /// traducir la selección **por nombre** cuando la lista se rehace: al
     /// reordenar o filtrar los índices cambian, y una selección por índice
@@ -482,6 +503,7 @@ impl Default for AppRust {
             entry_dates: QStringList::default(),
             entry_selected: cxx_qt_lib::QList::<i32>::default(),
             entry_values: QStringList::default(),
+            in_trash: false,
             column_ids: QStringList::default(),
             column_labels: QStringList::default(),
             column_widths: cxx_qt_lib::QList::<i32>::default(),
@@ -534,6 +556,7 @@ impl Default for AppRust {
             // tema sale el fichero, no la nitidez.
             icons: Icons::load(ICON_SIZE),
             descriptions: MimeDescriptions::new(TYPE_LANGUAGES.iter().map(|l| (*l).to_string()).collect()),
+            trash: Vec::new(),
             selection: Selection::new(),
             visible: Vec::new(),
             visible_path: None,
@@ -690,8 +713,20 @@ impl AppRust {
     /// `None` si la carpeta no se puede leer, y entonces quien llame **no
     /// cambia nada**: enseñar una vista vacía haría creer que la carpeta lo está.
     fn snapshot(&mut self, target: &Path) -> Option<Snapshot> {
-        let listing = list_directory(target).ok()?;
-        let mut entries = listing.entries;
+        // La papelera se lee de otro sitio, pero produce las mismas filas: así
+        // ordenar, filtrar, seleccionar y pintar siguen siendo el mismo código.
+        let mut entries = if self.in_trash {
+            let listing = kara_fs::trash::list_trash();
+            self.trash = listing.entries;
+            self.trash
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| present::trash_row(entry, index))
+                .collect()
+        } else {
+            self.trash.clear();
+            list_directory(target).ok()?.entries
+        };
 
         Visibility::default().retain_visible(&mut entries);
         let total = entries.len();
@@ -792,11 +827,21 @@ impl AppRust {
             })
             .collect();
 
-        let segments = breadcrumb::segments(target, self.home.as_deref());
+        // La papelera no es una ruta y no tiene ancestros: una sola miga que
+        // dice dónde está el usuario, sin fingir una jerarquía.
+        let segments = if self.in_trash {
+            Vec::new()
+        } else {
+            breadcrumb::segments(target, self.home.as_deref())
+        };
         let split = breadcrumb::collapse(&segments, self.crumb_capacity);
 
         Some(Snapshot {
-            path: QString::from(&target.to_string_lossy().into_owned()),
+            path: QString::from(&if self.in_trash {
+                "Papelera".to_string()
+            } else {
+                target.to_string_lossy().into_owned()
+            }),
             names,
             sizes,
             kinds,
@@ -1642,6 +1687,93 @@ impl qobject::App {
         self.as_mut().render(&destination);
     }
 
+    /// Las entradas de papelera que el usuario tiene señaladas.
+    fn selected_trash(&self) -> Vec<kara_fs::trash::TrashEntry> {
+        let state = self.rust();
+        state
+            .selection
+            .selected()
+            .iter()
+            .filter_map(|row| state.visible.get(*row))
+            .filter_map(present::trash_index_of)
+            .filter_map(|index| state.trash.get(index).cloned())
+            .collect()
+    }
+
+    fn show_trash(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().get_mut().in_trash = true;
+        // La ruta deja de nombrar una carpeta: la barra de direcciones enseña
+        // «Papelera» y el `in_trash` es lo que la vista mira, no el texto.
+        let placeholder = PathBuf::from("/");
+        self.as_mut().render(&placeholder);
+    }
+
+    /// Vuelve a una carpeta de verdad.
+    fn leave_trash(mut self: Pin<&mut Self>) {
+        if *self.in_trash() {
+            self.as_mut().rust_mut().get_mut().in_trash = false;
+        }
+    }
+
+    fn restore_selected(mut self: Pin<&mut Self>) {
+        let entries = self.selected_trash();
+        if entries.is_empty() {
+            return;
+        }
+
+        let mut failures = Vec::new();
+        let mut restored = 0_usize;
+        for entry in &entries {
+            let kara_fs::trash::TrashEntry::Item(item) = entry else {
+                // Un registro cuyo fichero ya no está no se puede devolver a
+                // ningún sitio; se puede borrar, que es otra acción.
+                failures.push(format!(
+                    "{}: ya no queda nada que restaurar",
+                    entry.display_path().display()
+                ));
+                continue;
+            };
+
+            match kara_fs::trash::restore_item(item, ConflictPolicy::KeepBoth) {
+                Ok(_) => restored += 1,
+                Err(error) => failures.push(format!("{}: {error}", item.original_path.display())),
+            }
+        }
+
+        if failures.is_empty() {
+            self.as_mut().clear_error();
+        } else {
+            let resumen = format!(
+                "No se pudieron restaurar {} de {}: {}",
+                failures.len(),
+                entries.len(),
+                failures.join("; ")
+            );
+            self.as_mut().report(&resumen);
+        }
+
+        let _ = restored;
+        self.as_mut().reload();
+    }
+
+    fn empty_trash(mut self: Pin<&mut Self>) {
+        let outcome = kara_fs::trash::empty_trash(&mut kara_fs::trash::NullObserver);
+
+        if outcome.failed.is_empty() {
+            self.as_mut().clear_error();
+        } else {
+            let resumen = format!(
+                "No se pudieron eliminar {} elementos de la papelera",
+                outcome.failed.len()
+            );
+            self.as_mut().report(&resumen);
+        }
+
+        // Vaciar es irreversible por definición: nada entra en la pila de
+        // deshacer, y quien llame ha tenido que confirmarlo antes.
+        self.as_mut().reload();
+    }
+
     fn focused_name(self: Pin<&mut Self>) -> QString {
         let state = self.rust();
         let name = state
@@ -1913,6 +2045,7 @@ impl qobject::App {
 
     /// Navega dejando huella en el historial.
     fn navigate_to(mut self: Pin<&mut Self>, target: &Path) -> bool {
+        self.as_mut().leave_trash();
         if !self.as_mut().render(target) {
             return false;
         }

@@ -21,9 +21,53 @@ Rectangle {
 
     color: Theme.sidebar
 
+    // La papelera no es una carpeta del árbol: no tiene ruta ni ancestros, así
+    // que va en una fila propia al pie del panel en vez de fingir que cuelga
+    // de algún sitio.
+    Item {
+        id: trashRow
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 6
+        height: 30
+
+        Rectangle {
+            anchors.fill: parent
+            anchors.leftMargin: 6
+            anchors.rightMargin: 6
+            radius: Theme.radius
+            color: {
+                if (panel.app.in_trash)
+                    return Theme.selection;
+                return trashArea.containsMouse ? Theme.hover : "transparent";
+            }
+        }
+
+        Text {
+            anchors.left: parent.left
+            anchors.leftMargin: 34
+            anchors.verticalCenter: parent.verticalCenter
+            text: qsTr("Papelera")
+            color: Theme.text
+            font.family: Theme.family
+            font.pixelSize: Theme.sizeBase
+        }
+
+        MouseArea {
+            id: trashArea
+            anchors.fill: parent
+            hoverEnabled: true
+            onClicked: panel.app.show_trash()
+        }
+    }
+
     ListView {
         id: rows
-        anchors.fill: parent
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: trashRow.top
         anchors.topMargin: 6
         anchors.bottomMargin: 6
         clip: true

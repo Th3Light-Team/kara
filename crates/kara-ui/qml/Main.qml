@@ -299,6 +299,15 @@ Window {
                     }
                 }
 
+                // Solo dentro de la papelera: vaciarla no es una acción que
+                // deba estar a mano desde cualquier carpeta.
+                NavButton {
+                    glyph: "🗑"
+                    tip: qsTr("Vaciar la papelera")
+                    visible: app.in_trash
+                    onClicked: emptyTrashDialog.open()
+                }
+
                 AddressBar {
                     id: address
                     app: app
@@ -551,6 +560,31 @@ Window {
                 // recortada por el filtro parece una carpeta pequeña.
                 text: app.entry_count === app.total_count ? qsTr("%1 elementos").arg(app.total_count) : qsTr("%1 de %2 elementos").arg(app.entry_count).arg(app.total_count)
             }
+        }
+    }
+
+    // Vaciar la papelera es irreversible, así que se confirma, y el foco
+    // arranca en el botón que no destruye nada. Es una regla del proyecto, no
+    // una cortesía.
+    Dialog {
+        id: emptyTrashDialog
+        anchors.centerIn: parent
+        modal: true
+        title: qsTr("Vaciar la papelera")
+        standardButtons: Dialog.Cancel | Dialog.Yes
+
+        onOpened: {
+            const cancelar = emptyTrashDialog.standardButton(Dialog.Cancel);
+            if (cancelar)
+                cancelar.forceActiveFocus();
+        }
+        onAccepted: app.empty_trash()
+
+        Text {
+            text: qsTr("Se eliminarán definitivamente todos los elementos.\nEsto no se puede deshacer.")
+            color: Theme.text
+            font.family: Theme.family
+            font.pixelSize: Theme.sizeBase
         }
     }
 

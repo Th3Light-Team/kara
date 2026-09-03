@@ -58,20 +58,33 @@ MouseArea {
             entryMenu.pinned = control.app.is_pinned(entryMenu.folder);
         }
         MenuItem {
+            text: qsTr("Restaurar")
+            visible: control.app.in_trash
+            height: visible ? implicitHeight : 0
+            onTriggered: control.app.restore_selected()
+        }
+        MenuItem {
             text: qsTr("Cortar")
+            visible: !control.app.in_trash
+            height: visible ? implicitHeight : 0
             onTriggered: control.app.cut_selection()
         }
         MenuItem {
             text: qsTr("Copiar")
+            visible: !control.app.in_trash
+            height: visible ? implicitHeight : 0
             onTriggered: control.app.copy_selection()
         }
         MenuItem {
             text: qsTr("Pegar")
+            visible: !control.app.in_trash
+            height: visible ? implicitHeight : 0
             onTriggered: control.app.paste()
         }
         MenuSeparator {}
         MenuItem {
             text: qsTr("Renombrar")
+            visible: !control.app.in_trash
             // Renombrar es de una en una: con varias seleccionadas hace falta
             // el renombrado por lotes, que es otra conveniencia.
             enabled: control.app.selected_count <= 1
@@ -79,6 +92,8 @@ MouseArea {
         }
         MenuItem {
             text: control.app.selected_count > 1 ? qsTr("Enviar %1 elementos a la papelera").arg(control.app.selected_count) : qsTr("Enviar a la papelera")
+            visible: !control.app.in_trash
+            height: visible ? implicitHeight : 0
             onTriggered: control.app.trash_selected()
         }
         MenuSeparator {}

@@ -128,7 +128,11 @@ pub trait TrashObserver {
 
 /// An observer that answers every callback with its default: used whenever a
 /// caller does not need progress or error handling of its own.
-pub(crate) struct NullObserver;
+///
+/// Public because emptying the trash needs one and the window has nowhere to
+/// show progress yet; when the operations queue drives it, that queue becomes
+/// the observer instead.
+pub struct NullObserver;
 
 impl TrashObserver for NullObserver {}
 

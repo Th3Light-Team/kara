@@ -123,6 +123,67 @@ pub fn modified_label(modified: Option<std::time::SystemTime>) -> String {
     local.format("%d/%m/%Y %H:%M").to_string()
 }
 
+/// Clave con la que una entrada de la papelera lleva su sitio en el listado.
+///
+/// La vista ordena y filtra `FileEntry`, no entradas de papelera, así que hace
+/// falta poder volver de la fila que el usuario señaló a la entrada real. La
+/// bolsa de metadatos existe justo para que una capa cuelgue de la entrada algo
+/// que el dominio no conoce.
+pub const TRASH_INDEX: &str = "kara/trash-index";
+
+/// Construye la fila que representa a una entrada de la papelera.
+///
+/// `index` es su posición en el listado que la produjo, y viaja en la bolsa de
+/// metadatos porque ordenar reordena las filas y el índice de pantalla deja de
+/// coincidir con el del listado.
+#[must_use]
+pub fn trash_row(entry: &kara_fs::trash::TrashEntry, index: usize) -> FileEntry {
+    use kara_core::entry::{MetadataKey, MetadataValue};
+
+    let original = entry.display_path().to_path_buf();
+    let name = original
+        .file_name()
+        .map_or_else(|| std::ffi::OsString::from("?"), |name| name.to_os_string());
+
+    let mut row = FileEntry {
+        display: name.to_string_lossy().into_owned(),
+        name,
+        // Restaurar una carpeta y restaurar un fichero es lo mismo, y mirar el
+        // disco por cada entrada solo para el icono no compensa aquí.
+        kind: EntryKind::File,
+        is_symlink: false,
+        symlink_broken: false,
+        is_hidden: false,
+        size: None,
+        modified: None,
+        created: None,
+        accessed: None,
+        type_label: None,
+        // La carpeta de la que salió, que es lo que hace útil la papelera:
+        // sin ella no se sabe qué se está restaurando.
+        location: original.parent().map(std::path::Path::to_path_buf),
+        extra: kara_core::entry::MetadataBag::new(),
+    };
+    row.extra.insert(
+        MetadataKey::Custom(std::borrow::Cow::Borrowed(TRASH_INDEX)),
+        MetadataValue::Unsigned(index as u64),
+    );
+    row
+}
+
+/// Recupera de una fila la entrada de papelera de la que salió.
+#[must_use]
+pub fn trash_index_of(entry: &FileEntry) -> Option<usize> {
+    use kara_core::entry::{MetadataKey, MetadataValue};
+
+    match entry.extra.get(&MetadataKey::Custom(std::borrow::Cow::Borrowed(
+        TRASH_INDEX,
+    ))) {
+        Some(MetadataValue::Unsigned(index)) => usize::try_from(*index).ok(),
+        _ => None,
+    }
+}
+
 /// Cómo se lee la cabecera de una columna.
 ///
 /// Un identificador que esta versión no conoce —una columna de metadatos que
