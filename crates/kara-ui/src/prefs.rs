@@ -139,6 +139,19 @@ impl Prefs {
             .set(WINDOW, "sidebar_visible", visible.to_string());
     }
 
+    /// Whether the window opens in focus mode, with the tab bar hidden.
+    ///
+    /// Default is on: a window that has never had a second tab should look
+    /// exactly like one that cannot have them.
+    #[must_use]
+    pub fn focus_mode(&self) -> bool {
+        self.flag(WINDOW, "focus_mode").unwrap_or(true)
+    }
+
+    pub fn set_focus_mode(&mut self, on: bool) {
+        self.settings.set(WINDOW, "focus_mode", on.to_string());
+    }
+
     /// The view every folder that has not been configured is shown with.
     #[must_use]
     pub fn default_view(&self) -> ViewSettings {

@@ -184,6 +184,22 @@ pub fn trash_index_of(entry: &FileEntry) -> Option<usize> {
     }
 }
 
+/// Cómo se rotula una pestaña.
+///
+/// El nombre de la carpeta, no la ruta: en una barra de pestañas no cabe, y lo
+/// que distingue una pestaña de otra casi siempre es el último tramo. La raíz
+/// no tiene nombre, así que se la llama por lo que es.
+#[must_use]
+pub fn tab_title(path: &Path, in_trash: bool) -> String {
+    if in_trash {
+        return "Papelera".to_string();
+    }
+    match path.file_name() {
+        Some(name) => name.to_string_lossy().into_owned(),
+        None => "Sistema de archivos".to_string(),
+    }
+}
+
 /// Cómo se lee la cabecera de una columna.
 ///
 /// Un identificador que esta versión no conoce —una columna de metadatos que

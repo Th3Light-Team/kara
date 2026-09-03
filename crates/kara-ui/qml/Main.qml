@@ -108,6 +108,97 @@ Window {
     }
 
     Shortcut {
+        sequence: "Ctrl+1"
+        onActivated: {
+            app.use_focus_mode(false);
+            app.activate_tab(0);
+        }
+    }
+    Shortcut {
+        sequence: "Ctrl+2"
+        onActivated: {
+            app.use_focus_mode(false);
+            app.activate_tab(1);
+        }
+    }
+    Shortcut {
+        sequence: "Ctrl+3"
+        onActivated: {
+            app.use_focus_mode(false);
+            app.activate_tab(2);
+        }
+    }
+    Shortcut {
+        sequence: "Ctrl+4"
+        onActivated: {
+            app.use_focus_mode(false);
+            app.activate_tab(3);
+        }
+    }
+    Shortcut {
+        sequence: "Ctrl+5"
+        onActivated: {
+            app.use_focus_mode(false);
+            app.activate_tab(4);
+        }
+    }
+    Shortcut {
+        sequence: "Ctrl+6"
+        onActivated: {
+            app.use_focus_mode(false);
+            app.activate_tab(5);
+        }
+    }
+    Shortcut {
+        sequence: "Ctrl+7"
+        onActivated: {
+            app.use_focus_mode(false);
+            app.activate_tab(6);
+        }
+    }
+    Shortcut {
+        sequence: "Ctrl+8"
+        onActivated: {
+            app.use_focus_mode(false);
+            app.activate_tab(7);
+        }
+    }
+    Shortcut {
+        // El 9 va a la última, esté donde esté, como en los navegadores.
+        sequence: "Ctrl+9"
+        onActivated: {
+            app.use_focus_mode(false);
+            app.activate_tab(app.tab_count - 1);
+        }
+    }
+    Shortcut {
+        sequence: "Ctrl+T"
+        onActivated: {
+            // Abrir una pestaña en modo concentración la dejaría escondida.
+            app.use_focus_mode(false);
+            app.open_tab(app.path, false);
+        }
+    }
+    Shortcut {
+        sequence: "Ctrl+W"
+        onActivated: app.close_tab(app.active_tab)
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+T"
+        onActivated: {
+            app.use_focus_mode(false);
+            app.reopen_tab();
+        }
+    }
+    Shortcut {
+        sequences: ["Ctrl+Tab", "Ctrl+PgDown"]
+        onActivated: app.next_tab()
+    }
+    Shortcut {
+        sequences: ["Ctrl+Shift+Tab", "Ctrl+PgUp"]
+        onActivated: app.previous_tab()
+    }
+    Shortcut {
         sequence: "Ctrl+C"
         onActivated: app.copy_selection()
     }
@@ -206,6 +297,12 @@ Window {
                     onClicked: win.close()
                 }
             }
+        }
+
+        TabStrip {
+            app: app
+            Layout.fillWidth: true
+            Layout.preferredHeight: height
         }
 
         // ---- Barra de comandos ---------------------------------------------
@@ -547,6 +644,29 @@ Window {
                 width: parent.width
                 height: 1
                 color: Theme.divider
+            }
+
+            // Los dos modos de navegación, al pie a la derecha: concentración
+            // —una sola pestaña, la ventana como si no las tuviera— o barra de
+            // pestañas.
+            Row {
+                anchors.right: parent.right
+                anchors.rightMargin: 10
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 2
+
+                TabModeButton {
+                    focused: true
+                    active: app.focus_mode
+                    tip: qsTr("Concentración: una sola pestaña")
+                    onClicked: app.use_focus_mode(true)
+                }
+                TabModeButton {
+                    focused: false
+                    active: !app.focus_mode
+                    tip: qsTr("Pestañas (%1 abiertas)").arg(app.tab_count)
+                    onClicked: app.use_focus_mode(false)
+                }
             }
 
             Text {

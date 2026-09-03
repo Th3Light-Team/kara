@@ -21,7 +21,7 @@ use cxx_qt_lib::{QString, QStringList};
 use kara_core::breadcrumb;
 use kara_core::entry::EntryKind;
 use kara_core::filter::{NameFilter, Visibility};
-use kara_core::history::History;
+use kara_core::tabs::{CloseOutcome, OpenMode, TabId, Tabs};
 use kara_core::columns::{ColumnLayout, ColumnMemory};
 use kara_core::selection::Selection;
 use kara_core::sort::{ColumnId, SortOverrides, SortSpec, column_for_sort_key};
@@ -83,6 +83,16 @@ pub mod qobject {
         /// significan las acciones: ahí no se borra, se restaura o se elimina
         /// para siempre.
         #[qproperty(bool, in_trash)]
+        /// Las pestañas abiertas, sus rótulos y cuál está activa.
+        #[qproperty(QStringList, tab_titles)]
+        #[qproperty(i32, tab_count)]
+        #[qproperty(i32, active_tab)]
+        /// Si hay algo que reabrir, para no ofrecer un gesto que no hace nada.
+        #[qproperty(bool, can_reopen_tab)]
+        /// Modo concentración: una sola pestaña a la vista y la barra
+        /// escondida, con la ventana tal y como era antes de haber pestañas.
+        /// Las demás **no se cierran**: siguen ahí, solo dejan de verse.
+        #[qproperty(bool, focus_mode)]
         #[qproperty(QString, sort_column)]
         #[qproperty(bool, sort_ascending)]
         /// Qué entradas están seleccionadas, en 1 y 0.
@@ -170,6 +180,42 @@ pub mod qobject {
         /// Kara o de cualquier otro gestor del escritorio.
         #[qinvokable]
         fn paste(self: Pin<&mut App>);
+
+        /// Abre una carpeta en una pestaña nueva. En segundo plano no mueve el
+        /// foco, que es lo que hace el clic central.
+        #[qinvokable]
+        fn open_tab(self: Pin<&mut App>, path: &QString, background: bool);
+
+        /// Abre en una pestaña nueva la carpeta que hay bajo el cursor.
+        #[qinvokable]
+        fn open_focused_in_tab(self: Pin<&mut App>, background: bool);
+
+        #[qinvokable]
+        fn close_tab(self: Pin<&mut App>, index: i32);
+
+        #[qinvokable]
+        fn activate_tab(self: Pin<&mut App>, index: i32);
+
+        #[qinvokable]
+        fn duplicate_tab(self: Pin<&mut App>, index: i32);
+
+        /// Reabre la última pestaña cerrada, con su historial.
+        #[qinvokable]
+        fn reopen_tab(self: Pin<&mut App>);
+
+        #[qinvokable]
+        fn next_tab(self: Pin<&mut App>);
+
+        #[qinvokable]
+        fn previous_tab(self: Pin<&mut App>);
+
+        /// Reordena la barra arrastrando. El foco sigue a la pestaña movida.
+        #[qinvokable]
+        fn drag_tab(self: Pin<&mut App>, from: i32, to: i32);
+
+        /// Entra o sale del modo concentración.
+        #[qinvokable]
+        fn use_focus_mode(self: Pin<&mut App>, on: bool);
 
         /// Enseña la papelera del escritorio.
         #[qinvokable]
@@ -376,6 +422,31 @@ pub mod qobject {
     }
 }
 
+/// Lo que cada pestaña tiene para ella sola.
+///
+/// El historial no está aquí: lo lleva `kara_core::tabs::Tab`, que ya lo posee.
+/// Esto es lo demás que no puede compartirse: dos pestañas en la misma carpeta
+/// pueden tener selecciones y filtros distintos, y una puede estar en la
+/// papelera mientras la otra no.
+#[derive(Default)]
+struct TabView {
+    selection: Selection,
+    /// Las entradas que se están enseñando, en su orden. Se guardan para poder
+    /// traducir la selección **por nombre** cuando la lista se rehace: al
+    /// reordenar o filtrar los índices cambian, y una selección por índice
+    /// señalaría a otros ficheros.
+    visible: Vec<kara_core::FileEntry>,
+    /// De qué carpeta son `visible` y la selección.
+    visible_path: Option<PathBuf>,
+    /// Si esta pestaña está enseñando la papelera.
+    in_trash: bool,
+    /// Las entradas de la papelera del último listado, en el orden en que
+    /// llegaron. Las filas guardan su posición aquí en la bolsa de metadatos.
+    trash: Vec<kara_fs::trash::TrashEntry>,
+    /// El filtro por nombre, que es de la pestaña y no de la ventana.
+    filter: String,
+}
+
 pub struct AppRust {
     version: QString,
     path: QString,
@@ -389,6 +460,11 @@ pub struct AppRust {
     entry_selected: cxx_qt_lib::QList<i32>,
     entry_values: QStringList,
     in_trash: bool,
+    tab_titles: QStringList,
+    tab_count: i32,
+    active_tab: i32,
+    can_reopen_tab: bool,
+    focus_mode: bool,
     column_ids: QStringList,
     column_labels: QStringList,
     column_widths: cxx_qt_lib::QList<i32>,
@@ -430,7 +506,6 @@ pub struct AppRust {
     can_zoom_in: bool,
 
     // Estado que no se expone a QML.
-    history: History,
     home: Option<PathBuf>,
     crumb_capacity: usize,
     tree: Tree,
@@ -442,18 +517,12 @@ pub struct AppRust {
     columns: ColumnMemory,
     /// Lo que Kara recuerda entre sesiones.
     prefs: Prefs,
-    /// Qué está seleccionado y qué tiene el cursor.
-    selection: Selection,
-    /// Las entradas de la papelera del último listado, en el orden en que
-    /// llegaron. Las filas guardan su posición aquí en la bolsa de metadatos.
-    trash: Vec<kara_fs::trash::TrashEntry>,
-    /// Las entradas que se están enseñando, en su orden. Se guardan para poder
-    /// traducir la selección **por nombre** cuando la lista se rehace: al
-    /// reordenar o filtrar los índices cambian, y una selección por índice
-    /// señalaría a otros ficheros.
-    visible: Vec<kara_core::FileEntry>,
-    /// De qué carpeta son `visible` y la selección.
-    visible_path: Option<PathBuf>,
+    /// Las pestañas abiertas. Cada una lleva su propio historial.
+    tabs: Tabs,
+    /// Lo que cada pestaña tiene para ella sola, por identificador: `Tabs` no
+    /// admite carga útil, y la posición no sirve de clave porque reordenar
+    /// mueve las pestañas.
+    tab_views: HashMap<TabId, TabView>,
     /// Pila de deshacer/rehacer. Toda operación destructiva pasa por aquí:
     /// es la red de seguridad que la spec pone por encima de todo lo demás.
     undo: UndoStack,
@@ -504,6 +573,11 @@ impl Default for AppRust {
             entry_selected: cxx_qt_lib::QList::<i32>::default(),
             entry_values: QStringList::default(),
             in_trash: false,
+            tab_titles: QStringList::default(),
+            tab_count: 1,
+            active_tab: 0,
+            can_reopen_tab: false,
+            focus_mode: prefs.focus_mode(),
             column_ids: QStringList::default(),
             column_labels: QStringList::default(),
             column_widths: cxx_qt_lib::QList::<i32>::default(),
@@ -547,7 +621,8 @@ impl Default for AppRust {
             icon_size: clamp_count(initial_view.icon_size as usize),
             can_zoom_out: !initial_view.is_smallest(),
             can_zoom_in: !initial_view.is_largest(),
-            history: History::new(start.clone()),
+            tabs: Tabs::new(start.clone()),
+            tab_views: HashMap::new(),
             home: home.clone(),
             crumb_capacity: DEFAULT_CRUMB_CAPACITY,
             tree: Tree::new(sections(home.as_deref(), &pinned)),
@@ -556,10 +631,6 @@ impl Default for AppRust {
             // tema sale el fichero, no la nitidez.
             icons: Icons::load(ICON_SIZE),
             descriptions: MimeDescriptions::new(TYPE_LANGUAGES.iter().map(|l| (*l).to_string()).collect()),
-            trash: Vec::new(),
-            selection: Selection::new(),
-            visible: Vec::new(),
-            visible_path: None,
             undo: UndoStack::new(),
             sort_defaults: prefs.sort_defaults(),
             views: ViewMemory::new(prefs.default_view(), kara_core::view::MEMORY_CAPACITY),
@@ -603,6 +674,10 @@ impl Default for AppRust {
             app.overflow_names = snapshot.overflow_names;
             app.overflow_paths = snapshot.overflow_paths;
         }
+
+        app.tab_titles = vec![QString::from(&present::tab_title(&start, false))]
+            .into_iter()
+            .collect();
 
         app.reveal(&start);
         let nav = app.nav_view(&start);
@@ -708,6 +783,26 @@ struct Snapshot {
 }
 
 impl AppRust {
+    /// Lo que la pestaña activa tiene para ella sola.
+    fn view(&self) -> &TabView {
+        // `Tabs` garantiza que siempre hay una activa; el `unwrap_or_default`
+        // no es una excusa sino el caso de una pestaña recién abierta a la que
+        // todavía nadie ha volcado nada.
+        static EMPTY: std::sync::OnceLock<TabView> = std::sync::OnceLock::new();
+        self.tab_views
+            .get(&self.tabs.active_id())
+            .unwrap_or_else(|| EMPTY.get_or_init(TabView::default))
+    }
+
+    fn view_mut(&mut self) -> &mut TabView {
+        self.tab_views.entry(self.tabs.active_id()).or_default()
+    }
+
+    /// La carpeta que enseña la pestaña activa.
+    fn active_path(&self) -> PathBuf {
+        self.tabs.active().path().to_path_buf()
+    }
+
     /// Lista, oculta, filtra, ordena y parte la ruta en migas.
     ///
     /// `None` si la carpeta no se puede leer, y entonces quien llame **no
@@ -715,23 +810,25 @@ impl AppRust {
     fn snapshot(&mut self, target: &Path) -> Option<Snapshot> {
         // La papelera se lee de otro sitio, pero produce las mismas filas: así
         // ordenar, filtrar, seleccionar y pintar siguen siendo el mismo código.
-        let mut entries = if self.in_trash {
+        let mut entries = if self.view().in_trash {
             let listing = kara_fs::trash::list_trash();
-            self.trash = listing.entries;
-            self.trash
+            let rows = listing
+                .entries
                 .iter()
                 .enumerate()
                 .map(|(index, entry)| present::trash_row(entry, index))
-                .collect()
+                .collect();
+            self.view_mut().trash = listing.entries;
+            rows
         } else {
-            self.trash.clear();
+            self.view_mut().trash.clear();
             list_directory(target).ok()?.entries
         };
 
         Visibility::default().retain_visible(&mut entries);
         let total = entries.len();
 
-        let filter = NameFilter::new(&self.filter_text.to_string());
+        let filter = NameFilter::new(&self.view().filter.clone());
         if !filter.is_empty() {
             entries.retain(|entry| filter.matches(entry));
         }
@@ -746,14 +843,19 @@ impl AppRust {
         // filtrar o refrescar cambia los índices, y una selección por índice
         // acabaría señalando a otros ficheros. Cambiar de carpeta la vacía: los
         // nombres pueden coincidir y arrastrarla sería seleccionar a ciegas.
-        if self.visible_path.as_deref() == Some(target) {
-            let previous = self.selection.to_view_state(&self.visible, 0.0);
-            self.selection = Selection::from_view_state(&previous, &entries);
+        let carried = if self.view().visible_path.as_deref() == Some(target) {
+            let view = self.view();
+            let previous = view.selection.to_view_state(&view.visible, 0.0);
+            Selection::from_view_state(&previous, &entries)
         } else {
-            self.selection = Selection::new();
+            Selection::new()
+        };
+        {
+            let view = self.view_mut();
+            view.selection = carried;
+            view.visible_path = Some(target.to_path_buf());
+            view.visible = entries.clone();
         }
-        self.visible_path = Some(target.to_path_buf());
-        self.visible = entries.clone();
 
         // La tabla se construye por filas para que QML pueda indexarla con
         // `fila * column_count + columna`.
@@ -775,12 +877,12 @@ impl AppRust {
         }
 
         let selected = ints(
-            (0..entries.len()).map(|index| i32::from(self.selection.is_selected(index))),
+            (0..entries.len()).map(|index| i32::from(self.view().selection.is_selected(index))),
         );
         // Tamaño total de lo seleccionado, que es lo que la spec pide en la
         // barra de estado junto al conteo. Las carpetas no aportan: su tamaño
         // es recursivo y no se conoce.
-        let bytes: u64 = self
+        let bytes: u64 = self.view()
             .selection
             .selected()
             .iter()
@@ -868,8 +970,8 @@ impl AppRust {
                 .map(|id| QString::from(&present::column_label(id)))
                 .collect(),
             selected,
-            selected_count: clamp_count(self.selection.len()),
-            focused_index: self
+            selected_count: clamp_count(self.view().selection.len()),
+            focused_index: self.view()
                 .selection
                 .focused()
                 .map_or(-1, clamp_count),
@@ -1168,7 +1270,11 @@ impl qobject::App {
         // El panel sigue a la vista: despliega los ancestros de la carpeta que
         // se acaba de enseñar y la resalta.
         self.as_mut().rust_mut().get_mut().reveal(target);
-        self.publish_nav();
+        self.as_mut().publish_nav();
+
+        // El rótulo de la pestaña activa es el nombre de su carpeta, así que
+        // navegar lo cambia.
+        self.as_mut().publish_tabs();
         true
     }
 
@@ -1394,20 +1500,21 @@ impl qobject::App {
         let (marks, count, focused, bytes) = {
             let state = self.rust();
             let marks = ints(
-                (0..state.visible.len())
-                    .map(|index| i32::from(state.selection.is_selected(index))),
+                (0..state.view().visible.len())
+                    .map(|index| i32::from(state.view().selection.is_selected(index))),
             );
             let bytes: u64 = state
+                .view()
                 .selection
                 .selected()
                 .iter()
-                .filter_map(|index| state.visible.get(*index))
+                .filter_map(|index| state.view().visible.get(*index))
                 .filter_map(|entry| entry.size)
                 .sum();
             (
                 marks,
-                clamp_count(state.selection.len()),
-                state.selection.focused().map_or(-1, clamp_count),
+                clamp_count(state.view().selection.len()),
+                state.view().selection.focused().map_or(-1, clamp_count),
                 bytes,
             )
         };
@@ -1428,33 +1535,49 @@ impl qobject::App {
         };
         {
             let state = self.as_mut().rust_mut().get_mut();
-            let len = state.visible.len();
+            let len = state.view().visible.len();
+            let selection = &mut state.view_mut().selection;
             // Mayúsculas manda sobre Ctrl, como en el Explorador: Ctrl+May+clic
             // añade el rango a lo que ya había.
             match (shift, ctrl) {
-                (true, true) => state.selection.add_range(index, len),
-                (true, false) => state.selection.select_range(index, len),
-                (false, true) => state.selection.ctrl_click(index, len),
-                (false, false) => state.selection.click(index, len),
+                (true, true) => selection.add_range(index, len),
+                (true, false) => selection.select_range(index, len),
+                (false, true) => selection.ctrl_click(index, len),
+                (false, false) => selection.click(index, len),
             }
         }
         self.as_mut().publish_selection();
     }
 
     fn select_all(mut self: Pin<&mut Self>) {
-        let len = self.rust().visible.len();
-        self.as_mut().rust_mut().get_mut().selection.select_all(len);
+        let len = self.rust().view().visible.len();
+        self.as_mut()
+            .rust_mut()
+            .get_mut()
+            .view_mut()
+            .selection
+            .select_all(len);
         self.as_mut().publish_selection();
     }
 
     fn deselect_all(mut self: Pin<&mut Self>) {
-        self.as_mut().rust_mut().get_mut().selection.deselect_all();
+        self.as_mut()
+            .rust_mut()
+            .get_mut()
+            .view_mut()
+            .selection
+            .deselect_all();
         self.as_mut().publish_selection();
     }
 
     fn invert_selection(mut self: Pin<&mut Self>) {
-        let len = self.rust().visible.len();
-        self.as_mut().rust_mut().get_mut().selection.invert(len);
+        let len = self.rust().view().visible.len();
+        self.as_mut()
+            .rust_mut()
+            .get_mut()
+            .view_mut()
+            .selection
+            .invert(len);
         self.as_mut().publish_selection();
     }
 
@@ -1464,8 +1587,11 @@ impl qobject::App {
         };
         {
             let state = self.as_mut().rust_mut().get_mut();
-            let len = state.visible.len();
-            state.selection.apply_rubber_band(from, to, len, additive);
+            let len = state.view().visible.len();
+            state
+                .view_mut()
+                .selection
+                .apply_rubber_band(from, to, len, additive);
         }
         self.as_mut().publish_selection();
     }
@@ -1563,10 +1689,11 @@ impl qobject::App {
         let current = PathBuf::from(self.path().to_string());
         let state = self.rust();
         state
+            .view()
             .selection
             .selected()
             .iter()
-            .filter_map(|index| state.visible.get(*index))
+            .filter_map(|index| state.view().visible.get(*index))
             .map(|entry| current.join(&entry.name))
             .collect()
     }
@@ -1691,17 +1818,196 @@ impl qobject::App {
     fn selected_trash(&self) -> Vec<kara_fs::trash::TrashEntry> {
         let state = self.rust();
         state
+            .view()
             .selection
             .selected()
             .iter()
-            .filter_map(|row| state.visible.get(*row))
+            .filter_map(|row| state.view().visible.get(*row))
             .filter_map(present::trash_index_of)
-            .filter_map(|index| state.trash.get(index).cloned())
+            .filter_map(|index| state.view().trash.get(index).cloned())
             .collect()
     }
 
+    /// Vuelca la barra de pestañas: rótulos, cuál está activa y si hay algo
+    /// que reabrir.
+    fn publish_tabs(mut self: Pin<&mut Self>) {
+        let (titles, count, active, can_reopen) = {
+            let state = self.rust();
+            let titles: Vec<QString> = state
+                .tabs
+                .tabs()
+                .map(|tab| {
+                    let in_trash = state
+                        .tab_views
+                        .get(&tab.id())
+                        .is_some_and(|view| view.in_trash);
+                    QString::from(&present::tab_title(tab.path(), in_trash))
+                })
+                .collect();
+            let active = state
+                .tabs
+                .tabs()
+                .position(|tab| tab.id() == state.tabs.active_id())
+                .unwrap_or(0);
+            (
+                titles,
+                clamp_count(state.tabs.len()),
+                clamp_count(active),
+                state.tabs.reopenable_count() > 0,
+            )
+        };
+
+        self.as_mut().set_tab_titles(titles.into_iter().collect());
+        self.as_mut().set_tab_count(count);
+        self.as_mut().set_active_tab(active);
+        self.as_mut().set_can_reopen_tab(can_reopen);
+    }
+
+    /// Enseña la pestaña activa: su carpeta, su filtro y su papelera.
+    ///
+    /// Cambiar de pestaña no es navegar: no toca el historial de ninguna, y
+    /// cada una recupera el filtro y la selección con los que se dejó.
+    fn show_active_tab(mut self: Pin<&mut Self>) {
+        let (path, filter, in_trash) = {
+            let state = self.rust();
+            (
+                state.active_path(),
+                state.view().filter.clone(),
+                state.view().in_trash,
+            )
+        };
+
+        self.as_mut().set_filter_text(QString::from(&filter));
+        self.as_mut().set_in_trash(in_trash);
+        self.as_mut().render(&path);
+        self.as_mut().publish_history();
+        self.as_mut().publish_tabs();
+    }
+
+    /// El identificador de la pestaña que ocupa una posición de la barra.
+    fn tab_at(&self, index: i32) -> Option<TabId> {
+        let index = usize::try_from(index).ok()?;
+        self.rust().tabs.tabs().nth(index).map(kara_core::Tab::id)
+    }
+
+    fn open_tab(mut self: Pin<&mut Self>, path: &QString, background: bool) {
+        let path = PathBuf::from(path.to_string());
+        if !path.is_dir() {
+            return;
+        }
+        let mode = if background {
+            OpenMode::Background
+        } else {
+            OpenMode::Foreground
+        };
+        self.as_mut().rust_mut().get_mut().tabs.open(path, mode);
+
+        if background {
+            // Abrir detrás no mueve el foco, así que no hay que reenseñar
+            // nada: solo aparece una pestaña más en la barra.
+            self.as_mut().publish_tabs();
+        } else {
+            self.as_mut().show_active_tab();
+        }
+    }
+
+    fn open_focused_in_tab(mut self: Pin<&mut Self>, background: bool) {
+        let target = {
+            let state = self.rust();
+            state
+                .view()
+                .selection
+                .focused()
+                .and_then(|index| state.view().visible.get(index))
+                .filter(|entry| entry.kind == EntryKind::Directory)
+                .map(|entry| state.active_path().join(&entry.name))
+        };
+        let Some(target) = target else {
+            return;
+        };
+        let path = QString::from(&target.to_string_lossy().into_owned());
+        self.as_mut().open_tab(&path, background);
+    }
+
+    fn close_tab(mut self: Pin<&mut Self>, index: i32) {
+        let Some(id) = self.tab_at(index) else {
+            return;
+        };
+        let outcome = self.as_mut().rust_mut().get_mut().tabs.close(id);
+        match outcome {
+            CloseOutcome::Closed { .. } => {
+                // Lo que la pestaña tenía para ella sola se va con ella; si
+                // vuelve por «reabrir», vuelve con su historial y una vista
+                // limpia, que es lo honesto: la carpeta pudo cambiar.
+                self.as_mut().rust_mut().get_mut().tab_views.remove(&id);
+                self.as_mut().show_active_tab();
+            }
+            // Cerrar la última no vacía la barra: este módulo no cierra
+            // ventanas, y una barra sin pestañas no es un estado que exista.
+            CloseOutcome::LastTab | CloseOutcome::NotFound => {}
+        }
+    }
+
+    fn activate_tab(mut self: Pin<&mut Self>, index: i32) {
+        let Some(id) = self.tab_at(index) else {
+            return;
+        };
+        if self.rust().tabs.active_id() == id {
+            return;
+        }
+        self.as_mut().rust_mut().get_mut().tabs.activate(id);
+        self.as_mut().show_active_tab();
+    }
+
+    fn duplicate_tab(mut self: Pin<&mut Self>, index: i32) {
+        let Some(id) = self.tab_at(index) else {
+            return;
+        };
+        self.as_mut()
+            .rust_mut()
+            .get_mut()
+            .tabs
+            .duplicate(id, OpenMode::Foreground);
+        self.as_mut().show_active_tab();
+    }
+
+    fn reopen_tab(mut self: Pin<&mut Self>) {
+        if self.as_mut().rust_mut().get_mut().tabs.reopen().is_none() {
+            return;
+        }
+        self.as_mut().show_active_tab();
+    }
+
+    fn next_tab(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().get_mut().tabs.activate_next();
+        self.as_mut().show_active_tab();
+    }
+
+    fn previous_tab(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().get_mut().tabs.activate_previous();
+        self.as_mut().show_active_tab();
+    }
+
+    fn drag_tab(mut self: Pin<&mut Self>, from: i32, to: i32) {
+        let (Ok(from), Ok(to)) = (usize::try_from(from), usize::try_from(to)) else {
+            return;
+        };
+        self.as_mut().rust_mut().get_mut().tabs.move_tab(from, to);
+        self.as_mut().publish_tabs();
+    }
+
+    fn use_focus_mode(mut self: Pin<&mut Self>, on: bool) {
+        if *self.focus_mode() == on {
+            return;
+        }
+        self.as_mut().set_focus_mode(on);
+        self.as_mut().rust_mut().get_mut().prefs.set_focus_mode(on);
+        self.as_mut().persist();
+    }
+
     fn show_trash(mut self: Pin<&mut Self>) {
-        self.as_mut().rust_mut().get_mut().in_trash = true;
+        self.as_mut().rust_mut().get_mut().view_mut().in_trash = true;
+        self.as_mut().set_in_trash(true);
         // La ruta deja de nombrar una carpeta: la barra de direcciones enseña
         // «Papelera» y el `in_trash` es lo que la vista mira, no el texto.
         let placeholder = PathBuf::from("/");
@@ -1710,8 +2016,9 @@ impl qobject::App {
 
     /// Vuelve a una carpeta de verdad.
     fn leave_trash(mut self: Pin<&mut Self>) {
-        if *self.in_trash() {
-            self.as_mut().rust_mut().get_mut().in_trash = false;
+        if self.rust().view().in_trash {
+            self.as_mut().rust_mut().get_mut().view_mut().in_trash = false;
+            self.as_mut().set_in_trash(false);
         }
     }
 
@@ -1777,9 +2084,10 @@ impl qobject::App {
     fn focused_name(self: Pin<&mut Self>) -> QString {
         let state = self.rust();
         let name = state
+            .view()
             .selection
             .focused()
-            .and_then(|index| state.visible.get(index))
+            .and_then(|index| state.view().visible.get(index))
             .map(|entry| entry.display.clone())
             .unwrap_or_default();
         QString::from(&name)
@@ -1790,10 +2098,11 @@ impl qobject::App {
         let victims: Vec<PathBuf> = {
             let state = self.rust();
             state
+                .view()
                 .selection
                 .selected()
                 .iter()
-                .filter_map(|index| state.visible.get(*index))
+                .filter_map(|index| state.view().visible.get(*index))
                 .map(|entry| current.join(&entry.name))
                 .collect()
         };
@@ -2037,7 +2346,8 @@ impl qobject::App {
     fn publish_history(mut self: Pin<&mut Self>) {
         let (back, forward) = {
             let state = self.rust();
-            (state.history.can_go_back(), state.history.can_go_forward())
+            let history = state.tabs.active().history();
+            (history.can_go_back(), history.can_go_forward())
         };
         self.as_mut().set_can_go_back(back);
         self.as_mut().set_can_go_forward(forward);
@@ -2049,7 +2359,13 @@ impl qobject::App {
         if !self.as_mut().render(target) {
             return false;
         }
-        self.as_mut().rust_mut().get_mut().history.visit(target);
+        self.as_mut()
+            .rust_mut()
+            .get_mut()
+            .tabs
+            .active_mut()
+            .history_mut()
+            .visit(target);
         self.as_mut().publish_history();
         true
     }
@@ -2061,7 +2377,13 @@ impl qobject::App {
     /// vista vacía sería peor que dejarle donde estaba.
     fn jump(mut self: Pin<&mut Self>, backwards: bool) {
         let target = {
-            let history = &mut self.as_mut().rust_mut().get_mut().history;
+            let history = self
+                .as_mut()
+                .rust_mut()
+                .get_mut()
+                .tabs
+                .active_mut()
+                .history_mut();
             let entry = if backwards {
                 history.back()
             } else {
@@ -2077,7 +2399,9 @@ impl qobject::App {
             self.as_mut()
                 .rust_mut()
                 .get_mut()
-                .history
+                .tabs
+                .active_mut()
+                .history_mut()
                 .invalidate(&target);
         }
         self.publish_history();
@@ -2121,6 +2445,7 @@ impl qobject::App {
 
     fn apply_filter(mut self: Pin<&mut Self>, text: &QString) {
         self.as_mut().set_filter_text(text.clone());
+        self.as_mut().rust_mut().get_mut().view_mut().filter = text.to_string();
         let current = PathBuf::from(self.path().to_string());
         self.as_mut().render(&current);
     }

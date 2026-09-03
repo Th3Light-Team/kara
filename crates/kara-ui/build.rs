@@ -20,6 +20,8 @@ fn main() {
             QmlFile::from("qml/FileGrid.qml"),
             QmlFile::from("qml/ViewModeButton.qml"),
             QmlFile::from("qml/ColumnHeader.qml"),
+            QmlFile::from("qml/TabStrip.qml"),
+            QmlFile::from("qml/TabModeButton.qml"),
         ]),
     )
     .qt_module("Quick")
