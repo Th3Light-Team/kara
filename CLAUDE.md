@@ -221,8 +221,14 @@ añade y reajusta. Se recuerdan por carpeta, en RAM.
 la que salió, restaura y vacía —esto último confirmando, con el foco en el
 botón que no destruye nada—.
 
-**Lo que falta de la vista:** pestañas (el modelo está en `kara-core::tabs`, sin
-enchufar), el marco elástico de selección, el diálogo de progreso y el de
+**Pestañas, con modo concentración.** Cada pestaña es una vista completa e
+independiente: su historial, su selección, su filtro y su papelera. Cambiar de
+pestaña no es navegar. Los dos iconos del pie a la derecha eligen cómo se
+navega: concentración pliega la barra —las demás se desvanecen y la ventana
+queda como si nunca hubiera tenido pestañas, **sin cerrarlas**— o barra
+visible. Se recuerda entre sesiones.
+
+**Lo que falta de la vista:** el marco elástico de selección, el diálogo de progreso y el de
 conflictos (`kara-ops` los tiene resueltos y nadie los consume), la vista
 «contenido» (Ctrl+Shift+8), y la vigilancia inotify, que tampoco tiene
 consumidor.
