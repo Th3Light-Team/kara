@@ -199,10 +199,33 @@ se pulsó y pinta la flecha—, y el criterio se recuerda por carpeta junto al
 modo, como `SortOverrides` sobre un criterio global: una carpeta que solo
 eligió el sentido sigue heredando el resto.
 
-**Lo que falta de la vista:** selección múltiple, anclar carpetas al panel
-(necesita dónde guardar ajustes), redimensionar columnas y elegir cuáles se
-ven, la vista «contenido» (Ctrl+Shift+8), y enchufar a la UI lo que el backend
-ya ofrece y nadie consume todavía (vigilancia, cola, deshacer).
+**Ajustes en disco.** `kara-fs::settings` es un almacén de claves y valores en
+`$XDG_CONFIG_HOME/kara/settings.conf`, con escritura atómica; `kara-ui::prefs`
+le pone nombres y tipos. Sobreviven al reinicio el ancho y la visibilidad del
+panel, el modo de vista con el que se abren las carpetas sin configurar y las
+carpetas ancladas. Un fichero ilegible no impide arrancar, se avisa una vez y
+**no se sobrescribe**.
+
+**Selección, portapapeles y operaciones.** Ctrl+clic, Mayús+clic, Ctrl+A e
+invertir; cortar/copiar/pegar contra el portapapeles del escritorio (Dolphin y
+Kara se entienden en los dos sentidos); deshacer y rehacer con etiqueta de qué
+se deshace; nueva carpeta, renombrado en línea que protege la extensión, y
+papelera por lotes.
+
+**Columnas configurables.** Ni la cabecera ni las filas saben qué columnas hay:
+las dos recorren `column_ids` y el contenido llega como una tabla por filas.
+Arrastrar el separador cambia el ancho; el menú de la cabecera mueve, quita,
+añade y reajusta. Se recuerdan por carpeta, en RAM.
+
+**La papelera es un sitio al que se entra.** Lista lo borrado con la carpeta de
+la que salió, restaura y vacía —esto último confirmando, con el foco en el
+botón que no destruye nada—.
+
+**Lo que falta de la vista:** pestañas (el modelo está en `kara-core::tabs`, sin
+enchufar), el marco elástico de selección, el diálogo de progreso y el de
+conflictos (`kara-ops` los tiene resueltos y nadie los consume), la vista
+«contenido» (Ctrl+Shift+8), y la vigilancia inotify, que tampoco tiene
+consumidor.
 
 ### Cabos sueltos conocidos
 
