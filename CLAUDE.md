@@ -228,7 +228,12 @@ navega: concentración pliega la barra —las demás se desvanecen y la ventana
 queda como si nunca hubiera tenido pestañas, **sin cerrarlas**— o barra
 visible. Se recuerda entre sesiones.
 
-**Lo que falta de la vista:** el marco elástico de selección, el diálogo de progreso y el de
+**Marco elástico.** Arrastrar desde el hueco barre un rectángulo; Ctrl suma,
+el panel se desplaza solo al llegar al borde y Esc cancela sin tocar la
+selección previa. En la rejilla el marco cubre un **conjunto**, no un tramo: un
+rectángulo toca el final de una fila y el principio de la siguiente.
+
+**Lo que falta de la vista:** el diálogo de progreso y el de
 conflictos (`kara-ops` los tiene resueltos y nadie los consume), la vista
 «contenido» (Ctrl+Shift+8), y la vigilancia inotify, que tampoco tiene
 consumidor.
