@@ -28,6 +28,18 @@ Item {
             view.renamingIndex = view.app.focused_index;
     }
 
+    /// Cancela lo que haya a medias y dice si había algo. Es lo que la ventana
+    /// pregunta antes de dejar que Esc quite la selección.
+    function cancelPending() {
+        if (band.cancel())
+            return true;
+        if (view.renamingIndex >= 0) {
+            view.renamingIndex = -1;
+            return true;
+        }
+        return false;
+    }
+
     /// Los números se leen mejor alineados a la derecha; el resto, a la
     /// izquierda. Es la única regla de presentación que depende de la columna.
     function alignsRight(id) {
@@ -199,6 +211,7 @@ Item {
         ScrollBar.vertical: ScrollBar {}
 
         RubberBand {
+            id: band
             app: view.app
             scroller: rows
             onSwept: (area, additive) => {

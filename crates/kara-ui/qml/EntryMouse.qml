@@ -21,6 +21,12 @@ MouseArea {
     hoverEnabled: true
     acceptedButtons: Qt.LeftButton | Qt.RightButton
 
+    // Pulsar sobre un fichero le da el foco de teclado a la vista. Sin esto el
+    // foco se queda donde lo dejó la última barra de texto —el filtro, la de
+    // direcciones— y las teclas que un campo de texto reclama para sí,
+    // Ctrl+A y Supr entre ellas, no llegan nunca a la lista.
+    onPressed: control.forceActiveFocus()
+
     onClicked: mouse => {
         const ctrl = (mouse.modifiers & Qt.ControlModifier) !== 0;
         const shift = (mouse.modifiers & Qt.ShiftModifier) !== 0;

@@ -9,9 +9,15 @@ pragma ComponentBehavior: Bound
 // la forma de impedirlo es que el gesto solo llegue aquí cuando se pulsa en
 // hueco.
 //
-// El rectángulo se mide en coordenadas del contenido, no de la ventana: con
-// autodesplazamiento el contenido se mueve bajo el puntero, y un marco medido
-// contra la ventana se quedaría atrás.
+// Por debajo, pero **dentro del contenido desplazable**. Ser hijo del propio
+// `Flickable` con `z` negativo no basta: el orden de acierto de Qt Quick es
+// hijos con z ≥ 0, luego el elemento mismo, y solo después los de z negativo.
+// Como un `Flickable` acepta el botón izquierdo, se quedaba la pulsación y aquí
+// no llegaba nada. Dentro de `contentItem` el marco queda detrás de los
+// delegados y delante del `Flickable`, que es lo que hace falta.
+//
+// Y estando dentro del contenido, las coordenadas del ratón **ya son** las del
+// contenido: no hay que sumarles el desplazamiento.
 import QtQuick
 import com.kara.ui
 
@@ -26,9 +32,16 @@ Item {
     /// Quien reciba esto sabe su geometría y la traduce a posiciones.
     signal swept(rect area, bool additive)
 
-    anchors.fill: parent
+    parent: band.scroller.contentItem
     // Por debajo de los delegados.
     z: -1
+    x: 0
+    y: 0
+    // Cubre el contenido, y al menos lo que se ve: en una carpeta con pocas
+    // entradas el hueco de debajo de la última también es sitio desde el que
+    // barrer.
+    width: Math.max(band.scroller.width, band.scroller.contentWidth)
+    height: Math.max(band.scroller.height, band.scroller.contentHeight)
 
     property real originX: 0
     property real originY: 0
@@ -46,15 +59,37 @@ Item {
         band.app.end_band();
     }
 
+    /// Cancela el barrido en curso: la selección vuelve a la de antes de
+    /// empezarlo. Devuelve si había algo que cancelar.
+    ///
+    /// Lo dispara la ventana, no un `Shortcut` de aquí dentro: uno anidado a
+    /// esta profundidad no llega a activarse, y además Esc está escalonado —la
+    /// ventana tiene que poder preguntar «¿había algo a medias?» antes de
+    /// quitar la selección.
+    function cancel() {
+        if (!band.active)
+            return false;
+        band.active = false;
+        band.app.cancel_band();
+        return true;
+    }
+
     MouseArea {
         id: area
         anchors.fill: parent
         acceptedButtons: Qt.LeftButton
+        // Sin esto el `Flickable` roba el arrastre en cuanto pasa del umbral y
+        // el marco muere a mitad de barrido, justo en las carpetas grandes que
+        // son las que lo necesitan.
+        preventStealing: true
 
         onPressed: mouse => {
+            // Pulsar en hueco también es pulsar en la vista: el foco de teclado
+            // viene aquí, como en cualquier explorador.
+            area.forceActiveFocus();
             band.additive = (mouse.modifiers & Qt.ControlModifier) !== 0;
-            band.originX = mouse.x + band.scroller.contentX;
-            band.originY = mouse.y + band.scroller.contentY;
+            band.originX = mouse.x;
+            band.originY = mouse.y;
             band.currentX = band.originX;
             band.currentY = band.originY;
             band.active = true;
@@ -67,9 +102,11 @@ Item {
         onPositionChanged: mouse => {
             if (!band.active)
                 return;
-            band.currentX = mouse.x + band.scroller.contentX;
-            band.currentY = mouse.y + band.scroller.contentY;
-            edge.pointer = mouse.y;
+            band.currentX = mouse.x;
+            band.currentY = mouse.y;
+            // El autodesplazamiento mira dónde está el puntero **en lo que se
+            // ve**, no en el contenido.
+            edge.pointer = mouse.y - band.scroller.contentY;
             band.swept(band.area, band.additive);
         }
 
@@ -93,12 +130,12 @@ Item {
             let delta = 0;
             if (edge.pointer < edge.margin)
                 delta = -edge.step;
-            else if (edge.pointer > band.height - edge.margin)
+            else if (edge.pointer > band.scroller.height - edge.margin)
                 delta = edge.step;
             if (delta === 0)
                 return;
 
-            const limite = Math.max(0, band.scroller.contentHeight - band.height);
+            const limite = Math.max(0, band.scroller.contentHeight - band.scroller.height);
             const destino = Math.max(0, Math.min(limite, band.scroller.contentY + delta));
             if (destino === band.scroller.contentY)
                 return;
@@ -109,21 +146,10 @@ Item {
         }
     }
 
-    // Esc cancela sin tocar la selección previa: lo que hubiera antes del marco
-    // vuelve tal cual.
-    Shortcut {
-        sequence: "Escape"
-        enabled: band.active
-        onActivated: {
-            band.active = false;
-            band.app.cancel_band();
-        }
-    }
-
     Rectangle {
         visible: band.active && (band.area.width > 2 || band.area.height > 2)
-        x: band.area.x - band.scroller.contentX
-        y: band.area.y - band.scroller.contentY
+        x: band.area.x
+        y: band.area.y
         width: band.area.width
         height: band.area.height
         color: Qt.alpha(Theme.accent, 0.18)

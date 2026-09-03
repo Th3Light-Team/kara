@@ -62,6 +62,48 @@ Window {
         onActivated: app.toggle_sidebar()
     }
 
+    // ---- Selección (ground/spec/07-atajos-teclado.md, «Selección») --------
+    Shortcut {
+        sequence: "Ctrl+A"
+        onActivated: app.select_all()
+    }
+    Shortcut {
+        sequences: ["Ctrl+Shift+A", "Ctrl+Shift+I"]
+        onActivated: app.invert_selection()
+    }
+    Shortcut {
+        // Escalonado, como pide la spec: cancela lo que esté en curso —el
+        // marco, el renombrado— y solo si no hay nada en curso quita la
+        // selección. La vista es quien sabe si tiene algo a medias.
+        sequence: "Escape"
+        // Los campos de texto tienen su propio Esc y son ellos quienes deben
+        // atenderlo: un atajo se lleva la tecla **antes** que el que tiene el
+        // foco, así que si esto estuviera siempre activo, Esc dejaría de
+        // limpiar el filtro y de cerrar la barra de direcciones, y el foco se
+        // quedaría dentro del campo comiéndose Ctrl+A y Supr.
+        enabled: !address.editing && !filterField.activeFocus
+        onActivated: {
+            // El Loader no declara el tipo de lo que carga y las dos vistas no
+            // comparten un tipo común: se pregunta a la que esté puesta, con el
+            // mismo molde que usa F2.
+            const detalles = fileView.item as FileDetails;
+            const rejilla = fileView.item as FileGrid;
+            let atendido = false;
+            if (detalles)
+                atendido = detalles.cancelPending();
+            else if (rejilla)
+                atendido = rejilla.cancelPending();
+            if (!atendido)
+                app.deselect_all();
+        }
+    }
+    Shortcut {
+        // La papelera, nunca el borrado: `Shift+Supr` pide un borrado
+        // permanente que el backend todavía no tiene.
+        sequence: "Delete"
+        onActivated: app.trash_selected()
+    }
+
     // Modos de vista, con la numeración del Explorador de Windows: 1 a 4 son
     // los cuatro tamaños de icono, 5 lista, 6 detalles, 7 mosaico. Falta el 8,
     // «contenido», que todavía no existe.
@@ -798,4 +840,5 @@ Window {
         else
             win.showMaximized();
     }
+
 }

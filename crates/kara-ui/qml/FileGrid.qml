@@ -48,6 +48,12 @@ GridView {
         return grid.app.icon_size + 12 + 2 * (Theme.sizeBase + 4) + 12;
     }
 
+    /// Cancela lo que haya a medias. En las rejillas todavía no hay editor de
+    /// nombre, así que solo está el marco.
+    function cancelPending() {
+        return band.cancel();
+    }
+
     ScrollBar.vertical: ScrollBar {
         policy: grid.flow === GridView.FlowLeftToRight ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
     }
@@ -56,6 +62,7 @@ GridView {
     }
 
     RubberBand {
+        id: band
         app: grid.app
         scroller: grid
         onSwept: (area, additive) => {
