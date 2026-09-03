@@ -37,6 +37,17 @@ Item {
     readonly property int leftMargin: 14
     readonly property int gap: 12
 
+    /// Hasta dónde llega el contenido de una fila. A la derecha de eso hay
+    /// hueco, y el hueco es donde puede empezar el marco elástico: la spec
+    /// avisa de que un marco que arranque sobre un elemento se confunde con un
+    /// arrastrar-mover.
+    readonly property int rowContentWidth: {
+        let ancho = view.leftMargin + view.app.icon_size;
+        for (let i = 0; i < view.app.column_count; ++i)
+            ancho += view.gap + (view.app.column_widths[i] ?? 0);
+        return ancho;
+    }
+
     Rectangle {
         id: columnHeader
         anchors.top: parent.top
@@ -187,6 +198,23 @@ Item {
         highlightMoveDuration: 0
         ScrollBar.vertical: ScrollBar {}
 
+        RubberBand {
+            app: view.app
+            scroller: rows
+            onSwept: (area, additive) => {
+                // En una lista lo que un rectángulo toca es siempre un tramo
+                // seguido de filas, así que basta con los extremos.
+                const alto = Math.max(1, rows.contentHeight / Math.max(1, view.app.entry_count));
+                const primera = Math.floor(area.y / alto);
+                const ultima = Math.floor((area.y + area.height) / alto);
+                if (ultima < 0 || primera >= view.app.entry_count) {
+                    view.app.band_set([], additive);
+                    return;
+                }
+                view.app.rubber_band(Math.max(0, primera), Math.min(view.app.entry_count - 1, ultima), additive);
+            }
+        }
+
         delegate: Item {
             id: row
 
@@ -319,6 +347,12 @@ Item {
                 id: mouse
                 app: view.app
                 index: row.index
+                // Solo sobre el contenido: a la derecha empieza el hueco.
+                anchors.fill: undefined
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                width: Math.min(row.width, view.rowContentWidth)
                 onRenameRequested: view.renamingIndex = row.index
             }
         }

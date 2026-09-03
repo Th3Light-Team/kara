@@ -319,9 +319,28 @@ pub mod qobject {
         #[qinvokable]
         fn invert_selection(self: Pin<&mut App>);
 
-        /// Marco elástico: la vista dice qué filas cubre, el dominio decide.
+        /// Empieza un marco elástico, recordando la selección de partida.
+        #[qinvokable]
+        fn begin_band(self: Pin<&mut App>);
+
+        /// El marco cubre las filas de `from` a `to`. Es lo que basta en una
+        /// lista, donde lo que un rectángulo toca es siempre un tramo seguido.
         #[qinvokable]
         fn rubber_band(self: Pin<&mut App>, from: i32, to: i32, additive: bool);
+
+        /// El marco cubre estas posiciones sueltas. En una rejilla un
+        /// rectángulo toca el final de una fila y el principio de la siguiente,
+        /// y lo de en medio queda fuera: un tramo diría lo que no es.
+        #[qinvokable]
+        fn band_set(self: Pin<&mut App>, covered: &QList_i32, additive: bool);
+
+        /// Suelta el marco y fija lo seleccionado.
+        #[qinvokable]
+        fn end_band(self: Pin<&mut App>);
+
+        /// Cancela el marco: la selección vuelve a como estaba al empezarlo.
+        #[qinvokable]
+        fn cancel_band(self: Pin<&mut App>);
 
         /// Deshace la última operación reversible.
         #[qinvokable]
@@ -445,6 +464,12 @@ struct TabView {
     trash: Vec<kara_fs::trash::TrashEntry>,
     /// El filtro por nombre, que es de la pestaña y no de la ventana.
     filter: String,
+    /// La selección de antes de empezar el marco elástico.
+    ///
+    /// Hace falta por dos motivos: durante el arrastre el marco se aplica una y
+    /// otra vez, y sin una base fija encogerlo no desharía nada; y la spec pide
+    /// que Esc a mitad lo cancele **sin tocar la selección previa**.
+    band_base: Option<Selection>,
 }
 
 pub struct AppRust {
@@ -1581,19 +1606,66 @@ impl qobject::App {
         self.as_mut().publish_selection();
     }
 
+    fn begin_band(mut self: Pin<&mut Self>) {
+        let base = self.rust().view().selection.clone();
+        self.as_mut().rust_mut().get_mut().view_mut().band_base = Some(base);
+    }
+
+    /// La selección desde la que aplicar el marco: la de antes de empezarlo si
+    /// suma, y ninguna si reemplaza.
+    fn band_start(&self, additive: bool) -> Selection {
+        let mut base = self.rust().view().band_base.clone().unwrap_or_default();
+        if !additive {
+            // Vacía lo marcado pero **conserva el cursor**, que es la misma
+            // regla que sigue Esc: el marco decide qué está seleccionado, no
+            // dónde estaba el usuario. Partir de una selección nueva lo perdía.
+            base.deselect_all();
+        }
+        base
+    }
+
     fn rubber_band(mut self: Pin<&mut Self>, from: i32, to: i32, additive: bool) {
         let (Ok(from), Ok(to)) = (usize::try_from(from), usize::try_from(to)) else {
             return;
         };
+        let mut selection = self.band_start(additive);
         {
             let state = self.as_mut().rust_mut().get_mut();
             let len = state.view().visible.len();
-            state
-                .view_mut()
-                .selection
-                .apply_rubber_band(from, to, len, additive);
+            // Siempre sumando: lo que decide si el marco reemplaza o añade es
+            // desde qué selección se parte, no cómo se aplica.
+            selection.apply_rubber_band(from, to, len, true);
+            state.view_mut().selection = selection;
         }
         self.as_mut().publish_selection();
+    }
+
+    fn band_set(mut self: Pin<&mut Self>, covered: &cxx_qt_lib::QList<i32>, additive: bool) {
+        let positions: Vec<usize> = covered
+            .iter()
+            .filter_map(|position| usize::try_from(*position).ok())
+            .collect();
+
+        let mut selection = self.band_start(additive);
+        {
+            let state = self.as_mut().rust_mut().get_mut();
+            let len = state.view().visible.len();
+            selection.apply_band(&positions, len, true);
+            state.view_mut().selection = selection;
+        }
+        self.as_mut().publish_selection();
+    }
+
+    fn end_band(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().get_mut().view_mut().band_base = None;
+    }
+
+    fn cancel_band(mut self: Pin<&mut Self>) {
+        let base = self.as_mut().rust_mut().get_mut().view_mut().band_base.take();
+        if let Some(base) = base {
+            self.as_mut().rust_mut().get_mut().view_mut().selection = base;
+            self.as_mut().publish_selection();
+        }
     }
 
     /// Refleja el estado de la pila de deshacer, con la etiqueta de qué se

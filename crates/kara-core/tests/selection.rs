@@ -530,3 +530,67 @@ fn from_view_state_drops_names_that_no_longer_exist() {
     assert!(!restored.is_selected(0), "a dropped name must not resurrect as index 0");
     assert_eq!(restored.focused(), None, "the focused name was the one that vanished");
 }
+
+// --- A band over a grid, which covers no contiguous run --------------------
+
+#[test]
+fn a_band_selects_exactly_the_positions_it_covers() {
+    // The case a range cannot express: a rectangle over a grid covering the
+    // tail of one row and the head of the next. Passing the range 2..=5 would
+    // select 3 and 4, which the rectangle never touched.
+    let mut selection = Selection::new();
+    selection.apply_band(&[2, 5], 8, false);
+
+    assert!(selection.is_selected(2));
+    assert!(selection.is_selected(5));
+    assert!(!selection.is_selected(3));
+    assert!(!selection.is_selected(4));
+    assert_eq!(selection.len(), 2);
+}
+
+#[test]
+fn a_band_replaces_the_previous_selection_unless_it_adds() {
+    let mut selection = Selection::new();
+    selection.apply_band(&[0, 1], 8, false);
+    selection.apply_band(&[4], 8, false);
+    assert_eq!(selection.len(), 1);
+
+    selection.apply_band(&[6], 8, true);
+    assert_eq!(selection.len(), 2);
+    assert!(selection.is_selected(4));
+    assert!(selection.is_selected(6));
+}
+
+#[test]
+fn a_band_leaves_the_anchor_and_the_cursor_at_its_ends() {
+    let mut selection = Selection::new();
+    selection.apply_band(&[5, 2, 7], 8, false);
+
+    assert_eq!(selection.anchor(), Some(2));
+    assert_eq!(selection.focused(), Some(7));
+}
+
+#[test]
+fn a_band_over_positions_that_no_longer_exist_ignores_them() {
+    // The view computes what the rectangle covers from geometry, and geometry
+    // can name a cell whose entry is gone.
+    let mut selection = Selection::new();
+    selection.apply_band(&[1, 99], 3, false);
+
+    assert!(selection.is_selected(1));
+    assert_eq!(selection.len(), 1);
+}
+
+#[test]
+fn an_empty_band_clears_without_moving_the_cursor() {
+    // Dragging over nothing must not leave the cursor pointing at a corner
+    // that was never touched.
+    let mut selection = Selection::new();
+    selection.click(3, 8);
+    let cursor = selection.focused();
+
+    selection.apply_band(&[], 8, false);
+
+    assert!(selection.is_empty());
+    assert_eq!(selection.focused(), cursor);
+}

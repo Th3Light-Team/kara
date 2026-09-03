@@ -236,6 +236,38 @@ impl Selection {
     /// empty space deselects everything — still clears any previous selection
     /// in non-additive mode. On a non-empty band, moves the anchor to the low
     /// end and the focus to the high end.
+    /// Applies a band that covers an arbitrary set of positions.
+    ///
+    /// A list view's band covers a contiguous run of rows, which
+    /// [`Self::apply_rubber_band`] handles. A grid's does not: a rectangle
+    /// drawn over a grid of icons covers, say, the last two cells of one row
+    /// and the first two of the next, and the indices in between are outside
+    /// it. Passing the range would select cells the rectangle never touched.
+    ///
+    /// Positions at or past `len` are ignored rather than rejected: the view
+    /// works out what the rectangle covers from geometry, and geometry can
+    /// name a cell that no longer has an entry.
+    pub fn apply_band(&mut self, covered: &[usize], len: usize, additive: bool) {
+        if !additive {
+            self.selected.clear();
+        }
+
+        let mut low = None;
+        let mut high = None;
+        for position in covered.iter().copied().filter(|position| *position < len) {
+            self.selected.insert(position);
+            low = Some(low.map_or(position, |kept: usize| kept.min(position)));
+            high = Some(high.map_or(position, |kept: usize| kept.max(position)));
+        }
+
+        // The anchor goes to the corner the band started from and the cursor to
+        // the far one, so a Shift+click right after has somewhere to continue.
+        if let (Some(low), Some(high)) = (low, high) {
+            self.anchor = Some(low);
+            self.focused = Some(high);
+        }
+    }
+
     pub fn apply_rubber_band(&mut self, from: usize, to: usize, len: usize, additive: bool) {
         let (low, high) = if from <= to { (from, to) } else { (to, from) };
         let covers_something = len > 0 && low < len;

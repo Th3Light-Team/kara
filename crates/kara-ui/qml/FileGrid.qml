@@ -55,6 +55,34 @@ GridView {
         policy: grid.flow === GridView.FlowTopToBottom ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
     }
 
+    RubberBand {
+        app: grid.app
+        scroller: grid
+        onSwept: (area, additive) => {
+            // Una rejilla se recorre por celdas: el rectángulo toca el final de
+            // una fila y el principio de la siguiente, y lo de en medio queda
+            // fuera. Un tramo diría lo que no es.
+            const porFila = Math.max(1, Math.floor(grid.width / grid.cellWidth));
+            const porColumna = Math.max(1, Math.floor(grid.height / grid.cellHeight));
+            const primeraFila = Math.max(0, Math.floor(area.y / grid.cellHeight));
+            const ultimaFila = Math.floor((area.y + area.height) / grid.cellHeight);
+            const primeraCol = Math.max(0, Math.floor(area.x / grid.cellWidth));
+            const ultimaCol = Math.floor((area.x + area.width) / grid.cellWidth);
+
+            const cubiertas = [];
+            for (let f = primeraFila; f <= ultimaFila; ++f) {
+                for (let c = primeraCol; c <= ultimaCol; ++c) {
+                    // «Lista» fluye de arriba abajo y luego a la derecha, así
+                    // que ahí la posición se cuenta por columnas.
+                    const indice = grid.flow === GridView.FlowLeftToRight ? f * porFila + c : c * porColumna + f;
+                    if (indice >= 0 && indice < grid.app.entry_count)
+                        cubiertas.push(indice);
+                }
+            }
+            grid.app.band_set(cubiertas, additive);
+        }
+    }
+
     delegate: Item {
         id: cell
 

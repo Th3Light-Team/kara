@@ -22,6 +22,7 @@ fn main() {
             QmlFile::from("qml/ColumnHeader.qml"),
             QmlFile::from("qml/TabStrip.qml"),
             QmlFile::from("qml/TabModeButton.qml"),
+            QmlFile::from("qml/RubberBand.qml"),
         ]),
     )
     .qt_module("Quick")
