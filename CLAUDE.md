@@ -233,12 +233,41 @@ el panel se desplaza solo al llegar al borde y Esc cancela sin tocar la
 selección previa. En la rejilla el marco cubre un **conjunto**, no un tramo: un
 rectángulo toca el final de una fila y el principio de la siguiente.
 
+El marco vive **dentro** del contenido desplazable (`contentItem`), no como
+hermano del `Flickable` con `z` negativo. El orden de acierto de Qt Quick es
+hijos con z ≥ 0, luego el elemento mismo y solo después los de z negativo: como
+un `Flickable` acepta el botón izquierdo, se quedaba la pulsación y el marco no
+llegaba a enterarse. Estando dentro, las coordenadas del ratón ya son las del
+contenido, y `preventStealing` impide que el desplazamiento robe el arrastre a
+mitad de barrido.
+
+**El foco de teclado va a la vista al pulsar.** Sin eso se queda en la última
+barra de texto que se usó —el filtro, la de direcciones— y las teclas que un
+campo de texto reclama para sí, Ctrl+A y Supr entre ellas, no llegan nunca a la
+lista aunque estén asignadas.
+
 **Lo que falta de la vista:** el diálogo de progreso y el de
 conflictos (`kara-ops` los tiene resueltos y nadie los consume), la vista
 «contenido» (Ctrl+Shift+8), y la vigilancia inotify, que tampoco tiene
 consumidor.
 
 ### Cabos sueltos conocidos
+
+- **`Shift+Supr` no está**: la spec pide borrado permanente con confirmación y
+  el backend no tiene con qué. `Supr` sí manda a la papelera.
+- **Invertir selección solo por teclado** (`Ctrl+Shift+A` / `Ctrl+Shift+I`): no
+  hay entrada de menú, que es como lo ofrece Windows.
+- **Sin consumidor todavía**: `duplicate_tab`, `drag_tab` (reordenar pestañas
+  arrastrando) y `open_focused_in_tab` existen en el puente y ninguna tecla ni
+  gesto llega a ellas.
+- **Probar el teclado obliga a XWayland.** Un `Shortcut` de Qt con contexto de
+  ventana solo dispara si la ventana está activa, y bajo Wayland una aplicación
+  no puede activarse a sí misma: `requestActivate()` no hace nada. Una prueba
+  automática de atajos bajo Wayland mide el escritorio, no a Kara. Con
+  `QT_QPA_PLATFORM=xcb` la ventana sí toma el foco.
+- **`spectacle -a` devuelve capturas rancias** cuando la ventana no está activa:
+  tres binarios distintos dieron el mismo PNG byte a byte. Comprobar el md5
+  antes de sacar conclusiones de una captura.
 
 - **Enlazado con `ld.bfd`**: el build avisa de que no hay `mold`, `lld` ni `gold`.
   Funciona, pero un `sudo apt install mold` acorta bastante el ciclo de compilación.
