@@ -23,6 +23,11 @@ fn main() {
             QmlFile::from("qml/TabStrip.qml"),
             QmlFile::from("qml/TabModeButton.qml"),
             QmlFile::from("qml/RubberBand.qml"),
+            // Prueba de extremo a extremo. Va en el módulo siempre, y solo se
+            // instancia con `--e2e`: separarla por feature obligaría a que
+            // `Main.qml` la cargara por URL y perdería la comprobación de
+            // tipos, que es justo lo que sujeta un arnés de prueba.
+            QmlFile::from("qml/E2E.qml"),
         ]),
     )
     .qt_module("Quick")

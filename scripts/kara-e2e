@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+#
+# End-to-end check: builds a fixture folder, launches Kara on it and drives the
+# live window with synthesized mouse and key events (see crates/kara-ui/qml/E2E.qml).
+#
+# Exits 0 when every check passes, 1 otherwise.
+#
+# Why XWayland: a Qt window-context `Shortcut` only fires while its window is
+# active, and under Wayland an application cannot activate itself —
+# `requestActivate()` does nothing and `win.active` stays false. Every keyboard
+# check would then measure the desktop's focus rather than Kara. Override with
+# KARA_E2E_PLATFORM if you know what you are doing.
+set -uo pipefail
+
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+fixture=${KARA_E2E_DIR:-$HOME/.cache/kara-e2e}
+platform=${KARA_E2E_PLATFORM:-xcb}
+
+# ---- Fixture ---------------------------------------------------------------
+# Nine entries, shaped so the checks can lean on them: three folders (one of
+# them empty, one holding enough files to scroll, one accented so collation is
+# exercised), a symlink, a name with spaces, and four extensions the desktop's
+# MIME database recognises.
+build_fixture() {
+    rm -rf -- "$fixture"
+    mkdir -p -- "$fixture"/{Documents,Empty,Ñandú} || return 1
+    printf '{"name":"kara","version":1}\n' > "$fixture/package.json"
+    printf '# Notes\n\nA note.\n'          > "$fixture/notes.md"
+    printf 'col1,col2\n1,2\n'              > "$fixture/data.csv"
+    printf 'plain text\n'                  > "$fixture/name with spaces.txt"
+    head -c 300000 /dev/urandom            > "$fixture/binary.bin"
+    ln -sf "$fixture/notes.md" "$fixture/link-to-notes.md"
+    printf 'placeholder\n' > "$fixture/Ñandú/placeholder.txt"
+    local i
+    for i in $(seq 1 30); do
+        printf 'file %s\n' "$i" > "$fixture/Documents/doc-$(printf %02d "$i").txt"
+    done
+}
+
+if ! build_fixture; then
+    echo "kara-e2e: could not build the fixture in $fixture" >&2
+    exit 1
+fi
+
+# ---- Run -------------------------------------------------------------------
+if ! cargo build -p kara-ui; then
+    echo "kara-e2e: build failed" >&2
+    exit 1
+fi
+
+QT_QPA_PLATFORM=$platform timeout 300 "$here/target/debug/kara-ui" "$fixture" --e2e
+status=$?
+
+if [ "$status" -eq 124 ]; then
+    echo "kara-e2e: timed out" >&2
+fi
+
+# The fixture is only kept when something failed, so there is something left to
+# look at; a green run leaves nothing behind. Undo puts back what the trash
+# checks removed, so the desktop's trash is untouched either way.
+if [ "$status" -eq 0 ]; then
+    rm -rf -- "$fixture"
+else
+    echo "kara-e2e: fixture kept at $fixture" >&2
+fi
+
+exit "$status"

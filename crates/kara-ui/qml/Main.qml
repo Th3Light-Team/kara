@@ -841,4 +841,16 @@ Window {
             win.showMaximized();
     }
 
+    // Prueba de extremo a extremo, solo con `--e2e`. Inactivo el `Loader` no
+    // crea nada, así que en un arranque normal esto no existe.
+    Loader {
+        active: Qt.application.arguments.indexOf("--e2e") >= 0
+        sourceComponent: E2E {
+            win: win
+            app: app
+            fileView: fileView
+            address: address
+            filterField: filterField
+        }
+    }
 }

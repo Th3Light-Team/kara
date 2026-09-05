@@ -79,8 +79,19 @@ Regla de capas: `ui → ops → {fs, index} → core`. Nunca al revés.
 cargo run -p kara-ui        # arrancar
 cargo test                  # tests (el grueso vive en kara-core y kara-fs)
 cargo clippy --all-targets  # antes de dar nada por terminado
+./scripts/kara-e2e          # prueba de extremo a extremo sobre la ventana viva
 ./ground/run.sh             # spike QML de referencia (datos falsos)
 ```
+
+`scripts/kara-e2e` monta una carpeta de pruebas, arranca el binario con `--e2e`
+y `crates/kara-ui/qml/E2E.qml` conduce la ventana con **entrada real**: `QtTest`
+sintetiza ratón y teclado por la ruta de reparto de Qt, así que cada
+comprobación pasa por el acierto de posición, los delegados y el mapa de
+atajos. Esa distinción no es teórica: el marco elástico se dio por bueno una vez
+comprobando los invocables del puente, y con un ratón no se podía ni empezar.
+
+El código de salida es el veredicto —el `main` devuelve lo que devuelve Qt— y
+el fixture solo se conserva cuando algo falla.
 
 Para revisar el QML hace falta apuntar a la ruta del módulo que genera cxx-qt, y
 `qmllint` no está en el `PATH` (vive en `/usr/lib/qt6/bin`):
@@ -260,6 +271,14 @@ consumidor.
 - **Sin consumidor todavía**: `duplicate_tab`, `drag_tab` (reordenar pestañas
   arrastrando) y `open_focused_in_tab` existen en el puente y ninguna tecla ni
   gesto llega a ellas.
+- **La prueba de extremo a extremo es intermitente.** En una tanda de cuatro
+  pasadas seguidas salieron 57/57, 57/57 y dos veces 37/57. El patrón es
+  siempre el mismo: la primera tecla que se pulsa **con el ratón agarrado** —el
+  Esc que cancela el marco a mitad de barrido— deja el teclado muerto para el
+  resto de la pasada, y `requestActivate()` no lo recupera. Está sin
+  diagnosticar: puede ser cosa de `QtTest` o de la ventana perdiendo el foco.
+  **Una pasada en rojo no es un veredicto**: mira si los fallos empiezan justo
+  en «D3 Esc cancels» y siguen en cascada, que es la firma del artefacto.
 - **Probar el teclado obliga a XWayland.** Un `Shortcut` de Qt con contexto de
   ventana solo dispara si la ventana está activa, y bajo Wayland una aplicación
   no puede activarse a sí misma: `requestActivate()` no hace nada. Una prueba
