@@ -40,7 +40,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::bridge::qobject::{
-    clipboard_clear, clipboard_gnome, clipboard_kde_cut, clipboard_uri_list, clipboard_write,
+    clipboard_clear, clipboard_gnome, clipboard_kde_cut, clipboard_set_text, clipboard_uri_list,
+    clipboard_write,
 };
 use crate::prefs::Prefs;
 use crate::present;
@@ -191,6 +192,16 @@ pub mod qobject {
         #[qproperty(bool, can_zoom_out)]
         #[qproperty(bool, can_zoom_in)]
         type App = super::AppRust;
+
+        /// Copia como texto la ruta de la selección, o la de la carpeta actual si
+        /// no hay nada seleccionado. Una por línea.
+        #[qinvokable]
+        fn copy_path(self: Pin<&mut App>);
+
+        /// Abre una terminal en la carpeta de la fila `row` si es una carpeta, o
+        /// en la carpeta actual si `row` es -1 o es un fichero.
+        #[qinvokable]
+        fn open_terminal_here(self: Pin<&mut App>, row: i32);
 
         /// Muestra u oculta los archivos ocultos.
         #[qinvokable]
@@ -497,6 +508,8 @@ pub mod qobject {
         fn clipboard_write(uri_list: &str, gnome: &str, cut: bool);
         #[namespace = "kara"]
         fn clipboard_clear();
+        #[namespace = "kara"]
+        fn clipboard_set_text(text: &str);
         #[namespace = "kara"]
         fn clipboard_uri_list() -> String;
         #[namespace = "kara"]
@@ -2251,6 +2264,35 @@ impl qobject::App {
             job.answer(Answer::Error(decision));
         }
         self.as_mut().set_op_state(QString::from("running"));
+    }
+
+    fn copy_path(mut self: Pin<&mut Self>) {
+        // En la papelera las filas no están en la ruta que enseña la barra.
+        if *self.in_trash() {
+            return;
+        }
+        let mut paths = self.selected_paths();
+        if paths.is_empty() {
+            paths.push(PathBuf::from(self.path().to_string()));
+        }
+        clipboard_set_text(&present::paths_as_text(&paths));
+        self.as_mut().clear_error();
+    }
+
+    fn open_terminal_here(mut self: Pin<&mut Self>, row: i32) {
+        if *self.in_trash() {
+            return;
+        }
+        let current = PathBuf::from(self.path().to_string());
+        let folder = usize::try_from(row)
+            .ok()
+            .and_then(|row| self.rust().view().visible.get(row))
+            .filter(|entry| entry.kind == EntryKind::Directory)
+            .map_or_else(|| current.clone(), |entry| current.join(&entry.name));
+        match kara_fs::open::open_terminal(&folder) {
+            Ok(()) => self.as_mut().clear_error(),
+            Err(error) => self.as_mut().report(&error.to_string()),
+        }
     }
 
     fn toggle_hidden(mut self: Pin<&mut Self>) {

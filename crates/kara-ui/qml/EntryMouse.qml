@@ -61,6 +61,21 @@ MouseArea {
             entryMenu.pinned = control.app.is_pinned(entryMenu.folder);
         }
         MenuItem {
+            text: qsTr("Abrir")
+            visible: !control.app.in_trash
+            height: visible ? implicitHeight : 0
+            onTriggered: control.app.open_entry(control.index)
+        }
+        MenuItem {
+            text: qsTr("Abrir en una pestaña nueva")
+            visible: !control.app.in_trash && (control.app.entry_dirs[control.index] ?? 0) !== 0
+            height: visible ? implicitHeight : 0
+            onTriggered: control.app.open_tab(entryMenu.folder, false)
+        }
+        MenuSeparator {
+            visible: !control.app.in_trash
+        }
+        MenuItem {
             text: qsTr("Restaurar")
             visible: control.app.in_trash
             height: visible ? implicitHeight : 0
@@ -106,6 +121,19 @@ MouseArea {
             visible: (control.app.entry_dirs[control.index] ?? 0) !== 0
             height: visible ? implicitHeight : 0
             onTriggered: control.app.toggle_pinned(entryMenu.folder)
+        }
+        MenuSeparator {}
+        MenuItem {
+            text: control.app.selected_count > 1 ? qsTr("Copiar rutas\tCtrl+Shift+C") : qsTr("Copiar ruta\tCtrl+Shift+C")
+            visible: !control.app.in_trash
+            height: visible ? implicitHeight : 0
+            onTriggered: control.app.copy_path()
+        }
+        MenuItem {
+            text: qsTr("Abrir terminal aquí")
+            visible: !control.app.in_trash
+            height: visible ? implicitHeight : 0
+            onTriggered: control.app.open_terminal_here(control.index)
         }
         MenuSeparator {}
         MenuItem {

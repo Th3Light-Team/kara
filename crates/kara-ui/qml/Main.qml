@@ -388,6 +388,11 @@ Window {
     }
     Shortcut {
         enabled: !ops.promptOpen
+        sequence: "Ctrl+Shift+C"
+        onActivated: app.copy_path()
+    }
+    Shortcut {
+        enabled: !ops.promptOpen
         sequences: ["Ctrl+H", "Alt+."]
         onActivated: app.toggle_hidden()
     }
@@ -596,6 +601,17 @@ Window {
                             checkable: true
                             checked: app.show_extensions
                             onTriggered: app.toggle_extensions()
+                        }
+                        MenuSeparator {}
+                        MenuItem {
+                            text: qsTr("Copiar ruta\tCtrl+Shift+C")
+                            enabled: !app.in_trash
+                            onTriggered: app.copy_path()
+                        }
+                        MenuItem {
+                            text: qsTr("Abrir terminal aquí")
+                            enabled: !app.in_trash
+                            onTriggered: app.open_terminal_here(-1)
                         }
                     }
                 }

@@ -67,6 +67,14 @@ void clipboard_clear()
     }
 }
 
+void clipboard_set_text(::rust::Str text)
+{
+    QClipboard *clipboard = QGuiApplication::clipboard();
+    if (clipboard != nullptr) {
+        clipboard->setText(QString::fromUtf8(text.data(), static_cast<qsizetype>(text.size())));
+    }
+}
+
 ::rust::String clipboard_uri_list() { return to_rust(format_data(URI_LIST)); }
 
 ::rust::String clipboard_gnome() { return to_rust(format_data(GNOME_COPIED)); }

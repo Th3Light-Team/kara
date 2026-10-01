@@ -26,6 +26,9 @@ void clipboard_write(::rust::Str uri_list, ::rust::Str gnome, bool cut);
 /// Empties the clipboard, after a cut has been pasted.
 void clipboard_clear();
 
+/// Puts plain text on the clipboard and nothing else: what «Copiar ruta» is.
+void clipboard_set_text(::rust::Str text);
+
 /// Whether KDE marked the current clipboard contents as a cut.
 bool clipboard_kde_cut();
 

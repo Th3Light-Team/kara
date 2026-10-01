@@ -474,6 +474,31 @@ pub fn looks_executable(name: &str) -> bool {
         .is_some_and(|(_, ext)| LAUNCHERS.iter().any(|l| ext.eq_ignore_ascii_case(l)))
 }
 
+/// Una ruta lista para pegar en una terminal o en un campo de texto.
+///
+/// Sin comillas si no hacen falta; con comillas simples si hay espacios u otro
+/// carácter que un shell interpretaría (`$`, `&`, `;`…). Las letras acentuadas
+/// no cuentan: `Ñandú` se pega tal cual.
+#[must_use]
+pub fn path_as_text(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let safe = |c: char| c.is_alphanumeric() || matches!(c, '_' | '@' | '%' | '+' | '=' | ':' | ',' | '.' | '/' | '-');
+    if !text.is_empty() && text.chars().all(safe) {
+        return text.into_owned();
+    }
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// Varias rutas, una por línea, que es lo que pide la spec.
+#[must_use]
+pub fn paths_as_text(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| path_as_text(path))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,5 +669,24 @@ mod tests {
         assert!(!looks_executable("Makefile"));
         // Un dotfile no tiene extension: el punto marca «oculto».
         assert!(!looks_executable(".sh"));
+    }
+
+    #[test]
+    fn una_ruta_sin_nada_raro_se_copia_sin_comillas() {
+        assert_eq!(path_as_text(Path::new("/home/ana/Ñandú/notas.md")), "/home/ana/Ñandú/notas.md");
+    }
+
+    #[test]
+    fn los_espacios_y_lo_que_un_shell_interpreta_llevan_comillas() {
+        assert_eq!(path_as_text(Path::new("/tmp/mi carpeta")), "'/tmp/mi carpeta'");
+        assert_eq!(path_as_text(Path::new("/tmp/a$b")), "'/tmp/a$b'");
+        // Una comilla simple dentro se cierra, se escapa y se reabre.
+        assert_eq!(path_as_text(Path::new("/tmp/it's")), "'/tmp/it'\\''s'");
+    }
+
+    #[test]
+    fn varias_rutas_van_una_por_linea() {
+        let paths = [PathBuf::from("/a"), PathBuf::from("/b c")];
+        assert_eq!(paths_as_text(&paths), "/a\n'/b c'");
     }
 }
