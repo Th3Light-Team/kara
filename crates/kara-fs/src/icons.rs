@@ -204,7 +204,43 @@ pub fn current_theme_name() -> String {
     ) {
         return theme;
     }
-    "hicolor".to_string()
+    // GNOME no escribe ninguno de los dos ficheros: guarda el tema en gsettings.
+    if let Some(theme) = gsettings_icon_theme() {
+        return theme;
+    }
+    // Sin nada configurado, un tema de verdad antes que `hicolor`, que apenas
+    // trae iconos: una máquina sin configuración de escritorio (un contenedor,
+    // un gestor de ventanas suelto) vería una lista sin iconos de carpeta.
+    let bases = base_directories();
+    FALLBACK_THEMES
+        .iter()
+        .find(|name| read_index(&bases, name).is_some())
+        .map_or_else(|| "hicolor".to_string(), |name| (*name).to_string())
+}
+
+/// Temas que se prueban, por orden, cuando el escritorio no dice cuál usa.
+const FALLBACK_THEMES: [&str; 3] = ["Adwaita", "breeze", "Humanity"];
+
+/// El tema que GNOME tiene puesto, según `gsettings`. `None` si no hay
+/// `gsettings`, si falla o si no devuelve nada utilizable.
+fn gsettings_icon_theme() -> Option<String> {
+    let output = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "icon-theme"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_gsettings_string(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// `'Adwaita'\n` → `Adwaita`. Lo que no venga entre comillas simples no es una
+/// cadena de gsettings y se descarta.
+fn parse_gsettings_string(text: &str) -> Option<String> {
+    let inner = text.trim().strip_prefix('\'')?.strip_suffix('\'')?;
+    (!inner.is_empty()).then(|| inner.to_string())
 }
 
 /// Saca una clave de una sección de un fichero tipo `.ini`.
@@ -456,5 +492,24 @@ impl Icons {
         names.push("unknown".to_string());
         names.push("text-x-generic".to_string());
         names
+    }
+}
+
+#[cfg(test)]
+mod gsettings_tests {
+    use super::parse_gsettings_string;
+
+    #[test]
+    fn a_quoted_value_is_unwrapped() {
+        assert_eq!(parse_gsettings_string("'Adwaita'\n").as_deref(), Some("Adwaita"));
+        assert_eq!(parse_gsettings_string("  'Yaru-dark' ").as_deref(), Some("Yaru-dark"));
+    }
+
+    #[test]
+    fn anything_else_is_not_a_theme_name() {
+        assert_eq!(parse_gsettings_string(""), None);
+        assert_eq!(parse_gsettings_string("''"), None);
+        assert_eq!(parse_gsettings_string("Adwaita"), None);
+        assert_eq!(parse_gsettings_string("No such key"), None);
     }
 }

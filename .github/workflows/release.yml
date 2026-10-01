@@ -29,6 +29,13 @@ jobs:
             libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
             libxcb-render-util0 libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0
 
+      - name: Desktop icon theme
+        # What a desktop session would have configured; the kara-fs icon tests
+        # read it the same way the application does.
+        run: |
+          mkdir -p ~/.config
+          printf '[Icons]\nTheme=breeze\n' > ~/.config/kdeglobals
+
       - name: Qt
         id: qt
         uses: jurplel/install-qt-action@v4

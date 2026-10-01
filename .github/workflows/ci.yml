@@ -22,6 +22,13 @@ jobs:
             libgl1-mesa-dev libxkbcommon-dev libfontconfig1-dev shared-mime-info \
             breeze-icon-theme adwaita-icon-theme
 
+      - name: Desktop icon theme
+        # What a desktop session would have configured; the kara-fs icon tests
+        # read it the same way the application does.
+        run: |
+          mkdir -p ~/.config
+          printf '[Icons]\nTheme=breeze\n' > ~/.config/kdeglobals
+
       - name: Qt
         uses: jurplel/install-qt-action@v4
         with:
