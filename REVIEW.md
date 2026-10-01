@@ -10,7 +10,7 @@ The interface is in **Spanish** for now (there is no translation layer yet).
 ## Run it
 
 You need a Linux desktop session (X11 or Wayland). Nothing else: the AppImage carries its
-own Qt.
+own Qt. On Wayland it runs through XWayland, which Plasma and GNOME both provide.
 
 ```bash
 chmod +x Kara-*-x86_64.AppImage

@@ -45,8 +45,26 @@ fetch linuxdeploy-plugin-qt https://github.com/linuxdeploy/linuxdeploy-plugin-qt
 export APPIMAGE_EXTRACT_AND_RUN=1
 # The plugin reads the QML sources to learn which modules Kara imports.
 export QML_SOURCES_PATHS="$here/crates/kara-ui/qml"
-# Kara runs on X11 and on Wayland; the plugin only ships xcb by default.
-export EXTRA_PLATFORM_PLUGINS="libqwayland-generic.so;libqwayland-egl.so"
+# Kara runs on X11 and on Wayland; the plugin only ships xcb by default. The
+# Wayland plugins come with some Qt builds and not others (the ones from the
+# online installer, which CI uses, do not have them), and naming a file that is
+# not there makes linuxdeploy fail. Ask for them only when they exist; without
+# them the AppImage still runs on a Wayland session through XWayland.
+plugins=$("$QMAKE" -query QT_INSTALL_PLUGINS)/platforms
+extra=""
+# Qt 6.10 ships one `libqwayland.so`; earlier versions the -generic and -egl pair.
+for lib in libqwayland.so libqwayland-generic.so libqwayland-egl.so; do
+    [ -e "$plugins/$lib" ] && extra="${extra:+$extra;}$lib"
+done
+if [ -n "$extra" ]; then
+    export EXTRA_PLATFORM_PLUGINS="$extra"
+    # The Wayland platform plugin loads these at run time; nothing links to them,
+    # so the deployer only copies them when asked.
+    export EXTRA_QT_PLUGINS="wayland-shell-integration;wayland-graphics-integration-client;wayland-decoration-client"
+    echo "build-appimage: bundling Wayland platform plugins: $extra"
+else
+    echo "build-appimage: this Qt has no Wayland platform plugin; the AppImage will use XWayland on Wayland sessions"
+fi
 export LINUXDEPLOY_OUTPUT_VERSION="$version"
 export PATH="$tools:$PATH"
 
