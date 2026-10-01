@@ -158,6 +158,16 @@ pub mod qobject {
         #[qproperty(bool, can_zoom_in)]
         type App = super::AppRust;
 
+        /// Abre la entrada visible `row`: una carpeta se entra, un fichero se
+        /// entrega a la aplicación que el escritorio tenga asociada. Dentro de
+        /// la papelera no hace nada: lo que se ve allí no está en esa ruta.
+        #[qinvokable]
+        fn open_entry(self: Pin<&mut App>, row: i32);
+
+        /// Abre el elemento con el cursor, que es lo que hace Enter.
+        #[qinvokable]
+        fn open_focused(self: Pin<&mut App>);
+
         /// Entra en una subcarpeta de la actual. Si no se puede listar, no se
         /// mueve: dejar la ruta apuntando a un sitio ilegible dejaria la vista
         /// vacia sin forma de volver.
@@ -2477,6 +2487,40 @@ impl qobject::App {
                 .invalidate(&target);
         }
         self.publish_history();
+    }
+
+    fn open_entry(mut self: Pin<&mut Self>, row: i32) {
+        if *self.in_trash() {
+            return;
+        }
+        let Ok(row) = usize::try_from(row) else {
+            return;
+        };
+        let current = PathBuf::from(self.path().to_string());
+        let Some((target, is_dir)) = self.rust().view().visible.get(row).map(|entry| {
+            (
+                current.join(&entry.name),
+                matches!(entry.kind, kara_core::entry::EntryKind::Directory),
+            )
+        }) else {
+            return;
+        };
+
+        if is_dir {
+            self.as_mut().navigate_to(&target);
+            return;
+        }
+        match kara_fs::open::open(&target) {
+            Ok(()) => self.as_mut().clear_error(),
+            Err(error) => self.as_mut().report(&error.to_string()),
+        }
+    }
+
+    fn open_focused(mut self: Pin<&mut Self>) {
+        let focused = self.rust().view().selection.focused();
+        if let Some(row) = focused.and_then(|row| i32::try_from(row).ok()) {
+            self.as_mut().open_entry(row);
+        }
     }
 
     fn cd(mut self: Pin<&mut Self>, name: &QString) {

@@ -47,10 +47,7 @@ MouseArea {
     // Si es carpeta lo dice el modelo, no la columna «Tipo»: ese texto es una
     // descripción traducida del sistema y compararla ata el comportamiento al
     // idioma.
-    onDoubleClicked: {
-        if ((control.app.entry_dirs[control.index] ?? 0) !== 0)
-            control.app.cd(control.app.entry_names[control.index]);
-    }
+    onDoubleClicked: control.app.open_entry(control.index)
 
     Menu {
         id: entryMenu

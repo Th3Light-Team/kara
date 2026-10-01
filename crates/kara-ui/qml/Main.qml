@@ -98,6 +98,15 @@ Window {
         }
     }
     Shortcut {
+        // Enter abre lo que tiene el cursor. Un campo de texto con el foco
+        // —el filtro, las direcciones, el editor de renombrado— usa Enter
+        // para confirmar lo suyo, y un atajo de ventana se lo quitaría.
+        sequences: ["Return", "Enter"]
+        enabled: !(win.activeFocusItem && win.activeFocusItem.hasOwnProperty("cursorPosition"))
+        onActivated: app.open_focused()
+    }
+
+    Shortcut {
         // La papelera, nunca el borrado: `Shift+Supr` pide un borrado
         // permanente que el backend todavía no tiene.
         sequence: "Delete"

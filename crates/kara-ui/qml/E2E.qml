@@ -335,6 +335,10 @@ Item {
                 e2e.ok("F4 Alt+Right goes forward", e2e.app.path.endsWith("/Documents"), e2e.app.path);
                 key(Qt.Key_Up, Qt.AltModifier);
                 e2e.ok("F5 Alt+Up goes up", e2e.app.path === root, e2e.app.path);
+                click(e2e.rowPoint(e2e.indexOf("Documents")));
+                key(Qt.Key_Return);
+                e2e.ok("F6 Enter opens the folder under the cursor", e2e.app.path.endsWith("/Documents"), e2e.app.path);
+                key(Qt.Key_Up, Qt.AltModifier);
             });
 
             // ---- Name filter ---------------------------------------------------
