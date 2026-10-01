@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+#
+# Builds a folder of awkward-but-realistic files to try Kara on, so a reviewer
+# does not have to invent their own: accents and spaces, hidden files, a folder
+# that scrolls, two folders that collide on paste, files that cannot be copied
+# or deleted, images for thumbnails.
+#
+# Usage: scripts/kara-sample [--big] [--many] [--force] [target]
+#   target   where to create it (default: ~/kara-sample)
+#   --big    also create a 400 MB file, to watch the progress dialog
+#   --many   also create a folder with 20 000 files, to try a large listing
+#   --force  replace an earlier sample (only ever one made by this script)
+set -euo pipefail
+
+big=0 many=0 force=0 target=""
+for arg in "$@"; do
+    case $arg in
+        --big) big=1 ;;
+        --many) many=1 ;;
+        --force) force=1 ;;
+        -*) echo "kara-sample: unknown option $arg" >&2; exit 2 ;;
+        *) target=$arg ;;
+    esac
+done
+target=${target:-$HOME/kara-sample}
+marker=$target/.kara-sample
+
+if [ -e "$target" ]; then
+    # Only a folder this script made is ever removed.
+    if [ "$force" -eq 1 ] && [ -f "$marker" ]; then
+        chmod -R u+rwX "$target" 2>/dev/null || true
+        rm -rf -- "$target"
+    else
+        echo "kara-sample: $target already exists (use --force to rebuild a previous sample)" >&2
+        exit 1
+    fi
+fi
+
+mkdir -p "$target"
+touch "$marker"
+cd "$target"
+
+# ---- A folder long enough to scroll ----------------------------------------
+mkdir Documents
+for i in $(seq 1 60); do
+    printf 'Document number %s\n' "$i" > "Documents/doc-$(printf %02d "$i").txt"
+done
+
+# ---- Names that tend to break file managers --------------------------------
+mkdir Names
+(
+    cd Names
+    printf 'plain text\n' > "name with spaces.txt"
+    printf '# Ñandú\n' > "Ñandú.md"
+    printf 'long\n' > "a-very-long-file-name-that-keeps-going-and-going-until-it-no-longer-fits-in-any-column-width-you-might-pick.txt"
+    printf 'dotfile\n' > ".hidden-file"
+    mkdir .hidden-dir
+    printf 'listed in .hidden\n' > "not-a-dotfile-but-hidden.txt"
+    printf 'not-a-dotfile-but-hidden.txt\n' > .hidden
+    printf 'harmless text, named like a trap\n' > "invoice.pdf.exe"
+    printf '#!/bin/sh\necho hello\n' > "script.sh"; chmod +x script.sh
+    printf 'readme\n' > README
+    printf 'one\n' > one.txt && tar czf archive.tar.gz one.txt && rm one.txt
+    printf 'a "quote" and a $dollar\n' > 'weird "name" $HOME.txt'
+)
+
+# ---- Two folders that collide when you paste one onto the other -------------
+mkdir -p Conflicts/from/shared Conflicts/to/shared
+printf 'NEW version\n' > Conflicts/from/report.txt
+printf 'OLD version, older and longer than the other\n' > Conflicts/to/report.txt
+touch -d '2020-01-01' Conflicts/to/report.txt
+printf 'only in from\n' > Conflicts/from/shared/a.txt
+printf 'only in to\n' > Conflicts/to/shared/b.txt
+printf 'also in to\n' > Conflicts/to/shared/a.txt
+printf 'a file\n' > Conflicts/from/same-name
+mkdir Conflicts/to/same-name           # file onto folder: should not resolve itself
+
+# ---- Things that fail ---------------------------------------------------------
+mkdir Errors
+printf 'you cannot read me\n' > Errors/unreadable.txt
+chmod 000 Errors/unreadable.txt         # copying it fails; the batch must go on
+mkdir Errors/read-only-folder
+printf 'protected\n' > Errors/read-only-folder/inside.txt
+chmod 555 Errors/read-only-folder       # pasting or deleting inside it fails
+printf 'fine\n' > Errors/fine-1.txt
+printf 'fine\n' > Errors/fine-2.txt
+
+# ---- Images, for thumbnails -----------------------------------------------------
+mkdir Pictures
+if command -v python3 >/dev/null 2>&1; then
+    python3 - <<'PY'
+import struct, zlib
+
+def png(path, w, h, colour):
+    rows = b"".join(
+        b"\x00" + b"".join(bytes(colour(x, y, w, h)) for x in range(w)) for y in range(h)
+    )
+    def chunk(tag, data):
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n")
+        f.write(chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)))
+        f.write(chunk(b"IDAT", zlib.compress(rows)))
+        f.write(chunk(b"IEND", b""))
+
+png("Pictures/gradient-red.png", 400, 300, lambda x, y, w, h: (255 * x // w, 40, 40))
+png("Pictures/gradient-green.png", 300, 400, lambda x, y, w, h: (40, 255 * y // h, 40))
+png("Pictures/gradient-blue.png", 640, 360, lambda x, y, w, h: (40, 60, 255 * (x + y) // (w + h)))
+png("Pictures/checker.png", 256, 256, lambda x, y, w, h: (230, 230, 230) if (x // 32 + y // 32) % 2 else (30, 30, 30))
+PY
+else
+    echo "kara-sample: python3 not found, Pictures/ left empty" >&2
+fi
+
+# ---- Something to delete without regret ----------------------------------------------
+mkdir -p Disposable/nested/deeper
+for i in 1 2 3; do printf 'bye\n' > "Disposable/file-$i.txt"; done
+printf 'bye\n' > Disposable/nested/deeper/leaf.txt
+
+# ---- Optional: size ------------------------------------------------------------------------
+if [ "$big" -eq 1 ]; then
+    mkdir Big
+    echo "kara-sample: writing a 400 MB file..." >&2
+    head -c 400000000 /dev/urandom > Big/four-hundred-megabytes.bin
+fi
+if [ "$many" -eq 1 ]; then
+    mkdir Many
+    echo "kara-sample: creating 20 000 files..." >&2
+    ( cd Many && seq 1 20000 | sed 's/^/file-/; s/$/.txt/' | xargs touch )
+fi
+
+echo "kara-sample: ready in $target"
+echo "  open it with:  ./Kara-*.AppImage \"$target\""

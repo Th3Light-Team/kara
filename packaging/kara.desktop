@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Kara
+GenericName=File Manager
+Comment=A file explorer with the feel of Windows 11, built for Linux
+Exec=kara-ui %f
+Icon=kara
+Terminal=false
+Categories=System;FileTools;FileManager;
+MimeType=inode/directory;

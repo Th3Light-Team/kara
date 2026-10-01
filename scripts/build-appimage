@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+#
+# Builds Kara as a single-file AppImage that carries its own Qt, so whoever
+# runs it needs nothing installed beyond a desktop session.
+#
+# Needs: a release build of kara-ui (`cargo build --release -p kara-ui`), the Qt
+# that build was linked against, and network access the first time (it fetches
+# linuxdeploy). `QMAKE` must point at that Qt's qmake; the plugin uses it to
+# find which Qt libraries, plugins and QML modules to copy in.
+#
+# Usage: scripts/build-appimage [version]
+# Output: dist/Kara-<version>-x86_64.AppImage and dist/SHA256SUMS
+set -euo pipefail
+
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+version=${1:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$here/Cargo.toml" | head -1)}
+tools=${KARA_TOOLS_DIR:-$here/target/appimage-tools}
+out=$here/dist
+
+if [ ! -x "$here/target/release/kara-ui" ]; then
+    echo "build-appimage: target/release/kara-ui is missing; run 'cargo build --release -p kara-ui' first" >&2
+    exit 1
+fi
+if [ -z "${QMAKE:-}" ]; then
+    QMAKE=$(command -v qmake6 || command -v qmake || true)
+fi
+if [ -z "${QMAKE:-}" ]; then
+    echo "build-appimage: set QMAKE to the qmake of the Qt this build used" >&2
+    exit 1
+fi
+export QMAKE
+
+mkdir -p "$tools" "$out"
+fetch() {
+    local name=$1 url=$2
+    if [ ! -x "$tools/$name" ]; then
+        curl -fsSL -o "$tools/$name" "$url"
+        chmod +x "$tools/$name"
+    fi
+}
+fetch linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+fetch linuxdeploy-plugin-qt https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+
+# AppImages need FUSE to run; build machines usually do not have it.
+export APPIMAGE_EXTRACT_AND_RUN=1
+# The plugin reads the QML sources to learn which modules Kara imports.
+export QML_SOURCES_PATHS="$here/crates/kara-ui/qml"
+# Kara runs on X11 and on Wayland; the plugin only ships xcb by default.
+export EXTRA_PLATFORM_PLUGINS="libqwayland-generic.so;libqwayland-egl.so"
+export LINUXDEPLOY_OUTPUT_VERSION="$version"
+export PATH="$tools:$PATH"
+
+rm -rf "$here/AppDir"
+cd "$out"
+"$tools/linuxdeploy" \
+    --appdir "$here/AppDir" \
+    --executable "$here/target/release/kara-ui" \
+    --desktop-file "$here/packaging/kara.desktop" \
+    --icon-file "$here/packaging/kara.svg" \
+    --icon-filename kara \
+    --plugin qt \
+    --output appimage
+
+# linuxdeploy names it after the desktop file's Name.
+produced=$(ls -t Kara*.AppImage | head -1)
+wanted="Kara-${version}-x86_64.AppImage"
+[ "$produced" = "$wanted" ] || mv -f "$produced" "$wanted"
+sha256sum "$wanted" > SHA256SUMS
+echo "build-appimage: $out/$wanted"

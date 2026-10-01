@@ -158,6 +158,21 @@ liberar bloquea el árbol hasta que caduque el TTL.
 - El listado de un directorio nunca bloquea la UI, ni con 100 k entradas ni con un
   volumen de red colgado.
 
+## Entrega para revisión (rama `mvp`)
+
+La rama `mvp` es una versión acotada que un revisor puede probar sin compilar.
+`REVIEW.md` es su guion de prueba y también el texto de la release.
+
+```bash
+scripts/kara-sample                 # carpeta de pruebas para el revisor (--big, --many)
+scripts/build-appimage [versión]    # AppImage con Qt dentro → dist/
+```
+
+`.github/workflows/release.yml` construye el AppImage y lo adjunta a la release
+cuando se empuja una etiqueta `v*` (con guion = pre-release); `ci.yml` pasa tests
+y clippy en cada push. **El workflow y el AppImage no se han podido probar en
+local**: la primera ejecución en GitHub es su primera prueba real.
+
 ## Estado
 
 **Backend: los cuatro pilares en pie.** `kara-core` (ordenación con collation,

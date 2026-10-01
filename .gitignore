@@ -17,3 +17,7 @@
 
 # Worktrees de los agentes: son repos aparte, no contenido del proyecto.
 .claude/worktrees/
+
+# Salida del empaquetado (scripts/build-appimage)
+/dist/
+/AppDir/
