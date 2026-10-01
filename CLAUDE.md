@@ -102,6 +102,45 @@ Para revisar el QML hace falta apuntar a la ruta del módulo que genera cxx-qt, 
 
 Sin el `-I` falla con "Failed to import com.kara.ui", que es un falso positivo.
 
+## Tests: gotchas
+
+- `crates/kara-fs/tests/*` are hash-checked by the `kara-tdd` checkpoints: add
+  tests in NEW files, never edit an existing one.
+- `kara-fs` sources must contain no `unwrap`/`expect`/`panic!` — test `cb_27`
+  scans every line, `#[cfg(test)]` modules included. Write fs tests as
+  `-> io::Result<()>` with `?`.
+- A test that trashes anything must point `XDG_DATA_HOME` at a tempdir first;
+  otherwise it leaves `/tmp/.Trash-<uid>` (/tmp is tmpfs here) and `trash_volume`
+  refuses to run beside it.
+- `trash_volume` needs /tmp and the tree on different devices; CI mounts a tmpfs.
+- Tests that change environment variables go alone in their own file
+  (`icon_theme_choice.rs`): the test binary runs them in parallel threads.
+- A passing test proves little: break the invariant on purpose once and see it
+  fail (done for «a move never deletes what it failed to copy»).
+- Not unit-testable: `bridge.rs` (needs Qt). Keep logic in `kara-core/-fs/-ops`
+  and `present.rs` so it can be.
+
+## QML and window gotchas
+
+- Dialogs: bind `visible` to the state (`visible: app.op_state === "conflict"`).
+  Opening/closing from a signal handler that asks `.opened` is wrong during the
+  animation: a quick answer left a modal up forever.
+- A `Shortcut` takes the key before the focused item: every window shortcut has
+  `enabled: !ops.promptOpen`, and a dialog's Esc is a `Keys.onEscapePressed` on
+  its `contentItem`, not on the `Dialog`.
+- Worker→UI events: `qt_thread().queue(...)` in the bridge, with a request number
+  so stale results are dropped (`list_request`).
+
+## Environment notes
+
+- Never `pkill -f <pattern>` from the shell tool: the pattern matches its own
+  command line and kills it. Kill by PID.
+- Icon theme: KDE (`kdeglobals`) → GTK `settings.ini` → `gsettings` →
+  Adwaita/breeze; GNOME writes none of the files.
+- MIME lookup uses a suffix index (`suffix_index`); 100 000 entries went 1.37 s →
+  0.25 s. To measure UI-thread cost: release build, `QT_QPA_PLATFORM=offscreen`,
+  temporary `eprintln!` timers, then remove them.
+
 ## Concurrencia: el lock del árbol
 
 Más de un proceso puede escribir aquí: los workflows `kara-tdd`, que lanzan
@@ -158,22 +197,24 @@ liberar bloquea el árbol hasta que caduque el TTL.
 - El listado de un directorio nunca bloquea la UI, ni con 100 k entradas ni con un
   volumen de red colgado.
 
-## Entrega para revisión (rama `mvp`)
+## Review delivery (`mvp` branch)
 
-La rama `mvp` es una versión acotada que un revisor puede probar sin compilar.
-`REVIEW.md` es su guion de prueba y también el texto de la release.
+`REVIEW.md` is the reviewer's script and the release text. `scripts/kara-sample`
+builds the test folder (`--big`, `--many`); `scripts/build-appimage [version]`
+bundles Qt with linuxdeploy into `dist/`.
 
-```bash
-scripts/kara-sample                 # carpeta de pruebas para el revisor (--big, --many)
-scripts/build-appimage [versión]    # AppImage con Qt dentro → dist/
-```
-
-`.github/workflows/release.yml` construye el AppImage y lo adjunta a la release
-cuando se empuja una etiqueta `v*` (con guion = pre-release); `ci.yml` pasa tests
-y clippy en cada push. El workflow ya construye y publica; al bajar el primer AppImage se
-comprobó que arranca en X11 y que **abortaba en Wayland nativo** (falta la
-integración gráfica de Wayland en el Qt de CI), por eso `packaging/AppRun` fija
-`QT_QPA_PLATFORM=xcb` por defecto.
+- Release: push a tag `v0.1.0-mvp.N`; the hyphen makes it a pre-release. A failed
+  run is fixed with a NEW tag, never by moving one; old releases/tags are deleted
+  only when asked.
+- The AppImage ships only the X11 platform plugin and `packaging/AppRun` sets
+  `QT_QPA_PLATFORM=xcb`: the CI Qt lacks Wayland graphics integration and a
+  native-Wayland launch aborted. (Qt 6.10 names the plugin `libqwayland.so`.)
+  Built on Ubuntu 24.04, so it needs its glibc or newer; x86_64 only.
+- Always download the published AppImage and launch it (`env -u QT_QPA_PLATFORM`,
+  look for the window with `xwininfo -root -tree`): CI green does not mean it starts.
+- Push with `GIT_ASKPASS` reading the token file; never put the token in a remote
+  URL or print it. Check runs through the Actions API.
+- CI needs: an icon theme + `~/.config/kdeglobals`, a tmpfs on /tmp, `-D warnings`.
 
 ## Estado
 
@@ -274,10 +315,8 @@ barra de texto que se usó —el filtro, la de direcciones— y las teclas que u
 campo de texto reclama para sí, Ctrl+A y Supr entre ellas, no llegan nunca a la
 lista aunque estén asignadas.
 
-**Lo que falta de la vista:** el diálogo de progreso y el de
-conflictos (`kara-ops` los tiene resueltos y nadie los consume), la vista
-«contenido» (Ctrl+Shift+8), y la vigilancia inotify, que tampoco tiene
-consumidor.
+**Still missing:** the «contenido» view (Ctrl+Shift+8), inotify consumption
+(`Watcher` has no consumer), recursive search, drag and drop, compress/extract.
 
 ### Cabos sueltos conocidos
 
@@ -292,8 +331,10 @@ consumidor.
   Esc que cancela el marco a mitad de barrido— deja el teclado muerto para el
   resto de la pasada, y `requestActivate()` no lo recupera. Está sin
   diagnosticar: puede ser cosa de `QtTest` o de la ventana perdiendo el foco.
-  **Una pasada en rojo no es un veredicto**: mira si los fallos empiezan justo
-  en «D3 Esc cancels» y siguen en cascada, que es la firma del artefacto.
+  **A red run is not a verdict.** The cascade can start at D3, E4 or later, and in
+  one session most runs hit it. Do NOT loop `kara-e2e` hoping for green: verify
+  with `cargo test` + `qmllint`, run e2e once, and report it as «unverified» if it
+  cascades. A stray modal overlay also kills keys and mouse (`Overlay.overlay.visible`).
 - **Probar el teclado obliga a XWayland.** Un `Shortcut` de Qt con contexto de
   ventana solo dispara si la ventana está activa, y bajo Wayland una aplicación
   no puede activarse a sí misma: `requestActivate()` no hace nada. Una prueba
@@ -305,10 +346,12 @@ consumidor.
 
 - **Enlazado con `ld.bfd`**: el build avisa de que no hay `mold`, `lld` ni `gold`.
   Funciona, pero un `sudo apt install mold` acorta bastante el ciclo de compilación.
-- **Todo el I/O de listado es síncrono**, y desplegar el panel lo multiplica por
-  la profundidad de la ruta. Una carpeta enorme o un volumen de red colgado
-  bloquean la ventana. La spec lo prohíbe explícitamente: el listado asíncrono
-  es trabajo pendiente, no un detalle.
+- **Listing is async, but not everywhere.** Navigate/back/forward/refresh and the
+  tree's branches read on a worker (`request_listing`, `request_children`);
+  sort/filter/columns repaint from the tab's in-memory `raw` listing. Still
+  synchronous on purpose: the startup folder, and `render_fresh` after Kara itself
+  changed a folder (create/rename/undo). Preparing 100 000 entries still holds the
+  UI ~250 ms (release build): moving `snapshot` off-thread is the next step.
 - **El binario `qml` de Qt no está**: `qt6-declarative-dev-tools` trae `qmllint`,
   `qmlformat` y `qmlls`, pero no el runtime suelto. Irrelevante para Kara (cxx-qt
   embebe el motor); solo afecta a `ground/run.sh`, que cae a PyQt6.
