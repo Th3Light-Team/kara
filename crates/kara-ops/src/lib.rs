@@ -14,6 +14,7 @@ pub mod batch;
 pub mod clock;
 pub mod progress;
 pub mod queue;
+pub mod runner;
 pub mod undo;
 pub mod conflict;
 

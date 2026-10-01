@@ -34,40 +34,67 @@ Window {
 
     // ---- Atajos (ground/spec/07-atajos-teclado.md) --------------------------
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequences: ["Ctrl+L", "Alt+D", "F4"]
         onActivated: address.startEditing()
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Alt+Left"
         onActivated: app.back()
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Alt+Right"
         onActivated: app.forward()
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Alt+Up"
         onActivated: app.up()
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequences: ["F5", "Ctrl+R"]
         onActivated: app.reload()
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+F"
         onActivated: filterField.forceActiveFocus()
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "F9"
         onActivated: app.toggle_sidebar()
     }
 
     // ---- Selección (ground/spec/07-atajos-teclado.md, «Selección») --------
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+A"
         onActivated: app.select_all()
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequences: ["Ctrl+Shift+A", "Ctrl+Shift+I"]
         onActivated: app.invert_selection()
     }
@@ -81,7 +108,7 @@ Window {
         // foco, así que si esto estuviera siempre activo, Esc dejaría de
         // limpiar el filtro y de cerrar la barra de direcciones, y el foco se
         // quedaría dentro del campo comiéndose Ctrl+A y Supr.
-        enabled: !address.editing && !filterField.activeFocus
+        enabled: !ops.promptOpen && !address.editing && !filterField.activeFocus
         onActivated: {
             // El Loader no declara el tipo de lo que carga y las dos vistas no
             // comparten un tipo común: se pregunta a la que esté puesta, con el
@@ -102,11 +129,14 @@ Window {
         // —el filtro, las direcciones, el editor de renombrado— usa Enter
         // para confirmar lo suyo, y un atajo de ventana se lo quitaría.
         sequences: ["Return", "Enter"]
-        enabled: !(win.activeFocusItem && win.activeFocusItem.hasOwnProperty("cursorPosition"))
+        enabled: !ops.promptOpen && !(win.activeFocusItem && win.activeFocusItem.hasOwnProperty("cursorPosition"))
         onActivated: app.open_focused()
     }
 
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         // La papelera, nunca el borrado: `Shift+Supr` pide un borrado
         // permanente que el backend todavía no tiene.
         sequence: "Delete"
@@ -117,48 +147,81 @@ Window {
     // los cuatro tamaños de icono, 5 lista, 6 detalles, 7 mosaico. Falta el 8,
     // «contenido», que todavía no existe.
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+Shift+1"
         onActivated: app.set_view(3, 256)
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+Shift+2"
         onActivated: app.set_view(3, 128)
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+Shift+3"
         onActivated: app.set_view(3, 96)
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+Shift+4"
         onActivated: app.set_view(3, 48)
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+Shift+5"
         onActivated: app.set_view(1, 0)
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+Shift+6"
         onActivated: app.set_view(0, 0)
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+Shift+7"
         onActivated: app.set_view(2, 0)
     }
 
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequences: ["Ctrl++", "Ctrl+="]
         onActivated: app.zoom_in()
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+-"
         onActivated: app.zoom_out()
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+0"
         onActivated: app.reset_zoom()
     }
 
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+1"
         onActivated: {
             app.use_focus_mode(false);
@@ -166,6 +229,9 @@ Window {
         }
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+2"
         onActivated: {
             app.use_focus_mode(false);
@@ -173,6 +239,9 @@ Window {
         }
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+3"
         onActivated: {
             app.use_focus_mode(false);
@@ -180,6 +249,9 @@ Window {
         }
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+4"
         onActivated: {
             app.use_focus_mode(false);
@@ -187,6 +259,9 @@ Window {
         }
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+5"
         onActivated: {
             app.use_focus_mode(false);
@@ -194,6 +269,9 @@ Window {
         }
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+6"
         onActivated: {
             app.use_focus_mode(false);
@@ -201,6 +279,9 @@ Window {
         }
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+7"
         onActivated: {
             app.use_focus_mode(false);
@@ -208,6 +289,9 @@ Window {
         }
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+8"
         onActivated: {
             app.use_focus_mode(false);
@@ -215,6 +299,9 @@ Window {
         }
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         // El 9 va a la última, esté donde esté, como en los navegadores.
         sequence: "Ctrl+9"
         onActivated: {
@@ -223,6 +310,9 @@ Window {
         }
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+T"
         onActivated: {
             // Abrir una pestaña en modo concentración la dejaría escondida.
@@ -231,10 +321,16 @@ Window {
         }
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+W"
         onActivated: app.close_tab(app.active_tab)
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+Shift+T"
         onActivated: {
             app.use_focus_mode(false);
@@ -242,38 +338,65 @@ Window {
         }
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequences: ["Ctrl+Tab", "Ctrl+PgDown"]
         onActivated: app.next_tab()
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequences: ["Ctrl+Shift+Tab", "Ctrl+PgUp"]
         onActivated: app.previous_tab()
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+C"
         onActivated: app.copy_selection()
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+X"
         onActivated: app.cut_selection()
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+V"
         onActivated: app.paste()
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+Z"
         onActivated: app.undo()
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequences: ["Ctrl+Y", "Ctrl+Shift+Z"]
         onActivated: app.redo()
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "Ctrl+Shift+N"
         onActivated: app.create_folder(qsTr("Nueva carpeta"))
     }
     Shortcut {
+        // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
+        // ni Ctrl+V deben llegar a la vista que hay debajo.
+        enabled: !ops.promptOpen
         sequence: "F2"
         onActivated: {
             // El editor en línea vive en la vista de detalles; en las rejillas
@@ -731,6 +854,16 @@ Window {
                 // recortada por el filtro parece una carpeta pequeña.
                 text: app.entry_count === app.total_count ? qsTr("%1 elementos").arg(app.total_count) : qsTr("%1 de %2 elementos").arg(app.entry_count).arg(app.total_count)
             }
+        }
+    }
+
+    OperationDialog {
+        id: ops
+        app: app
+        onReleased: {
+            const view = fileView.item as Item;
+            if (view)
+                view.forceActiveFocus();
         }
     }
 

@@ -148,6 +148,30 @@ pub mod qobject {
         /// Lo último que salió mal, para enseñarlo. Vacía si no hay nada
         /// pendiente de contar: ninguna operación puede fallar en silencio.
         #[qproperty(QString, last_error)]
+        /// Estado de la operación de copiar o mover: vacío si no hay ninguna,
+        /// `calculating`, `running`, `conflict`, `failure` o `summary`.
+        #[qproperty(QString, op_state)]
+        #[qproperty(QString, op_title)]
+        /// El elemento en curso.
+        #[qproperty(QString, op_current)]
+        /// Fracción hecha, o -1 si todavía no se sabe.
+        #[qproperty(f64, op_progress)]
+        /// Cuenta, velocidad y tiempo restante en una línea.
+        #[qproperty(QString, op_detail)]
+        /// Conflicto: nombre del elemento, y cómo son el entrante y el que ya
+        /// está. Fallo: la ruta que falló.
+        #[qproperty(QString, op_name)]
+        #[qproperty(QString, op_incoming)]
+        #[qproperty(QString, op_existing)]
+        /// Fallo: por qué. Resumen: qué no salió, una línea por elemento.
+        #[qproperty(QString, op_reason)]
+        /// Conflicto: si entre estas dos carpetas se puede combinar.
+        #[qproperty(bool, op_can_merge)]
+        /// Conflicto entre un fichero y una carpeta: casi siempre es un error
+        /// de destino, y el diálogo lo dice.
+        #[qproperty(bool, op_mixed_kinds)]
+        /// Fallo: si reintentar puede servir de algo.
+        #[qproperty(bool, op_can_retry)]
         /// Modo de vista actual, como el ordinal de `kara_core::view::ViewMode`:
         /// 0 detalles, 1 lista, 2 mosaico, 3 iconos.
         #[qproperty(i32, view_mode)]
@@ -157,6 +181,23 @@ pub mod qobject {
         #[qproperty(bool, can_zoom_out)]
         #[qproperty(bool, can_zoom_in)]
         type App = super::AppRust;
+
+        /// Responde al conflicto abierto: `skip`, `keep_both`, `replace` o
+        /// `merge`, y si vale para todos los que queden de su clase.
+        #[qinvokable]
+        fn answer_conflict(self: Pin<&mut App>, resolution: &QString, apply_to_all: bool);
+
+        /// Responde al fallo abierto: `retry`, `skip`, `skip_all` o `cancel`.
+        #[qinvokable]
+        fn answer_failure(self: Pin<&mut App>, decision: &QString);
+
+        /// Para el trabajo en curso después del fichero que se esté copiando.
+        #[qinvokable]
+        fn cancel_operation(self: Pin<&mut App>);
+
+        /// Cierra el resumen final.
+        #[qinvokable]
+        fn dismiss_summary(self: Pin<&mut App>);
 
         /// Abre la entrada visible `row`: una carpeta se entra, un fichero se
         /// entrega a la aplicación que el escritorio tenga asociada. Dentro de
@@ -451,6 +492,17 @@ pub mod qobject {
     }
 }
 
+/// La línea de detalle de la barra de progreso: «12 elementos · 35,2 MB/s ·
+/// Aprox. 2 min».
+fn progress_detail(meter: &kara_ops::Meter) -> String {
+    let mut parts = vec![format!("{} elementos", meter.items_done())];
+    if let Some(speed) = meter.bytes_per_second() {
+        parts.push(format!("{}/s", present::format_size(speed as u64)));
+    }
+    parts.push(kara_ops::humanize(meter.eta()));
+    parts.join(" · ")
+}
+
 /// Lo que cada pestaña tiene para ella sola.
 ///
 /// El historial no está aquí: lo lleva `kara_core::tabs::Tab`, que ya lo posee.
@@ -535,6 +587,27 @@ pub struct AppRust {
     undo_label: QString,
     redo_label: QString,
     last_error: QString,
+    op_state: QString,
+    op_title: QString,
+    op_current: QString,
+    op_progress: f64,
+    op_detail: QString,
+    op_name: QString,
+    op_incoming: QString,
+    op_existing: QString,
+    op_reason: QString,
+    op_can_merge: bool,
+    op_mixed_kinds: bool,
+    op_can_retry: bool,
+    /// El trabajo de copiar o mover en marcha, si lo hay.
+    paste_job: Option<kara_ops::runner::Handle>,
+    /// Velocidad y ETA del trabajo en marcha.
+    paste_meter: kara_ops::Meter,
+    paste_clock: Instant,
+    paste_destination: PathBuf,
+    /// Si el portapapeles hay que vaciarlo cuando el trabajo acabe: un corte es
+    /// de un solo uso.
+    paste_clears_clipboard: bool,
     view_mode: i32,
     icon_size: i32,
     can_zoom_out: bool,
@@ -648,6 +721,23 @@ impl Default for AppRust {
             undo_label: QString::default(),
             redo_label: QString::default(),
             last_error: QString::default(),
+            op_state: QString::default(),
+            op_title: QString::default(),
+            op_current: QString::default(),
+            op_progress: -1.0,
+            op_detail: QString::default(),
+            op_name: QString::default(),
+            op_incoming: QString::default(),
+            op_existing: QString::default(),
+            op_reason: QString::default(),
+            op_can_merge: false,
+            op_mixed_kinds: false,
+            op_can_retry: false,
+            paste_job: None,
+            paste_meter: kara_ops::Meter::measuring(),
+            paste_clock: Instant::now(),
+            paste_destination: PathBuf::new(),
+            paste_clears_clipboard: false,
             // Del fichero de ajustes, no de la constante: el modo que el
             // usuario dejó puesto tiene que estar aplicado ya en el primer
             // fotograma. `render` lo restaura al navegar, pero al arrancar
@@ -1814,6 +1904,14 @@ impl qobject::App {
     }
 
     fn paste(mut self: Pin<&mut Self>) {
+        // Un trabajo a la vez: pegar mientras otro corre mezclaría dos
+        // diálogos sobre las mismas propiedades.
+        if self.rust().paste_job.is_some() {
+            self.as_mut()
+                .report("Ya hay una operación en curso; espera a que termine.");
+            return;
+        }
+
         let uri_list = clipboard_uri_list();
         let gnome = clipboard_gnome();
         let cut_marker = clipboard_kde_cut();
@@ -1829,71 +1927,210 @@ impl qobject::App {
         };
 
         let destination = PathBuf::from(self.path().to_string());
-        let mut failures = Vec::new();
-        let mut done: Vec<Action> = Vec::new();
-
-        for source in &state.paths {
-            // `paste_target` decide si esto se pega: devuelve `None` para un
-            // corte en su propia carpeta, que no es un error sino un gesto sin
-            // efecto. El nombre que calcula no se usa —`copy_to` y `move_to`
-            // resuelven el suyo con la política— pero se le da un `exists` de
-            // verdad para que la decisión sea la que el dominio tomaría.
-            let target = state.paste_target(source, &destination, |name| {
-                destination.join(name).exists()
-            });
-            if target.is_none() {
-                continue;
-            }
-
-            // `KeepBoth`: sin diálogo de conflictos todavía, conservar los dos
-            // es la única opción que no puede destruir nada. Cuando el diálogo
-            // exista, aquí se preguntará.
-            let outcome = if state.is_cut() {
-                kara_fs::move_to(source, &destination, ConflictPolicy::KeepBoth).map(|moved| {
-                    Action::Moved {
-                        from: moved.source,
-                        to: moved.destination,
-                    }
-                })
-            } else {
-                kara_fs::copy_to(source, &destination, ConflictPolicy::KeepBoth).map(|copied| {
-                    Action::Copied {
-                        created: copied.destination,
-                    }
-                })
-            };
-
-            match outcome {
-                Ok(action) => done.push(action),
-                Err(error) => failures.push(format!("{}: {error}", source.display())),
-            }
-        }
-
-        for action in done {
-            self.as_mut().rust_mut().get_mut().undo.push(action);
-        }
-
-        if failures.is_empty() {
-            self.as_mut().clear_error();
+        let op = if state.is_cut() {
+            kara_ops::runner::Op::Move
         } else {
-            let resumen = format!(
-                "No se pudieron pegar {} de {}: {}",
-                failures.len(),
-                state.paths.len(),
-                failures.join("; ")
-            );
-            self.as_mut().report(&resumen);
-        }
+            kara_ops::runner::Op::Copy
+        };
+        let request = kara_ops::runner::Request {
+            op,
+            sources: state.paths.clone(),
+            dest_dir: destination.clone(),
+        };
+        let clears = state.after_paste().is_none();
 
+        let thread = self.qt_thread();
+        let handle = kara_ops::runner::spawn(request, move |event| {
+            // Si el objeto ya no está, la ventana se cerró y nadie espera nada.
+            let _ = thread.queue(move |app| app.on_paste_event(event));
+        });
+
+        self.as_mut().clear_error();
+        let title = format!("{}…", op.gerund());
+        self.as_mut().set_op_title(QString::from(&title));
+        self.as_mut().set_op_state(QString::from("calculating"));
+        self.as_mut().set_op_progress(-1.0);
+        self.as_mut().set_op_current(QString::default());
+        self.as_mut().set_op_detail(QString::from("Calculando…"));
+        let state_mut = self.as_mut().rust_mut().get_mut();
+        state_mut.paste_job = Some(handle);
+        state_mut.paste_meter = kara_ops::Meter::measuring();
+        state_mut.paste_clock = Instant::now();
+        state_mut.paste_destination = destination;
+        state_mut.paste_clears_clipboard = clears;
+    }
+
+    /// Lo que cuenta el hilo de copiar o mover. Llega siempre en el hilo de la
+    /// interfaz, que es el único que puede tocar las propiedades.
+    fn on_paste_event(mut self: Pin<&mut Self>, event: kara_ops::runner::Event) {
+        use kara_ops::runner::Event;
+
+        match event {
+            Event::Calculating => {}
+            Event::Started {
+                total_bytes,
+                total_items,
+            } => {
+                let meter = &mut self.as_mut().rust_mut().get_mut().paste_meter;
+                meter.start(Some(total_bytes), total_items);
+                self.as_mut().set_op_state(QString::from("running"));
+            }
+            Event::Progress {
+                current,
+                bytes_done,
+                items_done,
+            } => {
+                let at = self.rust().paste_clock.elapsed().as_secs_f64();
+                let (fraction, detail) = {
+                    let meter = &mut self.as_mut().rust_mut().get_mut().paste_meter;
+                    meter.sample(at, bytes_done, items_done);
+                    (meter.fraction(), progress_detail(meter))
+                };
+                if !current.is_empty() {
+                    self.as_mut().set_op_current(QString::from(&current));
+                }
+                self.as_mut().set_op_progress(fraction.unwrap_or(-1.0));
+                self.as_mut().set_op_detail(QString::from(&detail));
+            }
+            Event::Conflict(prompt) => {
+                use kara_ops::ConflictKind;
+                let describe = |path: &Path| -> String {
+                    match std::fs::symlink_metadata(path) {
+                        Ok(meta) if meta.is_dir() => format!(
+                            "Carpeta · modificada {}",
+                            present::modified_label(meta.modified().ok())
+                        ),
+                        Ok(meta) => format!(
+                            "{} · modificado {}",
+                            present::format_size(meta.len()),
+                            present::modified_label(meta.modified().ok())
+                        ),
+                        Err(_) => String::new(),
+                    }
+                };
+                let incoming = describe(&prompt.source);
+                let existing = describe(&prompt.destination);
+                self.as_mut().set_op_name(QString::from(&prompt.name));
+                self.as_mut().set_op_incoming(QString::from(&incoming));
+                self.as_mut().set_op_existing(QString::from(&existing));
+                self.as_mut()
+                    .set_op_can_merge(prompt.kind == ConflictKind::DirectoryOverDirectory);
+                self.as_mut().set_op_mixed_kinds(matches!(
+                    prompt.kind,
+                    ConflictKind::FileOverDirectory | ConflictKind::DirectoryOverFile
+                ));
+                self.as_mut().set_op_state(QString::from("conflict"));
+            }
+            Event::Failure(prompt) => {
+                let name = prompt.path.display().to_string();
+                self.as_mut().set_op_name(QString::from(&name));
+                self.as_mut().set_op_reason(QString::from(&prompt.reason));
+                self.as_mut().set_op_can_retry(prompt.kind.retry_may_help());
+                self.as_mut().set_op_state(QString::from("failure"));
+            }
+            Event::Finished(outcome) => self.finish_paste(*outcome),
+        }
+    }
+
+    fn finish_paste(mut self: Pin<&mut Self>, outcome: kara_ops::runner::Outcome) {
+        let destination = self.rust().paste_destination.clone();
+        let clears = self.rust().paste_clears_clipboard;
+        let clean = outcome.report.is_clean();
+        {
+            let state = self.as_mut().rust_mut().get_mut();
+            state.paste_job = None;
+            for action in outcome.actions {
+                state.undo.push(action);
+            }
+        }
         // Un corte es de un solo uso: una vez movido no queda nada en el
-        // origen que volver a mover.
-        if state.after_paste().is_none() {
+        // origen que volver a mover. Si se canceló o algo falló, lo que quedó
+        // sin mover sigue en el portapapeles para volver a intentarlo.
+        if clears && clean {
             clipboard_clear();
         }
 
         self.as_mut().rust_mut().get_mut().tree.forget(&destination);
         self.as_mut().publish_undo();
-        self.as_mut().render(&destination);
+        // La vista puede haberse movido de carpeta mientras se copiaba.
+        let here = PathBuf::from(self.path().to_string());
+        self.as_mut().render(&here);
+
+        if clean {
+            self.as_mut().set_op_state(QString::default());
+            return;
+        }
+
+        let mut lines: Vec<String> = Vec::new();
+        if outcome.cancelled {
+            lines.push("La operación se canceló antes de terminar.".to_string());
+        }
+        if !outcome.report.failures.is_empty() {
+            let verb = if outcome.op == kara_ops::runner::Op::Move {
+                "mover"
+            } else {
+                "copiar"
+            };
+            lines.push(format!(
+                "{} elemento(s) no se pudieron {verb}:",
+                outcome.report.failures.len()
+            ));
+            for failure in &outcome.report.failures {
+                lines.push(format!("• {}: {}", failure.path.display(), failure.reason));
+            }
+        }
+        self.as_mut().set_op_reason(QString::from(&lines.join("\n")));
+        self.as_mut().set_op_state(QString::from("summary"));
+    }
+
+    fn answer_conflict(mut self: Pin<&mut Self>, resolution: &QString, apply_to_all: bool) {
+        use kara_ops::Resolution;
+        use kara_ops::runner::Answer;
+
+        let resolution = match resolution.to_string().as_str() {
+            "skip" => Resolution::Skip,
+            "keep_both" => Resolution::KeepBoth,
+            "replace" => Resolution::Replace,
+            "merge" => Resolution::Merge,
+            // Una respuesta que no existe no se adivina: se para.
+            _ => {
+                self.as_mut().cancel_operation();
+                return;
+            }
+        };
+        if let Some(job) = &self.rust().paste_job {
+            job.answer(Answer::Conflict {
+                resolution,
+                apply_to_all,
+            });
+        }
+        self.as_mut().set_op_state(QString::from("running"));
+    }
+
+    fn answer_failure(mut self: Pin<&mut Self>, decision: &QString) {
+        use kara_ops::runner::Answer;
+
+        let decision = match decision.to_string().as_str() {
+            "retry" => kara_ops::ErrorDecision::Retry,
+            "skip" => kara_ops::ErrorDecision::Skip,
+            "skip_all" => kara_ops::ErrorDecision::SkipAll,
+            _ => kara_ops::ErrorDecision::Cancel,
+        };
+        if let Some(job) = &self.rust().paste_job {
+            job.answer(Answer::Error(decision));
+        }
+        self.as_mut().set_op_state(QString::from("running"));
+    }
+
+    fn cancel_operation(self: Pin<&mut Self>) {
+        if let Some(job) = &self.rust().paste_job {
+            job.cancel();
+        }
+    }
+
+    fn dismiss_summary(mut self: Pin<&mut Self>) {
+        self.as_mut().set_op_state(QString::default());
+        self.as_mut().set_op_reason(QString::default());
     }
 
     /// Las entradas de papelera que el usuario tiene señaladas.

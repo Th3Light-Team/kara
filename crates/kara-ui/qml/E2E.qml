@@ -441,6 +441,35 @@ Item {
                 e2e.ok("L3 Ctrl+Z undoes the paste", e2e.app.entry_count === 0, e2e.names().join(","));
             });
 
+            // ---- Paste conflicts ---------------------------------------------------------
+            block("paste conflicts", function () {
+                click(e2e.rowPoint(e2e.indexOf("package.json")));
+                key(Qt.Key_C, Qt.ControlModifier);
+                doubleClick(e2e.rowPoint(e2e.indexOf("Empty")));
+                key(Qt.Key_V, Qt.ControlModifier);
+                waitUntil(function () {
+                    return e2e.app.entry_count === 1 && e2e.app.op_state === "";
+                });
+                e2e.ok("M1 first paste lands without a question", e2e.app.entry_count === 1 && e2e.app.op_state === "", e2e.app.entry_count + "/" + e2e.app.op_state);
+
+                key(Qt.Key_V, Qt.ControlModifier);
+                waitUntil(function () {
+                    return e2e.app.op_state === "conflict";
+                });
+                e2e.ok("M2 pasting over the same name asks", e2e.app.op_state === "conflict", e2e.app.op_state);
+                e2e.ok("M3 the question names the item", e2e.app.op_name === "package.json", e2e.app.op_name);
+                // Esc answers with the least destructive option.
+                key(Qt.Key_Escape);
+                waitUntil(function () {
+                    return e2e.app.op_state === "";
+                });
+                e2e.ok("M4 Esc skips and the job ends", e2e.app.op_state === "" && e2e.app.entry_count === 1, e2e.app.op_state + "/" + e2e.app.entry_count);
+
+                // «Conservar ambos», «Reemplazar» and the undo chain are covered
+                // without a window by crates/kara-ops/tests/runner.rs. The
+                // paste is left in `Empty`: the next blocks reset the folder.
+            });
+
             // ---- Address bar -------------------------------------------------------------
             block("address bar", function () {
                 key(Qt.Key_L, Qt.ControlModifier);
