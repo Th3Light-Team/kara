@@ -427,10 +427,10 @@ fn a_cancel_while_copying_ends_quietly_without_a_failure_prompt() {
     fs::write(src.join("big"), vec![1u8; 40_000_000]).unwrap();
     let run = start(Op::Copy, &[&src.join("big")], &dst);
     loop {
-        if let Event::Progress { bytes_done, .. } = run.next() {
-            if bytes_done > 0 {
-                break;
-            }
+        if let Event::Progress { bytes_done, .. } = run.next()
+            && bytes_done > 0
+        {
+            break;
         }
     }
     run.handle.cancel();

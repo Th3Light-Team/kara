@@ -143,30 +143,32 @@ mod tests {
     }
 
     #[test]
-    fn a_file_reports_its_size_and_mode() {
-        let dir = tempfile::tempdir().unwrap();
+    fn a_file_reports_its_size_and_mode() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
         let file = dir.path().join("a.txt");
-        std::fs::write(&file, "hello").unwrap();
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::fs::write(&file, "hello")?;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640))?;
 
-        let found = properties(&file).unwrap();
+        let found = properties(&file)?;
         assert_eq!(found.size, 5);
         assert_eq!(found.mode, 0o640);
         assert!(!found.is_dir && !found.is_symlink);
+        Ok(())
     }
 
     #[test]
-    fn a_symlink_is_described_as_the_link_not_its_target() {
-        let dir = tempfile::tempdir().unwrap();
+    fn a_symlink_is_described_as_the_link_not_its_target() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
         let target = dir.path().join("real");
-        std::fs::create_dir(&target).unwrap();
+        std::fs::create_dir(&target)?;
         let link = dir.path().join("link");
-        std::os::unix::fs::symlink("real", &link).unwrap();
+        std::os::unix::fs::symlink("real", &link)?;
 
-        let found = properties(&link).unwrap();
+        let found = properties(&link)?;
         assert!(found.is_symlink);
         assert!(!found.is_dir);
         assert_eq!(found.link_target.as_deref(), Some(Path::new("real")));
+        Ok(())
     }
 
     #[test]
