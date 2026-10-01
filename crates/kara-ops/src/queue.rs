@@ -268,7 +268,13 @@ impl Queue {
     #[must_use]
     pub fn combined_eta(&self) -> Eta {
         let mut worst: Option<std::time::Duration> = None;
-        for job in &self.jobs {
+        // Solo las pendientes: una terminada o cancelada no tiene tiempo que
+        // dar, y su ETA «desconocida» volvería desconocida la de toda la cola.
+        let pending = self
+            .jobs
+            .iter()
+            .filter(|j| matches!(j.state, JobState::Queued | JobState::Active | JobState::Paused));
+        for job in pending {
             match job.meter.eta() {
                 Eta::Remaining(d) => worst = Some(worst.map_or(d, |w: std::time::Duration| w.max(d))),
                 Eta::Unknown => return Eta::Unknown,

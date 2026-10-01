@@ -449,3 +449,284 @@ fn a_cancel_while_copying_ends_quietly_without_a_failure_prompt() {
         assert_eq!(fs::metadata(dst.join("big")).unwrap().len(), 40_000_000);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Invariants that protect the user's data
+// ---------------------------------------------------------------------------
+
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+/// `false` when file permissions do not bind this process (running as root), in
+/// which case a test that relies on a permission error has nothing to show.
+fn permissions_are_enforced(scratch: &Path) -> bool {
+    let probe = scratch.join("perm-probe");
+    if fs::create_dir(&probe).is_err() {
+        return false;
+    }
+    let _ = fs::set_permissions(&probe, fs::Permissions::from_mode(0o555));
+    let enforced = fs::write(probe.join("x"), "x").is_err();
+    let _ = fs::set_permissions(&probe, fs::Permissions::from_mode(0o755));
+    let _ = fs::remove_dir(&probe);
+    enforced
+}
+
+/// A scratch folder on a different volume than the one `world()` lives on, or
+/// `None` when this machine has only one (then a cross-volume test has nothing to
+/// show). The project's own `target/` is the other volume on a desktop with a
+/// tmpfs `/tmp`; the CI runner mounts one for the same reason.
+fn other_volume(than: &Path) -> Option<TempDir> {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/kara-ops-tests");
+    fs::create_dir_all(&base).ok()?;
+    let dir = TempDir::new_in(&base).ok()?;
+    let here = fs::metadata(than).ok()?.dev();
+    (fs::metadata(dir.path()).ok()?.dev() != here).then_some(dir)
+}
+
+#[test]
+fn moving_across_volumes_copies_everything_and_then_removes_the_source() {
+    let (_root, src, _dst) = world();
+    let Some(far) = other_volume(&src) else { return };
+    let tree = src.join("tree");
+    fs::create_dir_all(tree.join("inner")).unwrap();
+    write(&tree.join("a"), "1");
+    write(&tree.join("inner/b"), "2");
+
+    let (outcome, _) = start(Op::Move, &[&tree], far.path()).finish(None, ErrorDecision::Cancel);
+
+    assert!(outcome.report.is_clean());
+    assert_eq!(fs::read_to_string(far.path().join("tree/inner/b")).unwrap(), "2");
+    assert!(!tree.exists(), "a finished move leaves nothing behind");
+}
+
+#[test]
+fn a_move_across_volumes_never_deletes_what_it_failed_to_copy() {
+    let (_root, src, _dst) = world();
+    if !permissions_are_enforced(&src) {
+        return;
+    }
+    let Some(far) = other_volume(&src) else { return };
+    let tree = src.join("tree");
+    fs::create_dir(&tree).unwrap();
+    write(&tree.join("fine.txt"), "ok");
+    write(&tree.join("locked.txt"), "secret");
+    fs::set_permissions(tree.join("locked.txt"), fs::Permissions::from_mode(0o000)).unwrap();
+
+    let (outcome, _) = start(Op::Move, &[&tree], far.path()).finish(None, ErrorDecision::Skip);
+
+    // Put the mode back so the scratch folder can be cleaned up.
+    fs::set_permissions(tree.join("locked.txt"), fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(outcome.report.failures.len(), 1);
+    assert!(far.path().join("tree/fine.txt").exists(), "what could move, moved");
+    assert!(
+        tree.join("locked.txt").exists(),
+        "the file that failed to copy must still be in the source"
+    );
+    assert_eq!(fs::read_to_string(tree.join("locked.txt")).unwrap(), "secret");
+}
+
+#[test]
+fn retry_after_the_cause_is_fixed_completes_without_recording_a_failure() {
+    let (_root, src, dst) = world();
+    if !permissions_are_enforced(&src) {
+        return;
+    }
+    write(&src.join("a.txt"), "payload");
+    fs::set_permissions(&dst, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let run = start(Op::Copy, &[&src.join("a.txt")], &dst);
+    let outcome = loop {
+        match run.next() {
+            Event::Failure(prompt) => {
+                assert_eq!(prompt.kind, kara_ops::FailureKind::PermissionDenied);
+                // The user fixes the folder, then asks to try again.
+                fs::set_permissions(&dst, fs::Permissions::from_mode(0o755)).unwrap();
+                run.handle.answer(Answer::Error(ErrorDecision::Retry));
+            }
+            Event::Finished(outcome) => break *outcome,
+            _ => {}
+        }
+    };
+
+    assert!(outcome.report.is_clean(), "a retry that works is not a failure");
+    assert_eq!(fs::read_to_string(dst.join("a.txt")).unwrap(), "payload");
+}
+
+#[test]
+fn deleting_without_permission_asks_with_the_right_kind_and_skip_keeps_the_file() {
+    let (_root, src, _dst) = world();
+    if !permissions_are_enforced(&src) {
+        return;
+    }
+    let guarded = src.join("guarded");
+    fs::create_dir(&guarded).unwrap();
+    write(&guarded.join("keep.txt"), "k");
+    fs::set_permissions(&guarded, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let run = delete(&[&guarded.join("keep.txt")]);
+    let mut kind = None;
+    let outcome = loop {
+        match run.next() {
+            Event::Failure(prompt) => {
+                kind = Some(prompt.kind);
+                run.handle.answer(Answer::Error(ErrorDecision::Skip));
+            }
+            Event::Finished(outcome) => break *outcome,
+            _ => {}
+        }
+    };
+
+    fs::set_permissions(&guarded, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(kind, Some(kara_ops::FailureKind::PermissionDenied));
+    assert!(guarded.join("keep.txt").exists());
+    assert_eq!(outcome.report.failures.len(), 1);
+}
+
+#[test]
+fn merging_asks_again_for_each_child_that_collides() {
+    let (_root, src, dst) = world();
+    fs::create_dir(src.join("d")).unwrap();
+    fs::create_dir(dst.join("d")).unwrap();
+    for name in ["a", "b"] {
+        write(&src.join("d").join(name), "new");
+        write(&dst.join("d").join(name), "old");
+    }
+
+    let run = start(Op::Copy, &[&src.join("d")], &dst);
+    let mut asked = Vec::new();
+    let outcome = loop {
+        match run.next() {
+            Event::Conflict(prompt) => {
+                asked.push(prompt.kind);
+                let resolution = if prompt.kind == ConflictKind::DirectoryOverDirectory {
+                    Resolution::Merge
+                } else {
+                    Resolution::Skip
+                };
+                run.handle.answer(Answer::Conflict {
+                    resolution,
+                    apply_to_all: false,
+                });
+            }
+            Event::Finished(outcome) => break *outcome,
+            _ => {}
+        }
+    };
+
+    assert_eq!(
+        asked,
+        [
+            ConflictKind::DirectoryOverDirectory,
+            ConflictKind::FileOverFile,
+            ConflictKind::FileOverFile
+        ]
+    );
+    assert_eq!(fs::read_to_string(dst.join("d/a")).unwrap(), "old");
+    assert!(outcome.report.is_clean());
+}
+
+#[test]
+fn an_answer_that_makes_no_sense_for_the_conflict_stops_the_job_and_touches_nothing() {
+    let (_root, src, dst) = world();
+    write(&src.join("a.txt"), "new");
+    write(&dst.join("a.txt"), "old");
+
+    // «Combinar» only means something between two folders.
+    let (outcome, _) =
+        start(Op::Copy, &[&src.join("a.txt")], &dst).finish(Some(Resolution::Merge), ErrorDecision::Cancel);
+
+    assert!(outcome.cancelled);
+    assert_eq!(fs::read_to_string(dst.join("a.txt")).unwrap(), "old");
+    assert!(outcome.actions.is_empty());
+}
+
+#[test]
+fn renaming_the_incoming_item_in_the_dialog_lands_it_under_that_name() {
+    let (_root, src, dst) = world();
+    write(&src.join("a.txt"), "new");
+    write(&dst.join("a.txt"), "old");
+
+    start(Op::Copy, &[&src.join("a.txt")], &dst)
+        .finish(Some(Resolution::RenameTo("renamed.txt".into())), ErrorDecision::Cancel);
+
+    assert_eq!(fs::read_to_string(dst.join("a.txt")).unwrap(), "old");
+    assert_eq!(fs::read_to_string(dst.join("renamed.txt")).unwrap(), "new");
+}
+
+#[test]
+fn replacing_during_a_move_can_be_undone_step_by_step() {
+    use kara_ops::UndoStack;
+
+    let (_root, src, dst) = world();
+    write(&src.join("a.txt"), "incoming");
+    write(&dst.join("a.txt"), "original");
+
+    let (outcome, _) =
+        start(Op::Move, &[&src.join("a.txt")], &dst).finish(Some(Resolution::Replace), ErrorDecision::Cancel);
+    assert_eq!(fs::read_to_string(dst.join("a.txt")).unwrap(), "incoming");
+    assert!(!src.join("a.txt").exists());
+
+    let mut undo = UndoStack::new();
+    for action in outcome.actions {
+        undo.push(action);
+    }
+
+    // First step puts the moved file back where it came from.
+    undo.undo().expect("the move can be undone");
+    assert_eq!(fs::read_to_string(src.join("a.txt")).unwrap(), "incoming");
+    // Second step gets the replaced original out of the trash.
+    undo.undo().expect("the replaced file can be restored");
+    assert_eq!(fs::read_to_string(dst.join("a.txt")).unwrap(), "original");
+    assert!(!undo.can_undo());
+}
+
+#[test]
+fn a_folder_cannot_be_moved_into_itself_either() {
+    let (_root, src, _dst) = world();
+    let tree = src.join("tree");
+    fs::create_dir_all(tree.join("sub")).unwrap();
+    write(&tree.join("f"), "x");
+
+    let (outcome, _) = start(Op::Move, &[&tree], &tree.join("sub")).finish(None, ErrorDecision::Cancel);
+
+    assert_eq!(outcome.report.failures.len(), 1);
+    assert!(tree.join("f").exists());
+}
+
+#[test]
+fn a_symlink_back_to_an_ancestor_does_not_send_the_copy_in_circles() {
+    let (_root, src, dst) = world();
+    let tree = src.join("tree");
+    fs::create_dir(&tree).unwrap();
+    write(&tree.join("f"), "x");
+    std::os::unix::fs::symlink(&tree, tree.join("loop")).unwrap();
+
+    let (outcome, _) = start(Op::Copy, &[&tree], &dst).finish(None, ErrorDecision::Cancel);
+
+    assert!(outcome.report.is_clean());
+    assert!(fs::symlink_metadata(dst.join("tree/loop")).unwrap().file_type().is_symlink());
+    assert_eq!(fs::read_to_string(dst.join("tree/f")).unwrap(), "x");
+}
+
+#[test]
+fn deleting_a_tree_counts_every_item_in_the_progress() {
+    let (_root, src, _dst) = world();
+    let tree = src.join("tree");
+    fs::create_dir_all(tree.join("inner")).unwrap();
+    write(&tree.join("a"), "1");
+    write(&tree.join("inner/b"), "2");
+    // tree, a, inner, inner/b
+    let run = delete(&[&tree]);
+    let mut total = 0;
+    let mut last = 0;
+    loop {
+        match run.next() {
+            Event::Started { total_items, .. } => total = total_items,
+            Event::Progress { items_done, .. } => last = items_done,
+            Event::Finished(_) => break,
+            _ => {}
+        }
+    }
+    assert_eq!(total, 4);
+    assert_eq!(last, 4);
+    assert!(!tree.exists());
+}
