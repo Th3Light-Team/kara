@@ -23,6 +23,8 @@ pub mod open;
 
 pub mod places;
 
+pub mod props;
+
 pub mod settings;
 
 pub mod thumbnails;

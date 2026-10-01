@@ -388,6 +388,11 @@ Window {
     }
     Shortcut {
         enabled: !ops.promptOpen
+        sequences: ["Alt+Return", "Alt+Enter"]
+        onActivated: app.show_properties()
+    }
+    Shortcut {
+        enabled: !ops.promptOpen
         sequence: "Ctrl+Shift+C"
         onActivated: app.copy_path()
     }
@@ -612,6 +617,12 @@ Window {
                             text: qsTr("Abrir terminal aquí")
                             enabled: !app.in_trash
                             onTriggered: app.open_terminal_here(-1)
+                        }
+                        MenuSeparator {}
+                        MenuItem {
+                            text: qsTr("Propiedades\tAlt+Intro")
+                            enabled: !app.in_trash
+                            onTriggered: app.show_properties()
                         }
                     }
                 }
@@ -901,6 +912,10 @@ Window {
                 text: app.loading ? qsTr("Cargando…") : app.entry_count === app.total_count ? qsTr("%1 elementos").arg(app.total_count) : qsTr("%1 de %2 elementos").arg(app.entry_count).arg(app.total_count)
             }
         }
+    }
+
+    PropertiesDialog {
+        app: app
     }
 
     OperationDialog {

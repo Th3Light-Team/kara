@@ -135,6 +135,12 @@ MouseArea {
             height: visible ? implicitHeight : 0
             onTriggered: control.app.open_terminal_here(control.index)
         }
+        MenuItem {
+            text: qsTr("Propiedades\tAlt+Intro")
+            visible: !control.app.in_trash
+            height: visible ? implicitHeight : 0
+            onTriggered: control.app.show_properties()
+        }
         MenuSeparator {}
         MenuItem {
             text: qsTr("Nueva carpeta")

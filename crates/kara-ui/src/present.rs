@@ -499,6 +499,188 @@ pub fn paths_as_text(paths: &[PathBuf]) -> String {
         .join("\n")
 }
 
+/// «12,3 KB (12 595 bytes)»: la cifra legible y la exacta, como Propiedades.
+#[must_use]
+pub fn size_with_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} bytes")
+    } else {
+        format!("{} ({bytes} bytes)", format_size(bytes))
+    }
+}
+
+/// Suma dos avances de recorrido: lo que ya estaba más lo del tramo en curso.
+#[must_use]
+pub fn add_progress(
+    before: kara_index::size::SizeProgress,
+    now: kara_index::size::SizeProgress,
+) -> kara_index::size::SizeProgress {
+    kara_index::size::SizeProgress {
+        files: before.files + now.files,
+        directories: before.directories + now.directories,
+        logical: before.logical + now.logical,
+        on_disk: before.on_disk + now.on_disk,
+    }
+}
+
+/// Lo que el cálculo de tamaño le cuenta al diálogo: los totales hasta ahora y
+/// si ya acabó y si es parcial.
+#[derive(Debug, Clone, Copy)]
+pub struct SizeUpdate {
+    /// Bytes de lo que no es carpeta, que no hace falta recorrer.
+    files_bytes: u64,
+    totals: kara_index::size::SizeProgress,
+    done: bool,
+    partial: bool,
+}
+
+impl SizeUpdate {
+    #[must_use]
+    pub fn new(
+        files_bytes: u64,
+        totals: kara_index::size::SizeProgress,
+        done: bool,
+        partial: bool,
+    ) -> Self {
+        Self {
+            files_bytes,
+            totals,
+            done,
+            partial,
+        }
+    }
+
+    /// La fila «Tamaño». Mientras se calcula lleva la cuenta en vivo, como pide
+    /// la spec; si acaba incompleto, lo dice en vez de presentarlo definitivo.
+    #[must_use]
+    pub fn size_text(&self) -> String {
+        let logical = self.files_bytes + self.totals.logical;
+        if !self.done {
+            return format!("Calculando… {}", format_size(logical));
+        }
+        let mut text = size_with_bytes(logical);
+        text.push_str(&format!(" · en disco: {}", format_size(self.totals.on_disk)));
+        if self.partial {
+            text.push_str(" (parcial: alguna carpeta no se pudo leer)");
+        }
+        text
+    }
+
+    /// La fila «Contiene».
+    #[must_use]
+    pub fn contents_text(&self) -> String {
+        let text = format!(
+            "{} archivos, {} carpetas",
+            self.totals.files, self.totals.directories
+        );
+        if self.done {
+            text
+        } else {
+            format!("Calculando… {text}")
+        }
+    }
+}
+
+/// Las filas del diálogo de Propiedades.
+#[derive(Debug, Default)]
+pub struct PropertyRows {
+    pub rows: Vec<(String, String)>,
+    /// Posición de «Tamaño» y de «Contiene», que el cálculo en segundo plano
+    /// va actualizando.
+    pub size_row: Option<usize>,
+    pub contents_row: Option<usize>,
+}
+
+/// «ana (1000)», o solo el número si el sistema no tiene nombre.
+fn owner_text(owner: &kara_fs::props::Owner) -> String {
+    match &owner.name {
+        Some(name) => format!("{name} ({})", owner.id),
+        None => owner.id.to_string(),
+    }
+}
+
+/// «rw-r--r-- (644)».
+fn mode_text(mode: u32) -> String {
+    format!("{} ({:o})", kara_fs::props::mode_string(mode), mode & 0o7777)
+}
+
+/// Construye las filas para uno o varios elementos.
+///
+/// `type_label` solo se usa con uno: la descripción del tipo la resuelve el
+/// puente contra la base de MIME.
+#[must_use]
+pub fn properties_rows(infos: &[kara_fs::props::Properties], type_label: Option<&str>) -> PropertyRows {
+    let mut out = PropertyRows::default();
+    let mut push = |label: &str, value: String| -> usize {
+        out.rows.push((label.to_string(), value));
+        out.rows.len() - 1
+    };
+
+    if let [info] = infos {
+        let name = info
+            .path
+            .file_name()
+            .map_or_else(|| info.path.display().to_string(), |n| n.to_string_lossy().into_owned());
+        push("Nombre", name);
+        push("Tipo", type_label.unwrap_or_default().to_string());
+        push(
+            "Ubicación",
+            info.path
+                .parent()
+                .map_or_else(|| "/".to_string(), |p| p.display().to_string()),
+        );
+        if let Some(target) = &info.link_target {
+            push("Apunta a", target.display().to_string());
+        }
+        let folder = info.is_dir && !info.is_symlink;
+        let size_row = push(
+            "Tamaño",
+            if folder {
+                "Calculando…".to_string()
+            } else {
+                size_with_bytes(info.size)
+            },
+        );
+        let contents_row = folder.then(|| push("Contiene", "Calculando…".to_string()));
+        push("Modificado", modified_label(info.modified));
+        push("Creado", modified_label(info.created));
+        push("Último acceso", modified_label(info.accessed));
+        push("Propietario", owner_text(&info.owner));
+        push("Grupo", owner_text(&info.group));
+        push("Permisos", mode_text(info.mode));
+        out.size_row = Some(size_row);
+        out.contents_row = contents_row;
+        return out;
+    }
+
+    let folders = infos.iter().filter(|i| i.is_dir && !i.is_symlink).count();
+    push(
+        "Elementos",
+        format!("{} ({} archivos, {folders} carpetas)", infos.len(), infos.len() - folders),
+    );
+    let parents: std::collections::BTreeSet<_> = infos.iter().map(|i| i.path.parent()).collect();
+    if let (1, Some(Some(parent))) = (parents.len(), parents.iter().next()) {
+        push("Ubicación", parent.display().to_string());
+    }
+    let files_bytes: u64 = infos
+        .iter()
+        .filter(|i| !i.is_dir || i.is_symlink)
+        .map(|i| i.size)
+        .sum();
+    let size_row = push(
+        "Tamaño",
+        if folders > 0 {
+            "Calculando…".to_string()
+        } else {
+            size_with_bytes(files_bytes)
+        },
+    );
+    let contents_row = (folders > 0).then(|| push("Contiene", "Calculando…".to_string()));
+    out.size_row = Some(size_row);
+    out.contents_row = contents_row;
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -688,5 +870,60 @@ mod tests {
     fn varias_rutas_van_una_por_linea() {
         let paths = [PathBuf::from("/a"), PathBuf::from("/b c")];
         assert_eq!(paths_as_text(&paths), "/a\n'/b c'");
+    }
+
+    fn info(path: &str, is_dir: bool, size: u64) -> kara_fs::props::Properties {
+        kara_fs::props::Properties {
+            path: PathBuf::from(path),
+            is_dir,
+            is_symlink: false,
+            link_target: None,
+            size,
+            modified: None,
+            created: None,
+            accessed: None,
+            mode: 0o644,
+            owner: kara_fs::props::Owner { id: 1000, name: Some("ana".into()) },
+            group: kara_fs::props::Owner { id: 1000, name: None },
+        }
+    }
+
+    #[test]
+    fn un_fichero_enseña_su_tamano_exacto_y_sus_permisos() {
+        let rows = properties_rows(&[info("/home/ana/notas.md", false, 12_595)], Some("Documento Markdown"));
+        let get = |label: &str| rows.rows.iter().find(|(l, _)| l == label).map(|(_, v)| v.as_str());
+        assert_eq!(get("Nombre"), Some("notas.md"));
+        assert_eq!(get("Ubicación"), Some("/home/ana"));
+        assert_eq!(get("Tamaño"), Some("12.3 KB (12595 bytes)"));
+        assert_eq!(get("Propietario"), Some("ana (1000)"));
+        assert_eq!(get("Grupo"), Some("1000"));
+        assert_eq!(get("Permisos"), Some("rw-r--r-- (644)"));
+        assert!(rows.contents_row.is_none());
+    }
+
+    #[test]
+    fn una_carpeta_se_calcula_en_segundo_plano() {
+        let rows = properties_rows(&[info("/home/ana/Docs", true, 4096)], Some("Carpeta de archivos"));
+        let size = rows.size_row.map(|i| rows.rows[i].1.as_str());
+        assert_eq!(size, Some("Calculando…"));
+        assert!(rows.contents_row.is_some());
+    }
+
+    #[test]
+    fn varios_elementos_cuentan_archivos_y_carpetas() {
+        let rows = properties_rows(&[info("/a/x", false, 10), info("/a/d", true, 4096)], None);
+        assert_eq!(rows.rows[0].1, "2 (1 archivos, 1 carpetas)");
+        assert!(rows.rows.iter().any(|(l, v)| l == "Ubicación" && v == "/a"));
+        assert!(rows.contents_row.is_some());
+    }
+
+    #[test]
+    fn un_calculo_parcial_lo_dice() {
+        let totals = kara_index::size::SizeProgress { files: 3, directories: 2, logical: 2048, on_disk: 4096 };
+        let done = SizeUpdate::new(0, totals, true, true);
+        assert!(done.size_text().contains("parcial"));
+        let live = SizeUpdate::new(0, totals, false, false);
+        assert!(live.size_text().starts_with("Calculando…"));
+        assert_eq!(done.contents_text(), "3 archivos, 2 carpetas");
     }
 }

@@ -117,6 +117,12 @@ pub mod qobject {
         #[qproperty(QStringList, entry_labels)]
         /// 1 si la entrada esta oculta, para dibujarla atenuada.
         #[qproperty(QList_i32, entry_hidden)]
+        /// El diálogo de Propiedades: abierto, su título y sus filas
+        /// (etiqueta y valor, en dos listas paralelas).
+        #[qproperty(bool, prop_open)]
+        #[qproperty(QString, prop_title)]
+        #[qproperty(QStringList, prop_labels)]
+        #[qproperty(QStringList, prop_values)]
         #[qproperty(bool, show_hidden)]
         #[qproperty(bool, show_extensions)]
         /// Entradas que se enseñan: ya filtradas.
@@ -192,6 +198,15 @@ pub mod qobject {
         #[qproperty(bool, can_zoom_out)]
         #[qproperty(bool, can_zoom_in)]
         type App = super::AppRust;
+
+        /// Abre Propiedades de la selección, o de la carpeta actual si no hay
+        /// nada seleccionado.
+        #[qinvokable]
+        fn show_properties(self: Pin<&mut App>);
+
+        /// Cierra Propiedades y para el cálculo de tamaño si seguía en curso.
+        #[qinvokable]
+        fn close_properties(self: Pin<&mut App>);
 
         /// Copia como texto la ruta de la selección, o la de la carpeta actual si
         /// no hay nada seleccionado. Una por línea.
@@ -617,6 +632,20 @@ pub struct AppRust {
     entry_hidden: cxx_qt_lib::QList<i32>,
     show_hidden: bool,
     show_extensions: bool,
+    prop_open: bool,
+    prop_title: QString,
+    prop_labels: QStringList,
+    prop_values: QStringList,
+    /// Las filas de Propiedades, para poder cambiar una sin rehacer las demás.
+    prop_rows: Vec<(String, String)>,
+    /// Qué filas se rellenan cuando acaba de calcularse el tamaño.
+    prop_size_row: Option<usize>,
+    prop_contents_row: Option<usize>,
+    /// Para el cálculo de tamaño en curso, si lo hay.
+    prop_cancel: Option<kara_index::walk::Cancel>,
+    /// Sube con cada diálogo: un tamaño que llega con otro número es de un
+    /// diálogo que ya se cerró.
+    prop_generation: u64,
     entry_dates: QStringList,
     entry_selected: cxx_qt_lib::QList<i32>,
     entry_values: QStringList,
@@ -758,6 +787,15 @@ impl Default for AppRust {
             entry_labels: QStringList::default(),
             entry_hidden: cxx_qt_lib::QList::<i32>::default(),
             show_hidden: prefs.show_hidden(),
+            prop_open: false,
+            prop_title: QString::default(),
+            prop_labels: QStringList::default(),
+            prop_values: QStringList::default(),
+            prop_rows: Vec::new(),
+            prop_size_row: None,
+            prop_contents_row: None,
+            prop_cancel: None,
+            prop_generation: 0,
             show_extensions: prefs.show_extensions(),
             entry_dates: QStringList::default(),
             entry_selected: cxx_qt_lib::QList::<i32>::default(),
@@ -1022,6 +1060,27 @@ impl AppRust {
     /// La carpeta que enseña la pestaña activa.
     fn active_path(&self) -> PathBuf {
         self.tabs.active().path().to_path_buf()
+    }
+
+    /// «Documento JSON», «Carpeta de archivos»… de lo que enseña Propiedades.
+    fn properties_type_label(&mut self, info: &kara_fs::props::Properties) -> String {
+        if info.is_symlink {
+            return "Enlace simbólico".to_string();
+        }
+        if info.is_dir {
+            return "Carpeta de archivos".to_string();
+        }
+        let name = info
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let described = self
+            .icons
+            .mime_of(&name)
+            .and_then(|mime| self.descriptions.of(mime))
+            .map(present::capitalize_type);
+        described.unwrap_or_else(|| present::fallback_type_label(&name))
     }
 
     /// Guarda el listado de disco de `target` en la pestaña activa.
@@ -2264,6 +2323,144 @@ impl qobject::App {
             job.answer(Answer::Error(decision));
         }
         self.as_mut().set_op_state(QString::from("running"));
+    }
+
+    fn show_properties(mut self: Pin<&mut Self>) {
+        if *self.in_trash() {
+            return;
+        }
+        // Un diálogo anterior que siguiera calculando ya no le importa a nadie.
+        self.as_mut().stop_size_calculation();
+
+        let mut targets = self.selected_paths();
+        if targets.is_empty() {
+            targets.push(PathBuf::from(self.path().to_string()));
+        }
+
+        let mut infos = Vec::new();
+        let mut unreadable = Vec::new();
+        for target in &targets {
+            match kara_fs::props::properties(target) {
+                Ok(info) => infos.push(info),
+                Err(error) => unreadable.push(format!("{}: {error}", target.display())),
+            }
+        }
+        if infos.is_empty() {
+            let message = format!("No se pudieron leer las propiedades: {}", unreadable.join("; "));
+            self.as_mut().report(&message);
+            return;
+        }
+
+        let single_label = if infos.len() == 1 {
+            let state = self.as_mut().rust_mut().get_mut();
+            Some(state.properties_type_label(&infos[0]))
+        } else {
+            None
+        };
+        let layout = present::properties_rows(&infos, single_label.as_deref());
+
+        let title = if infos.len() == 1 {
+            let name = infos[0]
+                .path
+                .file_name()
+                .map_or_else(|| infos[0].path.display().to_string(), |n| n.to_string_lossy().into_owned());
+            format!("Propiedades de {name}")
+        } else {
+            format!("Propiedades ({} elementos)", infos.len())
+        };
+
+        let generation = {
+            let state = self.as_mut().rust_mut().get_mut();
+            state.prop_generation += 1;
+            state.prop_rows = layout.rows.clone();
+            state.prop_size_row = layout.size_row;
+            state.prop_contents_row = layout.contents_row;
+            state.prop_generation
+        };
+        self.as_mut().set_prop_title(QString::from(&title));
+        self.as_mut().publish_properties();
+        self.as_mut().set_prop_open(true);
+
+        // Las carpetas no tienen un tamaño que leer: hay que recorrerlas, y
+        // eso va en otro hilo con su progreso y su cancelación.
+        let folders: Vec<PathBuf> = infos
+            .iter()
+            .filter(|info| info.is_dir && !info.is_symlink)
+            .map(|info| info.path.clone())
+            .collect();
+        if folders.is_empty() {
+            return;
+        }
+        let files_bytes: u64 = infos
+            .iter()
+            .filter(|info| !info.is_dir || info.is_symlink)
+            .map(|info| info.size)
+            .sum();
+        let cancel = kara_index::walk::Cancel::new();
+        self.as_mut().rust_mut().get_mut().prop_cancel = Some(cancel.clone());
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let mut done = kara_index::size::SizeProgress::default();
+            let mut partial = false;
+            for (position, folder) in folders.iter().enumerate() {
+                let finished_before = done;
+                let report = kara_index::size::folder_size(folder, &cancel, |progress| {
+                    let now = present::add_progress(finished_before, progress);
+                    let update = present::SizeUpdate::new(files_bytes, now, false, false);
+                    let _ = thread.queue(move |app| app.apply_size(generation, update));
+                });
+                done = present::add_progress(finished_before, report.totals);
+                partial |= report.is_partial();
+                if cancel.is_cancelled() {
+                    return;
+                }
+                let last = position + 1 == folders.len();
+                if last {
+                    let update = present::SizeUpdate::new(files_bytes, done, true, partial);
+                    let _ = thread.queue(move |app| app.apply_size(generation, update));
+                }
+            }
+        });
+    }
+
+    /// Un tamaño calculado en segundo plano llega al diálogo abierto.
+    fn apply_size(mut self: Pin<&mut Self>, generation: u64, update: present::SizeUpdate) {
+        if generation != self.rust().prop_generation || !*self.prop_open() {
+            return;
+        }
+        {
+            let state = self.as_mut().rust_mut().get_mut();
+            if let Some(row) = state.prop_size_row.and_then(|row| state.prop_rows.get_mut(row)) {
+                row.1 = update.size_text();
+            }
+            if let Some(row) = state.prop_contents_row.and_then(|row| state.prop_rows.get_mut(row)) {
+                row.1 = update.contents_text();
+            }
+        }
+        self.publish_properties();
+    }
+
+    fn publish_properties(mut self: Pin<&mut Self>) {
+        let (labels, values): (Vec<QString>, Vec<QString>) = self
+            .rust()
+            .prop_rows
+            .iter()
+            .map(|(label, value)| (QString::from(label), QString::from(value)))
+            .unzip();
+        self.as_mut().set_prop_labels(labels.into_iter().collect());
+        self.as_mut().set_prop_values(values.into_iter().collect());
+    }
+
+    fn stop_size_calculation(mut self: Pin<&mut Self>) {
+        if let Some(cancel) = self.as_mut().rust_mut().get_mut().prop_cancel.take() {
+            cancel.cancel();
+        }
+    }
+
+    fn close_properties(mut self: Pin<&mut Self>) {
+        self.as_mut().stop_size_calculation();
+        self.as_mut().rust_mut().get_mut().prop_generation += 1;
+        self.as_mut().set_prop_open(false);
     }
 
     fn copy_path(mut self: Pin<&mut Self>) {

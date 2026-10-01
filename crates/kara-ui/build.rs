@@ -24,6 +24,7 @@ fn main() {
             QmlFile::from("qml/TabModeButton.qml"),
             QmlFile::from("qml/RubberBand.qml"),
             QmlFile::from("qml/OperationDialog.qml"),
+            QmlFile::from("qml/PropertiesDialog.qml"),
             // Prueba de extremo a extremo. Va en el módulo siempre, y solo se
             // instancia con `--e2e`: separarla por feature obligaría a que
             // `Main.qml` la cargara por URL y perdería la comprobación de
