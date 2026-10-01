@@ -170,8 +170,10 @@ scripts/build-appimage [versión]    # AppImage con Qt dentro → dist/
 
 `.github/workflows/release.yml` construye el AppImage y lo adjunta a la release
 cuando se empuja una etiqueta `v*` (con guion = pre-release); `ci.yml` pasa tests
-y clippy en cada push. **El workflow y el AppImage no se han podido probar en
-local**: la primera ejecución en GitHub es su primera prueba real.
+y clippy en cada push. El workflow ya construye y publica; al bajar el primer AppImage se
+comprobó que arranca en X11 y que **abortaba en Wayland nativo** (falta la
+integración gráfica de Wayland en el Qt de CI), por eso `packaging/AppRun` fija
+`QT_QPA_PLATFORM=xcb` por defecto.
 
 ## Estado
 

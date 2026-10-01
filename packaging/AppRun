@@ -1,0 +1,11 @@
+#!/bin/sh
+# Entry point of the AppImage.
+#
+# The bundle carries Qt's X11 platform plugin and not a working Wayland one (the
+# Qt used for the release lacks the Wayland graphics integration, and without it
+# Qt aborts at start-up on a Wayland session). So Kara starts on X11 by default,
+# which on Wayland means XWayland. Set QT_QPA_PLATFORM yourself to override it.
+HERE=$(dirname "$(readlink -f "$0")")
+: "${QT_QPA_PLATFORM:=xcb}"
+export QT_QPA_PLATFORM
+exec "$HERE/usr/bin/kara-ui" "$@"
