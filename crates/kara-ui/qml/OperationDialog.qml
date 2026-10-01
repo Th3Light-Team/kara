@@ -29,7 +29,7 @@ Item {
     anchors.fill: parent
 
     /// A question is open: the window's shortcuts must stand down.
-    readonly property bool promptOpen: root.app.op_state === "conflict" || root.app.op_state === "failure" || root.app.op_state === "summary"
+    readonly property bool promptOpen: root.app.delete_prompt || root.app.op_state === "conflict" || root.app.op_state === "failure" || root.app.op_state === "summary"
 
     readonly property bool progressVisible: root.app.op_state === "calculating" || root.app.op_state === "running" || root.app.op_state === "conflict" || root.app.op_state === "failure"
 
@@ -97,9 +97,59 @@ Item {
         }
     }
 
+    // ---- Permanent delete ----------------------------------------------------
+    // Cannot be switched off, and focus starts on the button that destroys
+    // nothing: an Enter pressed by reflex must not delete anything.
+    Dialog {
+        id: confirmDelete
+        visible: root.app.delete_prompt
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        modal: true
+        closePolicy: Popup.NoAutoClose
+        title: qsTr("Eliminar permanentemente")
+        width: 440
+
+        contentItem: ColumnLayout {
+            spacing: 14
+            Keys.onEscapePressed: root.app.cancel_permanent_delete()
+
+            Text {
+                text: root.app.delete_text
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                color: Theme.text
+                font.family: Theme.family
+                font.pixelSize: Theme.sizeBase
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Item {
+                    Layout.fillWidth: true
+                }
+                Button {
+                    id: keep
+                    text: qsTr("Cancelar")
+                    focus: true
+                    onClicked: root.app.cancel_permanent_delete()
+                }
+                Button {
+                    text: qsTr("Eliminar")
+                    palette.button: Theme.danger
+                    palette.buttonText: Theme.dangerText
+                    onClicked: root.app.confirm_permanent_delete()
+                }
+            }
+        }
+
+        onOpened: keep.forceActiveFocus()
+    }
+
     // ---- Name conflict -------------------------------------------------------
     Dialog {
         id: conflict
+        visible: root.app.op_state === "conflict"
         parent: Overlay.overlay
         anchors.centerIn: parent
         modal: true
@@ -185,6 +235,7 @@ Item {
     // ---- Failure on one item -------------------------------------------------
     Dialog {
         id: failure
+        visible: root.app.op_state === "failure"
         parent: Overlay.overlay
         anchors.centerIn: parent
         modal: true
@@ -247,6 +298,7 @@ Item {
     // ---- Closing summary -----------------------------------------------------
     Dialog {
         id: summary
+        visible: root.app.op_state === "summary"
         parent: Overlay.overlay
         anchors.centerIn: parent
         modal: true
@@ -288,28 +340,13 @@ Item {
         onOpened: close.forceActiveFocus()
     }
 
-    Connections {
-        target: root.app
-
-        function onOp_stateChanged() {
-            const state = root.app.op_state;
-            if (state === "conflict" && !conflict.opened)
-                conflict.open();
-            else if (state !== "conflict" && conflict.opened)
-                conflict.close();
-
-            if (state === "failure" && !failure.opened)
-                failure.open();
-            else if (state !== "failure" && failure.opened)
-                failure.close();
-
-            if (state === "summary" && !summary.opened)
-                summary.open();
-            else if (state !== "summary" && summary.opened)
-                summary.close();
-
-            if (!root.promptOpen)
-                root.released();
-        }
+    // The dialogs' `visible` is bound to the state, not toggled from signal
+    // handlers: a handler that asks «is it open?» is wrong during the opening and
+    // closing animations, and a question answered faster than that (a quick Esc,
+    // then the same shortcut again) left a modal up with nothing to close it, or
+    // a prompt pending with no dialog.
+    onPromptOpenChanged: {
+        if (!root.promptOpen)
+            root.released();
     }
 }

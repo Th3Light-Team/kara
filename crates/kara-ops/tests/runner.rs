@@ -363,3 +363,89 @@ fn skip_then_keep_both_then_undo_walks_back_through_everything() {
     assert_eq!(fs::read_dir(&dst).unwrap().count(), 1);
     assert_eq!(fs::read_to_string(dst.join("a.txt")).unwrap(), "old");
 }
+
+fn delete(sources: &[&Path]) -> Run {
+    start(Op::Delete, sources, Path::new("/"))
+}
+
+#[test]
+fn delete_removes_files_and_trees_for_good_and_registers_nothing_to_undo() {
+    let (_root, src, _dst) = world();
+    write(&src.join("a.txt"), "x");
+    let tree = src.join("tree");
+    fs::create_dir_all(tree.join("inner")).unwrap();
+    write(&tree.join("inner/b"), "y");
+
+    let (outcome, _) = delete(&[&src.join("a.txt"), &tree]).finish(None, ErrorDecision::Cancel);
+
+    assert!(!src.join("a.txt").exists());
+    assert!(!tree.exists());
+    assert!(outcome.report.is_clean());
+    // Irreversible by nature: nothing for Ctrl+Z to find.
+    assert!(outcome.actions.is_empty());
+}
+
+#[test]
+fn delete_never_follows_a_symlink_into_its_target() {
+    let (_root, src, _dst) = world();
+    let precious = src.join("precious");
+    fs::create_dir(&precious).unwrap();
+    write(&precious.join("keep.txt"), "k");
+    std::os::unix::fs::symlink(&precious, src.join("link")).unwrap();
+
+    delete(&[&src.join("link")]).finish(None, ErrorDecision::Cancel);
+
+    assert!(fs::symlink_metadata(src.join("link")).is_err());
+    assert!(precious.join("keep.txt").exists(), "the target must survive");
+}
+
+#[test]
+fn delete_of_something_already_gone_asks_and_skip_carries_on() {
+    let (_root, src, _dst) = world();
+    write(&src.join("later.txt"), "l");
+    let (outcome, _) =
+        delete(&[&src.join("gone.txt"), &src.join("later.txt")]).finish(None, ErrorDecision::Skip);
+
+    assert!(!src.join("later.txt").exists());
+    assert_eq!(outcome.report.failures.len(), 1);
+}
+
+#[test]
+fn delete_cancelled_on_a_failure_leaves_the_rest_alone() {
+    let (_root, src, _dst) = world();
+    write(&src.join("later.txt"), "l");
+    let (outcome, _) =
+        delete(&[&src.join("gone.txt"), &src.join("later.txt")]).finish(None, ErrorDecision::Cancel);
+
+    assert!(outcome.cancelled);
+    assert!(src.join("later.txt").exists());
+}
+
+#[test]
+fn a_cancel_while_copying_ends_quietly_without_a_failure_prompt() {
+    let (_root, src, dst) = world();
+    fs::write(src.join("big"), vec![1u8; 40_000_000]).unwrap();
+    let run = start(Op::Copy, &[&src.join("big")], &dst);
+    loop {
+        if let Event::Progress { bytes_done, .. } = run.next() {
+            if bytes_done > 0 {
+                break;
+            }
+        }
+    }
+    run.handle.cancel();
+    let outcome = loop {
+        match run.next() {
+            Event::Failure(_) => panic!("a cancel must not turn into a failure question"),
+            Event::Finished(outcome) => break outcome,
+            _ => {}
+        }
+    };
+    // The copy may have beaten the cancel on a fast disk; what must never
+    // happen is a cancel that leaves half a file behind.
+    if outcome.cancelled {
+        assert!(!dst.join("big").exists(), "a half-written copy is removed");
+    } else {
+        assert_eq!(fs::metadata(dst.join("big")).unwrap().len(), 40_000_000);
+    }
+}

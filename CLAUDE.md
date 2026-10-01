@@ -264,8 +264,6 @@ consumidor.
 
 ### Cabos sueltos conocidos
 
-- **`Shift+Supr` no está**: la spec pide borrado permanente con confirmación y
-  el backend no tiene con qué. `Supr` sí manda a la papelera.
 - **Invertir selección solo por teclado** (`Ctrl+Shift+A` / `Ctrl+Shift+I`): no
   hay entrada de menú, que es como lo ofrece Windows.
 - **Sin consumidor todavía**: `duplicate_tab`, `drag_tab` (reordenar pestañas

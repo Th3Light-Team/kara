@@ -119,6 +119,9 @@ pub mod qobject {
         #[qproperty(QList_i32, entry_hidden)]
         /// El diálogo de Propiedades: abierto, su título y sus filas
         /// (etiqueta y valor, en dos listas paralelas).
+        /// La pregunta de borrado permanente: abierta y qué dice.
+        #[qproperty(bool, delete_prompt)]
+        #[qproperty(QString, delete_text)]
         #[qproperty(bool, prop_open)]
         #[qproperty(QString, prop_title)]
         #[qproperty(QStringList, prop_labels)]
@@ -198,6 +201,19 @@ pub mod qobject {
         #[qproperty(bool, can_zoom_out)]
         #[qproperty(bool, can_zoom_in)]
         type App = super::AppRust;
+
+        /// Shift+Supr: pregunta antes de borrar la selección para siempre. No
+        /// borra nada por sí sola.
+        #[qinvokable]
+        fn request_permanent_delete(self: Pin<&mut App>);
+
+        /// El usuario confirmó: se borra lo que la pregunta enseñaba.
+        #[qinvokable]
+        fn confirm_permanent_delete(self: Pin<&mut App>);
+
+        /// El usuario se echó atrás: no se toca nada.
+        #[qinvokable]
+        fn cancel_permanent_delete(self: Pin<&mut App>);
 
         /// Abre Propiedades de la selección, o de la carpeta actual si no hay
         /// nada seleccionado.
@@ -633,6 +649,10 @@ pub struct AppRust {
     show_hidden: bool,
     show_extensions: bool,
     prop_open: bool,
+    delete_prompt: bool,
+    delete_text: QString,
+    /// Lo que se borraría si el usuario confirma.
+    delete_pending: Vec<PathBuf>,
     prop_title: QString,
     prop_labels: QStringList,
     prop_values: QStringList,
@@ -788,6 +808,9 @@ impl Default for AppRust {
             entry_hidden: cxx_qt_lib::QList::<i32>::default(),
             show_hidden: prefs.show_hidden(),
             prop_open: false,
+            delete_prompt: false,
+            delete_text: QString::default(),
+            delete_pending: Vec::new(),
             prop_title: QString::default(),
             prop_labels: QStringList::default(),
             prop_values: QStringList::default(),
@@ -2139,10 +2162,16 @@ impl qobject::App {
         let request = kara_ops::runner::Request {
             op,
             sources: state.paths.clone(),
-            dest_dir: destination.clone(),
+            dest_dir: destination,
         };
         let clears = state.after_paste().is_none();
+        self.start_job(request, clears);
+    }
 
+    /// Arranca un trabajo de copiar, mover o eliminar en su hilo.
+    fn start_job(mut self: Pin<&mut Self>, request: kara_ops::runner::Request, clears: bool) {
+        let op = request.op;
+        let destination = request.dest_dir.clone();
         let thread = self.qt_thread();
         let handle = kara_ops::runner::spawn(request, move |event| {
             // Si el objeto ya no está, la ventana se cerró y nadie espera nada.
@@ -2269,10 +2298,10 @@ impl qobject::App {
             lines.push("La operación se canceló antes de terminar.".to_string());
         }
         if !outcome.report.failures.is_empty() {
-            let verb = if outcome.op == kara_ops::runner::Op::Move {
-                "mover"
-            } else {
-                "copiar"
+            let verb = match outcome.op {
+                kara_ops::runner::Op::Move => "mover",
+                kara_ops::runner::Op::Copy => "copiar",
+                kara_ops::runner::Op::Delete => "eliminar",
             };
             lines.push(format!(
                 "{} elemento(s) no se pudieron {verb}:",
@@ -2323,6 +2352,58 @@ impl qobject::App {
             job.answer(Answer::Error(decision));
         }
         self.as_mut().set_op_state(QString::from("running"));
+    }
+
+    fn request_permanent_delete(mut self: Pin<&mut Self>) {
+        if *self.in_trash() {
+            self.as_mut()
+                .report("Dentro de la papelera, lo definitivo es «Vaciar la papelera».");
+            return;
+        }
+        if self.rust().paste_job.is_some() {
+            self.as_mut()
+                .report("Ya hay una operación en curso; espera a que termine.");
+            return;
+        }
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            return;
+        }
+
+        // La pregunta dice cuántos y, si es uno, cuál: es lo que impide un
+        // borrado masivo por un Shift+Supr con la selección equivocada.
+        let text = match paths.as_slice() {
+            [one] => format!(
+                "¿Eliminar permanentemente «{}»?\nEsta acción no se puede deshacer.",
+                one.file_name().map_or_else(|| one.display().to_string(), |n| n.to_string_lossy().into_owned())
+            ),
+            many => format!(
+                "¿Eliminar permanentemente estos {} elementos?\nEsta acción no se puede deshacer.",
+                many.len()
+            ),
+        };
+        self.as_mut().rust_mut().get_mut().delete_pending = paths;
+        self.as_mut().set_delete_text(QString::from(&text));
+        self.as_mut().set_delete_prompt(true);
+    }
+
+    fn confirm_permanent_delete(mut self: Pin<&mut Self>) {
+        let paths = std::mem::take(&mut self.as_mut().rust_mut().get_mut().delete_pending);
+        self.as_mut().set_delete_prompt(false);
+        if paths.is_empty() {
+            return;
+        }
+        let request = kara_ops::runner::Request {
+            op: kara_ops::runner::Op::Delete,
+            sources: paths,
+            dest_dir: PathBuf::from(self.path().to_string()),
+        };
+        self.start_job(request, false);
+    }
+
+    fn cancel_permanent_delete(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().get_mut().delete_pending.clear();
+        self.as_mut().set_delete_prompt(false);
     }
 
     fn show_properties(mut self: Pin<&mut Self>) {

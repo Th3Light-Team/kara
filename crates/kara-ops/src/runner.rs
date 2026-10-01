@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
-use kara_fs::trash::trash_one;
+use kara_fs::trash::{Flow as WalkFlow, TrashError, TrashObserver, delete_permanently, trash_one};
 
 use crate::batch::{BatchPolicy, BatchReport, ErrorDecision, Failure, FailureKind};
 use crate::clock::trash_policy;
@@ -55,6 +55,8 @@ const ANSWER_POLL: Duration = Duration::from_millis(100);
 pub enum Op {
     Copy,
     Move,
+    /// Permanent deletion: no destination, nothing to undo.
+    Delete,
 }
 
 impl Op {
@@ -64,6 +66,7 @@ impl Op {
         match self {
             Self::Copy => "Copiando",
             Self::Move => "Moviendo",
+            Self::Delete => "Eliminando",
         }
     }
 }
@@ -170,6 +173,40 @@ pub fn spawn(request: Request, sink: impl Fn(Event) + Send + 'static) -> Handle 
     handle
 }
 
+/// Carries a [`delete_permanently`] walk's progress and cancel into the worker.
+struct DeleteObserver<'a> {
+    worker: &'a mut Worker,
+    base: u64,
+    name: String,
+}
+
+impl TrashObserver for DeleteObserver<'_> {
+    fn on_bytes(&mut self, removed: u64, _total: Option<u64>) -> WalkFlow {
+        self.worker.items_done = self.base + removed;
+        self.worker.tick(self.name.clone(), false);
+        if self.worker.cancelled() {
+            WalkFlow::Cancel
+        } else {
+            WalkFlow::Continue
+        }
+    }
+}
+
+/// A trash error as the `io::Error` the failure policy understands, keeping the
+/// kind so a permission problem is not classified as «other».
+fn trash_error_to_io(error: TrashError) -> io::Error {
+    use io::ErrorKind;
+    let kind = match &error {
+        TrashError::PermissionDenied { .. } => ErrorKind::PermissionDenied,
+        TrashError::NotFound { .. } => ErrorKind::NotFound,
+        TrashError::Io { source, .. }
+        | TrashError::InfoWrite { source, .. } => source.kind(),
+        TrashError::Cancelled => ErrorKind::Interrupted,
+        _ => ErrorKind::Other,
+    };
+    io::Error::new(kind, error.to_string())
+}
+
 /// A node that stops the walk: only a cancel does.
 struct Cancelled;
 
@@ -267,8 +304,13 @@ impl Worker {
                 self.policy.record(failure, ErrorDecision::Skip);
                 continue;
             };
-            let destination = self.dest_dir.join(name);
-            if self.node(&source, destination, true).is_err() {
+            let outcome = if self.op == Op::Delete {
+                self.delete_node(&source)
+            } else {
+                let destination = self.dest_dir.join(name);
+                self.node(&source, destination, true)
+            };
+            if outcome.is_err() {
                 // Whatever stopped it, the summary has to say it stopped.
                 self.cancel.store(true, Ordering::SeqCst);
                 break;
@@ -289,6 +331,50 @@ impl Worker {
             cancelled,
         };
         self.emit(Event::Finished(Box::new(outcome)));
+    }
+
+    /// Registers a finished copy or move for undo. Deleting registers nothing.
+    fn record_transfer(&mut self, source: &Path, destination: &Path) {
+        match self.op {
+            Op::Copy => self.actions.push(Action::Copied {
+                created: destination.to_path_buf(),
+            }),
+            Op::Move => self.actions.push(Action::Moved {
+                from: source.to_path_buf(),
+                to: destination.to_path_buf(),
+            }),
+            Op::Delete => {}
+        }
+    }
+
+    /// Permanently deletes one top-level item, with a live count and a cancel.
+    ///
+    /// The refusals live in `kara_fs::trash::delete_permanently` (the root and
+    /// mount points); this only drives it. A failure asks, like everywhere
+    /// else, and a skipped item stays exactly where it was.
+    fn delete_node(&mut self, path: &Path) -> Step {
+        let name = path
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let before = self.items_done;
+        let removed = self.guarded(path, |worker| {
+            let mut observer = DeleteObserver {
+                worker,
+                base: before,
+                name: name.clone(),
+            };
+            delete_permanently(path, &mut observer).map_err(trash_error_to_io)
+        })?;
+        match removed {
+            Some(count) => {
+                self.items_done = before + count;
+                Ok(Flow::Done)
+            }
+            None => {
+                self.count_skipped(path);
+                Ok(Flow::Partial)
+            }
+        }
     }
 
     /// Emits progress, at most every [`PROGRESS_EVERY`] unless `force`.
@@ -339,6 +425,11 @@ impl Worker {
                 }
                 Err(error) => error,
             };
+            // An error that is only the cancel being noticed is not a failure
+            // to ask about.
+            if self.cancelled() {
+                return Err(Cancelled);
+            }
             let failure = Failure {
                 path: path.to_path_buf(),
                 kind: classify(&error),
@@ -484,7 +575,7 @@ impl Worker {
                 Resolution::Replace => {
                     let target = destination.clone();
                     let trashed = self.guarded(&target, |_| {
-                        trash_one(&target, &trash_policy()).map_err(io::Error::other)
+                        trash_one(&target, &trash_policy()).map_err(trash_error_to_io)
                     })?;
                     match trashed {
                         Some(item) => {
@@ -543,15 +634,7 @@ impl Worker {
                 return Ok(Flow::Partial);
             }
             if record {
-                self.actions.push(match self.op {
-                    Op::Copy => Action::Copied {
-                        created: destination.to_path_buf(),
-                    },
-                    Op::Move => Action::Moved {
-                        from: source.to_path_buf(),
-                        to: destination.to_path_buf(),
-                    },
-                });
+                self.record_transfer(source, destination);
             }
         }
         self.items_done += 1;
@@ -631,15 +714,7 @@ impl Worker {
         }
 
         if record {
-            self.actions.push(match self.op {
-                Op::Copy => Action::Copied {
-                    created: destination.to_path_buf(),
-                },
-                Op::Move => Action::Moved {
-                    from: source.to_path_buf(),
-                    to: destination.to_path_buf(),
-                },
-            });
+            self.record_transfer(source, destination);
         }
 
         if self.op == Op::Move {

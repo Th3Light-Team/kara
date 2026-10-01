@@ -17,6 +17,7 @@ Item {
 
     Dialog {
         id: dialog
+        visible: root.app.prop_open
         parent: Overlay.overlay
         anchors.centerIn: parent
         modal: false
@@ -85,16 +86,5 @@ Item {
         }
 
         onOpened: close.forceActiveFocus()
-    }
-
-    Connections {
-        target: root.app
-
-        function onProp_openChanged() {
-            if (root.app.prop_open && !dialog.opened)
-                dialog.open();
-            else if (!root.app.prop_open && dialog.opened)
-                dialog.close();
-        }
     }
 }

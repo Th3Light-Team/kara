@@ -470,6 +470,34 @@ Item {
                 // paste is left in `Empty`: the next blocks reset the folder.
             });
 
+            // ---- Permanent delete ----------------------------------------------------------
+            block("permanent delete", function () {
+                doubleClick(e2e.rowPoint(e2e.indexOf("Empty")));
+                key(Qt.Key_N, Qt.ControlModifier | Qt.ShiftModifier);
+                // The new folder is in rename mode; Enter accepts its name.
+                key(Qt.Key_Return);
+                tc.wait(300);
+                const before = e2e.app.entry_count;
+                e2e.ok("P1 there is something to delete", before >= 1, "" + before);
+                click(e2e.rowPoint(0));
+
+                key(Qt.Key_Delete, Qt.ShiftModifier);
+                e2e.ok("P2 Shift+Delete asks first", e2e.app.delete_prompt === true && e2e.app.entry_count === before, e2e.app.delete_prompt + "/" + e2e.app.entry_count);
+                e2e.ok("P3 the question names the item", e2e.app.delete_text.indexOf("Nueva carpeta") >= 0, e2e.app.delete_text);
+                key(Qt.Key_Escape);
+                e2e.ok("P4 Esc backs out and deletes nothing", e2e.app.delete_prompt === false && e2e.app.entry_count === before, e2e.app.delete_prompt + "/" + e2e.app.entry_count);
+
+                e2e.ok("P4b Esc in the dialog keeps the selection", e2e.app.selected_count === 1, "" + e2e.app.selected_count);
+
+                key(Qt.Key_Delete, Qt.ShiftModifier);
+                e2e.ok("P4c it asks again", e2e.app.delete_prompt === true, "" + e2e.app.delete_prompt);
+                e2e.app.confirm_permanent_delete();
+                waitUntil(function () {
+                    return e2e.app.entry_count === before - 1 && e2e.app.op_state === "";
+                });
+                e2e.ok("P5 confirming deletes it for good", e2e.app.entry_count === before - 1, e2e.app.entry_count + "/" + e2e.app.op_state);
+            });
+
             // ---- Address bar -------------------------------------------------------------
             block("address bar", function () {
                 key(Qt.Key_L, Qt.ControlModifier);

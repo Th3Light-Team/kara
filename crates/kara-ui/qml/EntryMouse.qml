@@ -136,6 +136,12 @@ MouseArea {
             onTriggered: control.app.open_terminal_here(control.index)
         }
         MenuItem {
+            text: qsTr("Eliminar permanentemente\tShift+Supr")
+            visible: !control.app.in_trash
+            height: visible ? implicitHeight : 0
+            onTriggered: control.app.request_permanent_delete()
+        }
+        MenuItem {
             text: qsTr("Propiedades\tAlt+Intro")
             visible: !control.app.in_trash
             height: visible ? implicitHeight : 0

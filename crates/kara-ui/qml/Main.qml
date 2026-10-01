@@ -137,8 +137,8 @@ Window {
         // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
         // ni Ctrl+V deben llegar a la vista que hay debajo.
         enabled: !ops.promptOpen
-        // La papelera, nunca el borrado: `Shift+Supr` pide un borrado
-        // permanente que el backend todavía no tiene.
+        // Supr manda a la papelera, nunca borra. El borrado definitivo es
+        // Shift+Supr, que antes pregunta.
         sequence: "Delete"
         onActivated: app.trash_selected()
     }
@@ -385,6 +385,12 @@ Window {
         enabled: !ops.promptOpen
         sequences: ["Ctrl+Y", "Ctrl+Shift+Z"]
         onActivated: app.redo()
+    }
+    Shortcut {
+        // Pregunta primero; no borra nada por sí sola.
+        enabled: !ops.promptOpen
+        sequence: "Shift+Delete"
+        onActivated: app.request_permanent_delete()
     }
     Shortcut {
         enabled: !ops.promptOpen
