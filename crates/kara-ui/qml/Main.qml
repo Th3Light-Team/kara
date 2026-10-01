@@ -852,7 +852,7 @@ Window {
                 font.pixelSize: Theme.sizeSmall
                 // Con filtro activo se enseñan las dos cifras: si no, una carpeta
                 // recortada por el filtro parece una carpeta pequeña.
-                text: app.entry_count === app.total_count ? qsTr("%1 elementos").arg(app.total_count) : qsTr("%1 de %2 elementos").arg(app.entry_count).arg(app.total_count)
+                text: app.loading ? qsTr("Cargando…") : app.entry_count === app.total_count ? qsTr("%1 elementos").arg(app.total_count) : qsTr("%1 de %2 elementos").arg(app.entry_count).arg(app.total_count)
             }
         }
     }

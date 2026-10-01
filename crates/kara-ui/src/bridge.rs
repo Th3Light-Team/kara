@@ -148,6 +148,9 @@ pub mod qobject {
         /// Lo último que salió mal, para enseñarlo. Vacía si no hay nada
         /// pendiente de contar: ninguna operación puede fallar en silencio.
         #[qproperty(QString, last_error)]
+        /// Hay un listado de carpeta en curso. La ventana sigue viva mientras
+        /// tanto: leer el disco ocurre en otro hilo.
+        #[qproperty(bool, loading)]
         /// Estado de la operación de copiar o mover: vacío si no hay ninguna,
         /// `calculating`, `running`, `conflict`, `failure` o `summary`.
         #[qproperty(QString, op_state)]
@@ -503,6 +506,19 @@ fn progress_detail(meter: &kara_ops::Meter) -> String {
     parts.join(" · ")
 }
 
+/// Qué hacer con un listado cuando llega del hilo que lo leyó.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Commit {
+    /// El usuario fue a una carpeta: se pinta y se apunta en el historial.
+    Navigate,
+    /// Atrás o Adelante: se pinta, y si ya no se puede leer se marca inválida.
+    Jump,
+    /// Refrescar la carpeta que se enseña.
+    Reload,
+    /// Pintar una carpeta de la que no había nada en memoria.
+    Show,
+}
+
 /// Lo que cada pestaña tiene para ella sola.
 ///
 /// El historial no está aquí: lo lleva `kara_core::tabs::Tab`, que ya lo posee.
@@ -524,6 +540,13 @@ struct TabView {
     /// Las entradas de la papelera del último listado, en el orden en que
     /// llegaron. Las filas guardan su posición aquí en la bolsa de metadatos.
     trash: Vec<kara_fs::trash::TrashEntry>,
+    /// El último listado de disco de `raw_path`, sin filtrar ni ordenar.
+    ///
+    /// Ordenar, filtrar, cambiar columnas o el zoom vuelven a pintar desde aquí
+    /// y no tocan el disco; solo navegar y refrescar lo leen, y eso ocurre en
+    /// otro hilo.
+    raw: Vec<kara_core::FileEntry>,
+    raw_path: Option<PathBuf>,
     /// El filtro por nombre, que es de la pestaña y no de la ventana.
     filter: String,
     /// La selección de antes de empezar el marco elástico.
@@ -587,6 +610,10 @@ pub struct AppRust {
     undo_label: QString,
     redo_label: QString,
     last_error: QString,
+    loading: bool,
+    /// Número del último listado pedido. Uno que llega con otro número lo
+    /// pidió alguien que ya se fue a otra carpeta, y se tira.
+    list_request: u64,
     op_state: QString,
     op_title: QString,
     op_current: QString,
@@ -721,6 +748,8 @@ impl Default for AppRust {
             undo_label: QString::default(),
             redo_label: QString::default(),
             last_error: QString::default(),
+            loading: false,
+            list_request: 0,
             op_state: QString::default(),
             op_title: QString::default(),
             op_current: QString::default(),
@@ -776,6 +805,11 @@ impl Default for AppRust {
 
         // Al arrancar no hay ninguna señal que emitir todavía, así que el
         // volcado va directo a los campos.
+        // El primer listado, el único síncrono: la ventana todavía no existe y
+        // no hay nada que congelar.
+        if let Ok(listing) = list_directory(&start) {
+            app.store_raw(&start, listing.entries);
+        }
         if let Some(snapshot) = app.snapshot(&start) {
             app.version = QString::from(env!("CARGO_PKG_VERSION"));
             app.path = snapshot.path;
@@ -804,7 +838,10 @@ impl Default for AppRust {
             .into_iter()
             .collect();
 
-        app.reveal(&start);
+        for branch in app.reveal(&start) {
+            let children = AppRust::read_children(&branch);
+            app.tree.set_children(&branch, children);
+        }
         let nav = app.nav_view(&start);
         app.nav_labels = nav.labels;
         app.nav_paths = nav.paths;
@@ -928,6 +965,13 @@ impl AppRust {
         self.tabs.active().path().to_path_buf()
     }
 
+    /// Guarda el listado de disco de `target` en la pestaña activa.
+    fn store_raw(&mut self, target: &Path, entries: Vec<kara_core::FileEntry>) {
+        let view = self.view_mut();
+        view.raw = entries;
+        view.raw_path = Some(target.to_path_buf());
+    }
+
     /// Lista, oculta, filtra, ordena y parte la ruta en migas.
     ///
     /// `None` si la carpeta no se puede leer, y entonces quien llame **no
@@ -947,7 +991,14 @@ impl AppRust {
             rows
         } else {
             self.view_mut().trash.clear();
-            list_directory(target).ok()?.entries
+            // Sin listado en memoria de esta carpeta no hay nada que pintar:
+            // quien llame lo pide en otro hilo. Leer el disco aquí es lo que
+            // congelaba la ventana con una carpeta enorme o un montaje colgado.
+            let view = self.view();
+            if view.raw_path.as_deref() != Some(target) {
+                return None;
+            }
+            view.raw.clone()
         };
 
         Visibility::default().retain_visible(&mut entries);
@@ -1286,14 +1337,15 @@ impl AppRust {
         described.unwrap_or_else(|| present::fallback_type_label(&entry.display))
     }
 
-    /// Lee las subcarpetas de una rama y se las entrega al árbol.
+    /// Lee las subcarpetas de una rama.
     ///
-    /// Una carpeta que no se puede leer se registra como vacía: la flecha
+    /// Una carpeta que no se puede leer da una lista vacía: la flecha
     /// desaparece en vez de quedarse ofreciendo algo que nunca se va a abrir.
-    fn load_children(&mut self, path: &Path) {
+    /// No toca el estado: se llama desde otro hilo y su resultado se entrega
+    /// con [`qobject::App::request_children`].
+    fn read_children(path: &Path) -> Vec<Branch> {
         let Ok(listing) = list_directory(path) else {
-            self.tree.set_children(path, Vec::new());
-            return;
+            return Vec::new();
         };
 
         let mut entries = listing.entries;
@@ -1302,23 +1354,27 @@ impl AppRust {
         Visibility::default().retain_visible(&mut entries);
         kara_core::sort::sort_entries(&mut entries, &SortSpec::default());
 
-        let children = entries
+        entries
             .iter()
             .map(|entry| Branch {
                 path: path.join(&entry.name),
                 name: entry.name.clone(),
             })
-            .collect();
-        self.tree.set_children(path, children);
+            .collect()
     }
 
     /// Despliega lo necesario para que `target` se vea en el panel.
-    fn reveal(&mut self, target: &Path) {
+    ///
+    /// Devuelve las ramas que acaban de abrirse y todavía no tienen hijos: leerlas
+    /// es cosa de quien llama, en otro hilo.
+    fn reveal(&mut self, target: &Path) -> Vec<PathBuf> {
+        let mut to_load = Vec::new();
         for ancestor in self.tree.path_to_reveal(target) {
             if self.tree.expand(&ancestor) {
-                self.load_children(&ancestor);
+                to_load.push(ancestor);
             }
         }
+        to_load
     }
 }
 
@@ -1352,6 +1408,11 @@ impl qobject::App {
     /// señales de cambio. Devuelve `false` si la carpeta no se pudo leer.
     fn render(mut self: Pin<&mut Self>, target: &Path) -> bool {
         let Some(view) = self.as_mut().rust_mut().get_mut().snapshot(target) else {
+            // Nada en memoria de esta carpeta: se pide a otro hilo y la vista
+            // se pinta cuando llegue.
+            if !*self.in_trash() {
+                self.as_mut().request_listing(target.to_path_buf(), Commit::Show);
+            }
             return false;
         };
         self.as_mut().set_path(view.path);
@@ -1394,7 +1455,10 @@ impl qobject::App {
 
         // El panel sigue a la vista: despliega los ancestros de la carpeta que
         // se acaba de enseñar y la resalta.
-        self.as_mut().rust_mut().get_mut().reveal(target);
+        let to_load = self.as_mut().rust_mut().get_mut().reveal(target);
+        for branch in to_load {
+            self.as_mut().request_children(branch);
+        }
         self.as_mut().publish_nav();
 
         // El rótulo de la pestaña activa es el nombre de su carpeta, así que
@@ -1434,7 +1498,7 @@ impl qobject::App {
         };
         let needs_children = self.as_mut().rust_mut().get_mut().tree.toggle(&path);
         if needs_children {
-            self.as_mut().rust_mut().get_mut().load_children(&path);
+            self.as_mut().request_children(path.clone());
         }
         self.publish_nav();
     }
@@ -1804,7 +1868,7 @@ impl qobject::App {
         self.as_mut().rust_mut().get_mut().undo.push(action);
         self.as_mut().publish_undo();
         let current = PathBuf::from(self.path().to_string());
-        self.as_mut().render(&current);
+        self.as_mut().render_fresh(&current);
     }
 
     fn undo(mut self: Pin<&mut Self>) {
@@ -1817,7 +1881,7 @@ impl qobject::App {
         self.as_mut().clear_error();
         self.as_mut().publish_undo();
         let current = PathBuf::from(self.path().to_string());
-        self.as_mut().render(&current);
+        self.as_mut().render_fresh(&current);
     }
 
     fn redo(mut self: Pin<&mut Self>) {
@@ -1828,7 +1892,7 @@ impl qobject::App {
         self.as_mut().clear_error();
         self.as_mut().publish_undo();
         let current = PathBuf::from(self.path().to_string());
-        self.as_mut().render(&current);
+        self.as_mut().render_fresh(&current);
     }
 
     fn create_folder(mut self: Pin<&mut Self>, name: &QString) -> QString {
@@ -2053,8 +2117,7 @@ impl qobject::App {
         self.as_mut().rust_mut().get_mut().tree.forget(&destination);
         self.as_mut().publish_undo();
         // La vista puede haberse movido de carpeta mientras se copiaba.
-        let here = PathBuf::from(self.path().to_string());
-        self.as_mut().render(&here);
+        self.as_mut().reload();
 
         if clean {
             self.as_mut().set_op_state(QString::default());
@@ -2198,7 +2261,14 @@ impl qobject::App {
 
         self.as_mut().set_filter_text(QString::from(&filter));
         self.as_mut().set_in_trash(in_trash);
-        self.as_mut().render(&path);
+        // Lo que la pestaña tenía en memoria se enseña al instante y se refresca
+        // por detrás; sin nada en memoria, `render` lo pide. Cualquier listado
+        // pendiente de la pestaña anterior ya no es de nadie.
+        self.as_mut().rust_mut().get_mut().list_request += 1;
+        self.as_mut().set_loading(false);
+        if self.as_mut().render(&path) && !in_trash {
+            self.as_mut().request_listing(path.clone(), Commit::Reload);
+        }
         self.as_mut().publish_history();
         self.as_mut().publish_tabs();
     }
@@ -2462,7 +2532,7 @@ impl qobject::App {
 
         self.as_mut().rust_mut().get_mut().tree.forget(&current);
         self.as_mut().publish_undo();
-        self.as_mut().render(&current);
+        self.as_mut().render_fresh(&current);
     }
 
     fn base_name_length(self: Pin<&mut Self>, name: &QString) -> i32 {
@@ -2673,20 +2743,125 @@ impl qobject::App {
     }
 
     /// Navega dejando huella en el historial.
-    fn navigate_to(mut self: Pin<&mut Self>, target: &Path) -> bool {
-        self.as_mut().leave_trash();
-        if !self.as_mut().render(target) {
-            return false;
+    fn navigate_to(self: Pin<&mut Self>, target: &Path) {
+        self.request_listing(target.to_path_buf(), Commit::Navigate);
+    }
+
+    /// Lee las subcarpetas de una rama del panel en otro hilo y, cuando llegan,
+    /// se las entrega al árbol. Desplegar un montaje colgado deja de congelar
+    /// la ventana.
+    fn request_children(self: Pin<&mut Self>, path: PathBuf) {
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let children = AppRust::read_children(&path);
+            let _ = thread.queue(move |mut app| {
+                app.as_mut().rust_mut().get_mut().tree.set_children(&path, children);
+                app.publish_nav();
+            });
+        });
+    }
+
+    /// Pide el listado de `target` a otro hilo y, cuando llega, lo pinta y
+    /// aplica `commit`. La ventana no espera: un volumen de red colgado deja de
+    /// ser un congelado y pasa a ser un «Cargando…» del que se puede salir
+    /// navegando a otro sitio.
+    fn request_listing(mut self: Pin<&mut Self>, target: PathBuf, commit: Commit) {
+        let id = {
+            let state = self.as_mut().rust_mut().get_mut();
+            state.list_request += 1;
+            state.list_request
+        };
+        self.as_mut().set_loading(true);
+
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let result = list_directory(&target)
+                .map(|listing| listing.entries)
+                .map_err(|error| error.source.to_string());
+            // Si la ventana se cerró, nadie espera el resultado.
+            let _ = thread.queue(move |app| app.finish_listing(id, target, commit, result));
+        });
+    }
+
+    /// Recibe un listado pedido con [`Self::request_listing`].
+    fn finish_listing(
+        mut self: Pin<&mut Self>,
+        id: u64,
+        target: PathBuf,
+        commit: Commit,
+        result: Result<Vec<kara_core::FileEntry>, String>,
+    ) {
+        // Otro listado se pidió después: este es de una carpeta que el usuario
+        // ya dejó atrás.
+        if id != self.rust().list_request {
+            return;
         }
-        self.as_mut()
-            .rust_mut()
-            .get_mut()
-            .tabs
-            .active_mut()
-            .history_mut()
-            .visit(target);
+        self.as_mut().set_loading(false);
+
+        let entries = match result {
+            Ok(entries) => entries,
+            Err(reason) => {
+                // Un salto por el historial que ya no se puede listar se marca
+                // inválido y no se mueve: la carpeta pudo desaparecer.
+                if commit == Commit::Jump {
+                    self.as_mut()
+                        .rust_mut()
+                        .get_mut()
+                        .tabs
+                        .active_mut()
+                        .history_mut()
+                        .invalidate(&target);
+                    self.as_mut().publish_history();
+                }
+                let message = format!("No se pudo abrir {}: {reason}", target.display());
+                self.as_mut().report(&message);
+                return;
+            }
+        };
+
+        // Un refresco o un cambio de pestaña solo vale si la vista sigue en esa
+        // carpeta.
+        if matches!(commit, Commit::Reload | Commit::Show) && self.rust().active_path() != target {
+            return;
+        }
+
+        if matches!(commit, Commit::Navigate | Commit::Jump) {
+            self.as_mut().leave_trash();
+        }
+        self.as_mut().rust_mut().get_mut().store_raw(&target, entries);
+        if !self.as_mut().render(&target) {
+            return;
+        }
+        if commit == Commit::Navigate {
+            self.as_mut()
+                .rust_mut()
+                .get_mut()
+                .tabs
+                .active_mut()
+                .history_mut()
+                .visit(&target);
+        }
+        if matches!(commit, Commit::Navigate | Commit::Jump) {
+            self.as_mut().clear_error();
+        }
         self.as_mut().publish_history();
-        true
+    }
+
+    /// Relee del disco **ahora** y repinta. Solo para después de que Kara
+    /// misma haya tocado la carpeta —crear, renombrar, deshacer—: esa operación
+    /// ya demostró que la carpeta responde, y quien llama necesita ver el
+    /// resultado ya (el editor de renombrado busca la entrada recién creada).
+    fn render_fresh(mut self: Pin<&mut Self>, target: &Path) -> bool {
+        if !*self.in_trash() {
+            let Ok(listing) = list_directory(target) else {
+                return false;
+            };
+            self.as_mut()
+                .rust_mut()
+                .get_mut()
+                .store_raw(target, listing.entries);
+        }
+        self.render(target)
     }
 
     /// Salta a una entrada del historial.
@@ -2714,16 +2889,7 @@ impl qobject::App {
             }
         };
 
-        if !self.as_mut().render(&target) {
-            self.as_mut()
-                .rust_mut()
-                .get_mut()
-                .tabs
-                .active_mut()
-                .history_mut()
-                .invalidate(&target);
-        }
-        self.publish_history();
+        self.request_listing(target, Commit::Jump);
     }
 
     fn open_entry(mut self: Pin<&mut Self>, row: i32) {
@@ -2793,7 +2959,10 @@ impl qobject::App {
         let Some(target) = present::expand_path(&text.to_string(), home.as_deref(), &current) else {
             return false;
         };
-        self.as_mut().navigate_to(&target)
+        // Ya no se sabe aquí si la carpeta se puede abrir: se sabrá cuando el
+        // listado llegue, y si no, el aviso lo dice.
+        self.as_mut().navigate_to(&target);
+        true
     }
 
     fn apply_filter(mut self: Pin<&mut Self>, text: &QString) {
@@ -2819,7 +2988,11 @@ impl qobject::App {
         // borrada fuera sigue saliendo en el panel hasta reiniciar. `forget` no
         // la pliega, así que lo que el usuario abrió sigue abierto.
         self.as_mut().rust_mut().get_mut().tree.forget(&current);
-        self.as_mut().render(&current);
+        if *self.in_trash() {
+            self.as_mut().render(&current);
+        } else {
+            self.as_mut().request_listing(current, Commit::Reload);
+        }
     }
 
     /// Envia a la papelera, nunca borra.
