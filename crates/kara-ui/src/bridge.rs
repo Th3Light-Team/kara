@@ -20,7 +20,7 @@ use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QString, QStringList};
 use kara_core::breadcrumb;
 use kara_core::entry::EntryKind;
-use kara_core::filter::{NameFilter, Visibility};
+use kara_core::filter::{NameDisplay, NameFilter, Visibility};
 use kara_core::tabs::{CloseOutcome, OpenMode, TabId, Tabs};
 use kara_core::columns::{ColumnLayout, ColumnMemory};
 use kara_core::selection::Selection;
@@ -111,6 +111,13 @@ pub mod qobject {
         /// idioma. Ya ocurrió: al pasar de «Carpeta» a «Carpeta de archivos»
         /// dejó de abrirse ninguna carpeta.
         #[qproperty(QList_i32, entry_dirs)]
+        /// Como se rotula cada entrada en la rejilla: igual que `entry_names`,
+        /// salvo que sin extension si el usuario las oculta.
+        #[qproperty(QStringList, entry_labels)]
+        /// 1 si la entrada esta oculta, para dibujarla atenuada.
+        #[qproperty(QList_i32, entry_hidden)]
+        #[qproperty(bool, show_hidden)]
+        #[qproperty(bool, show_extensions)]
         /// Entradas que se enseñan: ya filtradas.
         #[qproperty(i32, entry_count)]
         /// Entradas que hay en la carpeta antes de aplicar el filtro. La barra de
@@ -184,6 +191,14 @@ pub mod qobject {
         #[qproperty(bool, can_zoom_out)]
         #[qproperty(bool, can_zoom_in)]
         type App = super::AppRust;
+
+        /// Muestra u oculta los archivos ocultos.
+        #[qinvokable]
+        fn toggle_hidden(self: Pin<&mut App>);
+
+        /// Muestra u oculta las extensiones de los nombres.
+        #[qinvokable]
+        fn toggle_extensions(self: Pin<&mut App>);
 
         /// Responde al conflicto abierto: `skip`, `keep_both`, `replace` o
         /// `merge`, y si vale para todos los que queden de su clase.
@@ -506,6 +521,23 @@ fn progress_detail(meter: &kara_ops::Meter) -> String {
     parts.join(" · ")
 }
 
+/// Lo que se lee del disco al listar una carpeta.
+struct Loaded {
+    entries: Vec<kara_core::FileEntry>,
+    /// Nombres que el `.hidden` de la carpeta pide ocultar.
+    hidden: std::collections::BTreeSet<std::ffi::OsString>,
+}
+
+/// Lee una carpeta entera, `.hidden` incluido. Bloquea: se llama desde un hilo
+/// aparte, o al arrancar.
+fn read_folder(path: &Path) -> Result<Loaded, String> {
+    let listing = list_directory(path).map_err(|error| error.source.to_string())?;
+    Ok(Loaded {
+        entries: listing.entries,
+        hidden: kara_fs::read_hidden_file(path),
+    })
+}
+
 /// Qué hacer con un listado cuando llega del hilo que lo leyó.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Commit {
@@ -547,6 +579,8 @@ struct TabView {
     /// otro hilo.
     raw: Vec<kara_core::FileEntry>,
     raw_path: Option<PathBuf>,
+    /// Los nombres que el `.hidden` de `raw_path` pide ocultar.
+    raw_hidden: std::collections::BTreeSet<std::ffi::OsString>,
     /// El filtro por nombre, que es de la pestaña y no de la ventana.
     filter: String,
     /// La selección de antes de empezar el marco elástico.
@@ -566,6 +600,10 @@ pub struct AppRust {
     entry_icons: QStringList,
     entry_thumbs: QStringList,
     entry_dirs: cxx_qt_lib::QList<i32>,
+    entry_labels: QStringList,
+    entry_hidden: cxx_qt_lib::QList<i32>,
+    show_hidden: bool,
+    show_extensions: bool,
     entry_dates: QStringList,
     entry_selected: cxx_qt_lib::QList<i32>,
     entry_values: QStringList,
@@ -704,6 +742,10 @@ impl Default for AppRust {
             entry_icons: QStringList::default(),
             entry_thumbs: QStringList::default(),
             entry_dirs: cxx_qt_lib::QList::<i32>::default(),
+            entry_labels: QStringList::default(),
+            entry_hidden: cxx_qt_lib::QList::<i32>::default(),
+            show_hidden: prefs.show_hidden(),
+            show_extensions: prefs.show_extensions(),
             entry_dates: QStringList::default(),
             entry_selected: cxx_qt_lib::QList::<i32>::default(),
             entry_values: QStringList::default(),
@@ -807,8 +849,8 @@ impl Default for AppRust {
         // volcado va directo a los campos.
         // El primer listado, el único síncrono: la ventana todavía no existe y
         // no hay nada que congelar.
-        if let Ok(listing) = list_directory(&start) {
-            app.store_raw(&start, listing.entries);
+        if let Ok(loaded) = read_folder(&start) {
+            app.store_raw(&start, loaded);
         }
         if let Some(snapshot) = app.snapshot(&start) {
             app.version = QString::from(env!("CARGO_PKG_VERSION"));
@@ -818,6 +860,8 @@ impl Default for AppRust {
             app.entry_kinds = snapshot.kinds;
             app.entry_icons = snapshot.icons;
             app.entry_dirs = snapshot.dirs;
+            app.entry_labels = snapshot.labels;
+            app.entry_hidden = snapshot.hidden;
             app.entry_dates = snapshot.dates;
             app.entry_values = snapshot.values;
             app.column_ids = snapshot.column_ids;
@@ -922,6 +966,8 @@ struct Snapshot {
     kinds: QStringList,
     icons: QStringList,
     dirs: cxx_qt_lib::QList<i32>,
+    labels: QStringList,
+    hidden: cxx_qt_lib::QList<i32>,
     dates: QStringList,
     values: QStringList,
     column_ids: QStringList,
@@ -966,9 +1012,10 @@ impl AppRust {
     }
 
     /// Guarda el listado de disco de `target` en la pestaña activa.
-    fn store_raw(&mut self, target: &Path, entries: Vec<kara_core::FileEntry>) {
+    fn store_raw(&mut self, target: &Path, loaded: Loaded) {
         let view = self.view_mut();
-        view.raw = entries;
+        view.raw = loaded.entries;
+        view.raw_hidden = loaded.hidden;
         view.raw_path = Some(target.to_path_buf());
     }
 
@@ -1001,8 +1048,16 @@ impl AppRust {
             view.raw.clone()
         };
 
-        Visibility::default().retain_visible(&mut entries);
+        let visibility = Visibility {
+            show_hidden: self.show_hidden,
+            hidden_names: self.view().raw_hidden.clone(),
+        };
+        visibility.retain_visible(&mut entries);
         let total = entries.len();
+        let name_display = NameDisplay {
+            show_extensions: self.show_extensions,
+            ..NameDisplay::default()
+        };
 
         let filter = NameFilter::new(&self.view().filter.clone());
         if !filter.is_empty() {
@@ -1045,6 +1100,8 @@ impl AppRust {
                 // descripción la resuelve la base de MIME, que tiene memoria.
                 let text = if id.0.as_ref() == "kind" {
                     self.type_label(entry)
+                } else if id.0.as_ref() == "name" {
+                    name_display.label(entry, present::looks_executable(&entry.display))
                 } else {
                     present::cell_value(entry, id)
                 };
@@ -1164,6 +1221,15 @@ impl AppRust {
                 entries
                     .iter()
                     .map(|e| i32::from(e.kind == EntryKind::Directory)),
+            ),
+            labels: entries
+                .iter()
+                .map(|e| QString::from(&name_display.label(e, present::looks_executable(&e.display))))
+                .collect(),
+            hidden: ints(
+                entries
+                    .iter()
+                    .map(|e| i32::from(visibility.is_hidden(e))),
             ),
             jobs,
             count: clamp_count(entries.len()),
@@ -1421,6 +1487,8 @@ impl qobject::App {
         self.as_mut().set_entry_kinds(view.kinds);
         self.as_mut().set_entry_icons(view.icons);
         self.as_mut().set_entry_dirs(view.dirs);
+        self.as_mut().set_entry_labels(view.labels);
+        self.as_mut().set_entry_hidden(view.hidden);
         self.as_mut().set_entry_dates(view.dates);
         self.as_mut().set_entry_values(view.values);
         self.as_mut().set_column_ids(view.column_ids);
@@ -2185,6 +2253,24 @@ impl qobject::App {
         self.as_mut().set_op_state(QString::from("running"));
     }
 
+    fn toggle_hidden(mut self: Pin<&mut Self>) {
+        let on = !*self.show_hidden();
+        self.as_mut().set_show_hidden(on);
+        self.as_mut().rust_mut().get_mut().prefs.set_show_hidden(on);
+        self.as_mut().persist();
+        let current = PathBuf::from(self.path().to_string());
+        self.as_mut().render(&current);
+    }
+
+    fn toggle_extensions(mut self: Pin<&mut Self>) {
+        let on = !*self.show_extensions();
+        self.as_mut().set_show_extensions(on);
+        self.as_mut().rust_mut().get_mut().prefs.set_show_extensions(on);
+        self.as_mut().persist();
+        let current = PathBuf::from(self.path().to_string());
+        self.as_mut().render(&current);
+    }
+
     fn cancel_operation(self: Pin<&mut Self>) {
         if let Some(job) = &self.rust().paste_job {
             job.cancel();
@@ -2775,9 +2861,7 @@ impl qobject::App {
 
         let thread = self.qt_thread();
         std::thread::spawn(move || {
-            let result = list_directory(&target)
-                .map(|listing| listing.entries)
-                .map_err(|error| error.source.to_string());
+            let result = read_folder(&target);
             // Si la ventana se cerró, nadie espera el resultado.
             let _ = thread.queue(move |app| app.finish_listing(id, target, commit, result));
         });
@@ -2789,7 +2873,7 @@ impl qobject::App {
         id: u64,
         target: PathBuf,
         commit: Commit,
-        result: Result<Vec<kara_core::FileEntry>, String>,
+        result: Result<Loaded, String>,
     ) {
         // Otro listado se pidió después: este es de una carpeta que el usuario
         // ya dejó atrás.
@@ -2798,8 +2882,8 @@ impl qobject::App {
         }
         self.as_mut().set_loading(false);
 
-        let entries = match result {
-            Ok(entries) => entries,
+        let loaded = match result {
+            Ok(loaded) => loaded,
             Err(reason) => {
                 // Un salto por el historial que ya no se puede listar se marca
                 // inválido y no se mueve: la carpeta pudo desaparecer.
@@ -2828,7 +2912,7 @@ impl qobject::App {
         if matches!(commit, Commit::Navigate | Commit::Jump) {
             self.as_mut().leave_trash();
         }
-        self.as_mut().rust_mut().get_mut().store_raw(&target, entries);
+        self.as_mut().rust_mut().get_mut().store_raw(&target, loaded);
         if !self.as_mut().render(&target) {
             return;
         }
@@ -2853,13 +2937,10 @@ impl qobject::App {
     /// resultado ya (el editor de renombrado busca la entrada recién creada).
     fn render_fresh(mut self: Pin<&mut Self>, target: &Path) -> bool {
         if !*self.in_trash() {
-            let Ok(listing) = list_directory(target) else {
+            let Ok(loaded) = read_folder(target) else {
                 return false;
             };
-            self.as_mut()
-                .rust_mut()
-                .get_mut()
-                .store_raw(target, listing.entries);
+            self.as_mut().rust_mut().get_mut().store_raw(target, loaded);
         }
         self.render(target)
     }

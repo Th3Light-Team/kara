@@ -96,7 +96,9 @@ GridView {
         required property int index
         readonly property bool selected: (grid.app.entry_selected[cell.index] ?? 0) !== 0
         readonly property bool current: grid.app.focused_index === cell.index
-        readonly property string entryName: grid.app.entry_names[cell.index] ?? ""
+        readonly property string entryName: grid.app.entry_labels[cell.index] ?? ""
+        // Lo oculto se dibuja atenuado, como en Dolphin.
+        opacity: (grid.app.entry_hidden[cell.index] ?? 0) !== 0 ? 0.55 : 1
 
         width: grid.cellWidth
         height: grid.cellHeight

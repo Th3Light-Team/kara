@@ -152,6 +152,28 @@ impl Prefs {
         self.settings.set(WINDOW, "focus_mode", on.to_string());
     }
 
+    /// Whether hidden files (leading dot, or listed in a folder's `.hidden`)
+    /// are shown. Off by default, like every desktop file manager.
+    #[must_use]
+    pub fn show_hidden(&self) -> bool {
+        self.flag(VIEW, "show_hidden").unwrap_or(false)
+    }
+
+    pub fn set_show_hidden(&mut self, on: bool) {
+        self.settings.set(VIEW, "show_hidden", on.to_string());
+    }
+
+    /// Whether file names are shown with their extension. On by default: it is
+    /// what Dolphin and Nautilus do, and hiding them is an opt-in.
+    #[must_use]
+    pub fn show_extensions(&self) -> bool {
+        self.flag(VIEW, "show_extensions").unwrap_or(true)
+    }
+
+    pub fn set_show_extensions(&mut self, on: bool) {
+        self.settings.set(VIEW, "show_extensions", on.to_string());
+    }
+
     /// The view every folder that has not been configured is shown with.
     #[must_use]
     pub fn default_view(&self) -> ViewSettings {
@@ -265,6 +287,18 @@ mod tests {
         assert_eq!(prefs.default_view(), ViewSettings::default());
         assert_eq!(prefs.sort_defaults(), SortSpec::default());
         assert!(prefs.pinned().is_empty());
+    }
+
+    #[test]
+    fn hidden_files_are_off_and_extensions_on_until_the_user_says_otherwise() {
+        let mut prefs = empty();
+        assert!(!prefs.show_hidden());
+        assert!(prefs.show_extensions());
+
+        prefs.set_show_hidden(true);
+        prefs.set_show_extensions(false);
+        assert!(prefs.show_hidden());
+        assert!(!prefs.show_extensions());
     }
 
     #[test]

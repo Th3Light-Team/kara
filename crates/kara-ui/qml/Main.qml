@@ -387,6 +387,11 @@ Window {
         onActivated: app.redo()
     }
     Shortcut {
+        enabled: !ops.promptOpen
+        sequences: ["Ctrl+H", "Alt+."]
+        onActivated: app.toggle_hidden()
+    }
+    Shortcut {
         // Una pregunta abierta es de quien espera la respuesta: ni Supr ni Enter
         // ni Ctrl+V deben llegar a la vista que hay debajo.
         enabled: !ops.promptOpen
@@ -566,6 +571,31 @@ Window {
                             tip: modelData.tip
                             currentMode: app.view_mode
                             onClicked: app.set_view(modelData.mode, 0)
+                        }
+                    }
+                }
+
+                // «Ver» y lo que no tiene botón propio. Todo lo de aquí tiene
+                // también su atajo; el menú es para encontrarlo.
+                NavButton {
+                    id: moreButton
+                    glyph: "⋯"
+                    tip: qsTr("Más opciones")
+                    onClicked: moreMenu.popup(moreButton, 0, moreButton.height)
+
+                    Menu {
+                        id: moreMenu
+                        MenuItem {
+                            text: qsTr("Mostrar archivos ocultos\tCtrl+H")
+                            checkable: true
+                            checked: app.show_hidden
+                            onTriggered: app.toggle_hidden()
+                        }
+                        MenuItem {
+                            text: qsTr("Mostrar extensiones de nombre")
+                            checkable: true
+                            checked: app.show_extensions
+                            onTriggered: app.toggle_extensions()
                         }
                     }
                 }

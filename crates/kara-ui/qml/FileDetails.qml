@@ -237,6 +237,8 @@ Item {
             // desde donde está el cursor aunque no esté seleccionado.
             readonly property bool selected: (view.app.entry_selected[row.index] ?? 0) !== 0
             readonly property bool current: view.app.focused_index === row.index
+            // Lo oculto se dibuja atenuado, como en Dolphin.
+            opacity: (view.app.entry_hidden[row.index] ?? 0) !== 0 ? 0.55 : 1
 
             width: rows.width
             height: Math.max(Theme.rowHeight, view.app.icon_size + 8)

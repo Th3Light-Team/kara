@@ -459,6 +459,21 @@ fn expand_vars(text: &str) -> String {
     out
 }
 
+/// Extensiones de lo que se ejecuta o lanza. Con las extensiones ocultas
+/// `factura.pdf.exe` se leería `factura.pdf`; estas no se ocultan nunca.
+///
+/// Se decide por el nombre porque mirar el bit de ejecución es un `stat` por
+/// entrada, y en una carpeta de 100 000 ficheros eso es un segundo más en el
+/// hilo de la ventana.
+pub fn looks_executable(name: &str) -> bool {
+    const LAUNCHERS: [&str; 17] = [
+        "exe", "bat", "cmd", "com", "msi", "scr", "vbs", "ps1", "sh", "bash", "py", "pl", "rb",
+        "run", "appimage", "desktop", "jar",
+    ];
+    kara_core::filter::base_and_extension(name)
+        .is_some_and(|(_, ext)| LAUNCHERS.iter().any(|l| ext.eq_ignore_ascii_case(l)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,5 +633,16 @@ mod tests {
         );
         let labels: Vec<String> = segments.iter().map(crumb_label).collect();
         assert_eq!(labels, ["Sistema de archivos", "home", "Inicio", "Documentos"]);
+    }
+
+    #[test]
+    fn un_lanzador_nunca_pierde_su_extension_aunque_se_oculten() {
+        assert!(looks_executable("factura.pdf.exe"));
+        assert!(looks_executable("INSTALAR.SH"));
+        assert!(looks_executable("Kara.AppImage"));
+        assert!(!looks_executable("factura.pdf"));
+        assert!(!looks_executable("Makefile"));
+        // Un dotfile no tiene extension: el punto marca «oculto».
+        assert!(!looks_executable(".sh"));
     }
 }
