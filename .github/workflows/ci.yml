@@ -40,6 +40,11 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
 
+      - name: /tmp on its own volume
+        # The trash tests in kara-fs need /tmp and the source tree on different
+        # devices (on a desktop /tmp is tmpfs); on the runner they share a disk.
+        run: sudo mount -t tmpfs -o mode=1777 tmpfs /tmp
+
       - name: Tests
         run: cargo test --workspace
 
