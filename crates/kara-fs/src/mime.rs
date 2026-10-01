@@ -36,8 +36,14 @@ struct Glob {
 pub struct MimeDatabase {
     /// Nombres completos: `Makefile`, `pom.xml`.
     literals: Vec<Glob>,
-    /// Patrones `*.algo`, indexados por su extensión ya en minúsculas.
+    /// Patrones `*.algo`.
     suffixes: Vec<Glob>,
+    /// Posiciones en `suffixes`, por la cola (`.algo`) en minúsculas.
+    ///
+    /// Sin esto cada consulta recorría los ~1 400 patrones, y listar una carpeta
+    /// con 100 000 entradas hace varias consultas por entrada: un segundo
+    /// entero solo en esto. Con el índice se prueba cada punto del nombre.
+    suffix_index: HashMap<Vec<u8>, Vec<usize>>,
     /// Todo lo demás: `callgrind.out*`, `sconscript.*`.
     others: Vec<Glob>,
     /// Icono genérico por tipo, de `/usr/share/mime/generic-icons`.
@@ -68,9 +74,19 @@ impl MimeDatabase {
             return Some(found);
         }
 
-        let by_suffix = self
-            .suffixes
-            .iter()
+        // Cada patrón `*.algo` solo puede casar si la cola del nombre desde
+        // algún punto es `.algo`, así que se prueban esas colas y no todos los
+        // patrones. El resultado es el mismo que recorrerlos todos.
+        let by_suffix = name
+            .bytes()
+            .enumerate()
+            .filter(|(_, byte)| *byte == b'.')
+            .filter_map(|(at, _)| {
+                self.suffix_index
+                    .get(&name.as_bytes()[at..].to_ascii_lowercase())
+            })
+            .flatten()
+            .map(|index| &self.suffixes[*index])
             .filter(|g| g.matches_suffix(name))
             // El patrón más largo primero; a igualdad, el de más peso; y en
             // último término el tipo alfabéticamente menor. Ese último criterio
@@ -194,6 +210,12 @@ pub fn parse_globs2(text: &str) -> MimeDatabase {
         } else {
             db.literals.push(glob);
         }
+    }
+
+    for (position, glob) in db.suffixes.iter().enumerate() {
+        // `*` + `.algo`: la cola es el patrón sin el comodín.
+        let tail = glob.pattern.as_bytes()[1..].to_ascii_lowercase();
+        db.suffix_index.entry(tail).or_default().push(position);
     }
 
     db
@@ -387,4 +409,40 @@ fn unescape_xml(text: &str) -> String {
         .replace("&apos;", "'")
         // La del ampersand va la última: al revés, `&amp;lt;` acabaría en `<`.
         .replace("&amp;", "&")
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+
+    /// What a lookup did before the index: every suffix pattern, in turn.
+    fn brute_force<'a>(db: &'a MimeDatabase, name: &str) -> Option<&'a str> {
+        db.suffixes
+            .iter()
+            .filter(|g| g.matches_suffix(name))
+            .max_by_key(|g| (g.pattern.len(), g.weight, Reverse(&g.mime)))
+            .map(|g| g.mime.as_str())
+    }
+
+    #[test]
+    fn the_suffix_index_answers_exactly_what_scanning_every_pattern_did() {
+        let sample = "50:application/gzip:*.gz\n\
+                      50:application/x-compressed-tar:*.tar.gz\n\
+                      50:text/x-csrc:*.c\n\
+                      50:text/x-c++src:*.C:cs\n\
+                      50:application/json:*.json\n\
+                      50:application/schema+json:*.json\n\
+                      50:image/jpeg:*.jpg\n";
+        let db = parse_globs2(sample);
+        for name in [
+            "a.tar.gz", "A.TAR.GZ", "x.gz", "x.c", "x.C", "x.cc", "noext", ".gz", "a..gz", "photo.JPG",
+            "data.json", "archive.tar.gz.gz", "ñandú.jpg", "dot.", "..", "a.b.c",
+        ] {
+            assert_eq!(
+                db.of(name).filter(|_| brute_force(&db, name).is_some()),
+                brute_force(&db, name),
+                "{name}"
+            );
+        }
+    }
 }
