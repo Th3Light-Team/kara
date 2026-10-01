@@ -140,7 +140,18 @@ pub const TRASH_INDEX: &str = "kara/trash-index";
 pub fn trash_row(entry: &kara_fs::trash::TrashEntry, index: usize) -> FileEntry {
     use kara_core::entry::{MetadataKey, MetadataValue};
 
-    let original = entry.display_path().to_path_buf();
+    // El nombre y la carpeta son los de **antes de borrarlo**, que es lo que el
+    // usuario reconoce. `display_path()` es la ruta dentro de la papelera: ahí
+    // el fichero puede llevar un sufijo para no chocar con otro, y su carpeta es
+    // `files/`, que no le dice a nadie de dónde salió. Solo una entrada sin su
+    // `.trashinfo` no sabe su origen y cae al nombre que tiene en la papelera.
+    let (original, location): (&std::path::Path, Option<std::path::PathBuf>) = match entry {
+        kara_fs::trash::TrashEntry::Item(item) => (&item.original_path, item.original_path.parent().map(std::path::Path::to_path_buf)),
+        kara_fs::trash::TrashEntry::MissingFile { original_path, .. } => {
+            (original_path, original_path.parent().map(std::path::Path::to_path_buf))
+        }
+        kara_fs::trash::TrashEntry::MissingInfo { file_path, .. } => (file_path, None),
+    };
     let name = original
         .file_name()
         .map_or_else(|| std::ffi::OsString::from("?"), |name| name.to_os_string());
@@ -161,7 +172,7 @@ pub fn trash_row(entry: &kara_fs::trash::TrashEntry, index: usize) -> FileEntry 
         type_label: None,
         // La carpeta de la que salió, que es lo que hace útil la papelera:
         // sin ella no se sabe qué se está restaurando.
-        location: original.parent().map(std::path::Path::to_path_buf),
+        location,
         extra: kara_core::entry::MetadataBag::new(),
     };
     row.extra.insert(
@@ -925,5 +936,199 @@ mod tests {
         let live = SizeUpdate::new(0, totals, false, false);
         assert!(live.size_text().starts_with("Calculando…"));
         assert_eq!(done.contents_text(), "3 archivos, 2 carpetas");
+    }
+
+    // ---- what the columns and labels say -----------------------------------
+
+    fn entry(name: &str, kind: EntryKind) -> FileEntry {
+        FileEntry {
+            name: std::ffi::OsString::from(name),
+            display: name.to_string(),
+            kind,
+            is_symlink: false,
+            symlink_broken: false,
+            is_hidden: false,
+            size: None,
+            modified: None,
+            created: None,
+            accessed: None,
+            type_label: None,
+            location: None,
+            extra: kara_core::entry::MetadataBag::new(),
+        }
+    }
+
+    fn column(id: &'static str) -> ColumnId {
+        ColumnId(std::borrow::Cow::Borrowed(id))
+    }
+
+    #[test]
+    fn una_carpeta_no_tiene_tamano_y_un_fichero_vacio_si() {
+        let folder = entry("docs", EntryKind::Directory);
+        assert_eq!(size_label(&folder), "", "vacío, no «0 B»: no se midió");
+
+        let mut empty = entry("vacio.txt", EntryKind::File);
+        empty.size = Some(0);
+        assert_eq!(size_label(&empty), "0 B");
+        empty.size = Some(2048);
+        assert_eq!(size_label(&empty), "2.0 KB");
+    }
+
+    #[test]
+    fn el_tamano_con_bytes_no_repite_los_bytes_de_lo_pequeno() {
+        assert_eq!(size_with_bytes(0), "0 bytes");
+        assert_eq!(size_with_bytes(1023), "1023 bytes");
+        assert_eq!(size_with_bytes(1024), "1.0 KB (1024 bytes)");
+    }
+
+    #[test]
+    fn la_fecha_ausente_se_deja_en_blanco_y_la_presente_lleva_dia_mes_ano_y_hora() {
+        assert_eq!(modified_label(None), "");
+
+        let text = modified_label(Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_400 * 366)));
+        // dd/mm/aaaa hh:mm, sea cual sea la zona del equipo.
+        let bytes = text.as_bytes();
+        assert_eq!(text.len(), 16, "{text}");
+        assert_eq!((bytes[2], bytes[5], bytes[10], bytes[13]), (b'/', b'/', b' ', b':'));
+    }
+
+    #[test]
+    fn el_tipo_intrinseco_cubre_carpetas_y_enlaces_rotos_y_deja_el_resto_a_la_base_de_mime() {
+        assert_eq!(
+            intrinsic_type_label(&entry("docs", EntryKind::Directory)),
+            Some("Carpeta de archivos")
+        );
+        assert_eq!(intrinsic_type_label(&entry("a.txt", EntryKind::File)), None);
+
+        // Un enlace roto no se describe por su extensión: el destino no existe.
+        let mut broken = entry("a.txt", EntryKind::File);
+        broken.symlink_broken = true;
+        assert_eq!(intrinsic_type_label(&broken), Some("Enlace roto"));
+        let mut broken_dir = entry("d", EntryKind::Directory);
+        broken_dir.symlink_broken = true;
+        assert_eq!(intrinsic_type_label(&broken_dir), Some("Enlace roto"));
+    }
+
+    #[test]
+    fn cada_columna_conocida_tiene_etiqueta_y_la_desconocida_se_enseña_tal_cual() {
+        assert_eq!(column_label(&column("name")), "Nombre");
+        assert_eq!(column_label(&column("modified")), "Fecha de modificación");
+        assert_eq!(column_label(&column("meta/exposicion")), "meta/exposicion");
+        for id in ["name", "extension", "size", "modified", "created", "accessed", "kind", "location"] {
+            assert_ne!(column_label(&column(id)), id, "{id} debería estar traducida");
+        }
+    }
+
+    #[test]
+    fn las_celdas_salen_de_la_entrada_y_lo_que_no_aplica_queda_vacio() {
+        let mut file = entry("informe.final.pdf", EntryKind::File);
+        file.size = Some(1536);
+        file.location = Some(PathBuf::from("/home/ana/Docs"));
+
+        assert_eq!(cell_value(&file, &column("name")), "informe.final.pdf");
+        assert_eq!(cell_value(&file, &column("size")), "1.5 KB");
+        assert_eq!(cell_value(&file, &column("extension")), "pdf");
+        assert_eq!(cell_value(&file, &column("location")), "/home/ana/Docs");
+        // «Tipo» lo inyecta el puente; una columna de metadatos aún no tiene extractor.
+        assert_eq!(cell_value(&file, &column("kind")), "");
+        assert_eq!(cell_value(&file, &column("artist")), "");
+        assert_eq!(cell_value(&entry("README", EntryKind::File), &column("extension")), "");
+    }
+
+    #[test]
+    fn una_pestana_se_llama_como_su_carpeta_y_la_raiz_y_la_papelera_tienen_nombre_propio() {
+        assert_eq!(tab_title(Path::new("/home/ana/Documentos"), false), "Documentos");
+        assert_eq!(tab_title(Path::new("/"), false), "Sistema de archivos");
+        assert_eq!(tab_title(Path::new("/home/ana"), true), "Papelera");
+    }
+
+    #[test]
+    fn las_secciones_y_las_ubicaciones_se_leen_en_espanol() {
+        use kara_core::tree::SectionId;
+        assert_eq!(section_label(SectionId::QuickAccess), "Acceso rápido");
+        assert_eq!(section_label(SectionId::ThisComputer), "Este equipo");
+
+        let place = |kind, label: Option<&str>| kara_fs::places::Place {
+            path: PathBuf::from("/mnt/usb"),
+            kind,
+            label: label.map(std::ffi::OsString::from),
+        };
+        assert_eq!(place_label(&place(PlaceKind::Home, None)), "Inicio");
+        assert_eq!(place_label(&place(PlaceKind::Downloads, None)), "Descargas");
+        assert_eq!(place_label(&place(PlaceKind::Volume, Some("PENDRIVE"))), "PENDRIVE");
+        // Sin nombre legible no queda más que la ruta.
+        assert_eq!(place_label(&place(PlaceKind::Volume, None)), "/mnt/usb");
+    }
+
+    #[test]
+    fn los_iconos_de_cada_ubicacion_acaban_siempre_en_algo_que_todo_tema_trae() {
+        for kind in [
+            PlaceKind::Home,
+            PlaceKind::Desktop,
+            PlaceKind::Downloads,
+            PlaceKind::Documents,
+            PlaceKind::Pictures,
+            PlaceKind::Music,
+            PlaceKind::Videos,
+            PlaceKind::Root,
+            PlaceKind::Volume,
+        ] {
+            let icons = place_icons(kind);
+            assert!(icons.len() >= 2, "{kind:?}: hace falta un respaldo");
+            assert!(icons.contains(&"folder") || icons.contains(&"drive-harddisk"), "{kind:?}");
+        }
+    }
+
+    fn date() -> kara_fs::trash::DeletionDate {
+        kara_fs::trash::DeletionDate { year: 2026, month: 9, day: 30, hour: 12, minute: 0, second: 0 }
+    }
+
+    #[test]
+    fn una_fila_de_papelera_lleva_el_nombre_y_la_carpeta_de_antes_de_borrar_no_los_de_dentro_de_la_papelera() {
+        // En la papelera se llama `viejo.2.txt` y vive en `files/`; el usuario
+        // lo borró de `/home/ana/Docs` y lo conoce como `viejo.txt`.
+        let item = kara_fs::trash::TrashEntry::Item(kara_fs::trash::TrashedItem {
+            original_path: PathBuf::from("/home/ana/Docs/viejo.txt"),
+            trashed_path: PathBuf::from("/home/ana/.local/share/Trash/files/viejo.2.txt"),
+            info_path: PathBuf::from("/home/ana/.local/share/Trash/info/viejo.2.txt.trashinfo"),
+            deletion_date: date(),
+            kind: kara_fs::trash::TrashKind::Home,
+            top_dir: None,
+            bytes_copied: None,
+        });
+        let row = trash_row(&item, 7);
+
+        assert_eq!(row.display, "viejo.txt");
+        assert_eq!(row.location.as_deref(), Some(Path::new("/home/ana/Docs")));
+        // Ordenar reordena las filas: el índice viaja con la fila, no con su sitio.
+        assert_eq!(trash_index_of(&row), Some(7));
+        assert_eq!(trash_index_of(&entry("normal.txt", EntryKind::File)), None);
+    }
+
+    #[test]
+    fn una_entrada_sin_su_fichero_sigue_sabiendo_de_donde_salio() {
+        let item = kara_fs::trash::TrashEntry::MissingFile {
+            info_path: PathBuf::from("/t/info/a.trashinfo"),
+            original_path: PathBuf::from("/home/ana/Docs/viejo.txt"),
+            deletion_date: date(),
+            kind: kara_fs::trash::TrashKind::Home,
+            top_dir: None,
+        };
+        let row = trash_row(&item, 0);
+        assert_eq!(row.display, "viejo.txt");
+        assert_eq!(row.location.as_deref(), Some(Path::new("/home/ana/Docs")));
+    }
+
+    #[test]
+    fn una_entrada_sin_trashinfo_no_inventa_un_origen() {
+        let item = kara_fs::trash::TrashEntry::MissingInfo {
+            file_path: PathBuf::from("/t/files/huerfano.bin"),
+            kind: kara_fs::trash::TrashKind::Home,
+            top_dir: None,
+        };
+        let row = trash_row(&item, 3);
+        assert_eq!(row.display, "huerfano.bin");
+        assert_eq!(row.location, None, "su carpeta de origen se desconoce");
+        assert_eq!(trash_index_of(&row), Some(3));
     }
 }
