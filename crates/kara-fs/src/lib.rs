@@ -19,8 +19,6 @@ pub mod icons;
 
 pub mod mime;
 
-pub mod open;
-
 pub mod places;
 
 pub mod props;

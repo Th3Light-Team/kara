@@ -23,13 +23,62 @@ Window {
     height: 720
     minimumWidth: 560
     minimumHeight: 360
-    visible: true
-    title: qsTr("Kara")
+    // Started by the session bus to show something (FileManager1), Kara
+    // stays off screen until it knows what; every other start shows at once.
+    visible: app.window_wanted
+    // What the desktop's window switcher shows: the folder first, as in the
+    // Explorer and in Dolphin, so two Kara windows can be told apart.
+    title: {
+        const folder = app.tab_titles[app.active_tab] ?? "";
+        return folder === "" ? qsTr("Kara") : qsTr("%1 — Kara").arg(folder);
+    }
     flags: Qt.Window | Qt.FramelessWindowHint
     color: Theme.windowBg
 
+    // Menus, tooltips and dialogs draw with the Quick Controls palette, and
+    // on a desktop without a Qt platform theme (GNOME) that palette is
+    // always light. Deriving it from Theme keeps them in step with the rest
+    // of the window, the same on every desktop.
+    palette.window: Theme.toolbar
+    palette.windowText: Theme.text
+    palette.base: Theme.content
+    palette.alternateBase: Theme.sidebar
+    palette.text: Theme.text
+    palette.button: Theme.toolbar
+    palette.buttonText: Theme.text
+    palette.highlight: Theme.accent
+    palette.highlightedText: Theme.textOnAccent
+    palette.placeholderText: Theme.textDim
+    palette.toolTipBase: Theme.field
+    palette.toolTipText: Theme.text
+    palette.light: Theme.hover
+    palette.midlight: Theme.hover
+    palette.mid: Theme.divider
+    palette.dark: Theme.pressed
+    palette.shadow: Theme.dark ? "#000000" : "#A0A0A0"
+
     App {
         id: app
+    }
+
+    // The desktop's light/dark preference and accent, live.
+    Binding {
+        target: Theme
+        property: "desktopScheme"
+        value: app.desktop_scheme
+    }
+    Binding {
+        target: Theme
+        property: "desktopAccent"
+        value: app.desktop_accent === "" ? "transparent" : app.desktop_accent
+    }
+
+    // Woken up by D-Bus for a request that never came: nothing to show, so
+    // nothing to keep running for.
+    Timer {
+        running: !app.window_wanted
+        interval: 15000
+        onTriggered: Qt.quit()
     }
 
     // ---- Atajos (ground/spec/07-atajos-teclado.md) --------------------------
@@ -445,48 +494,54 @@ Window {
             Layout.preferredHeight: Theme.titleBarHeight
             color: Theme.titleBar
 
-            MouseArea {
+            // Dragging the empty bar moves the window and a double click
+            // maximizes it. Both go through `WindowDrag`, which starts the
+            // compositor's move only once the pointer really drags.
+            WindowDrag {
                 anchors.fill: parent
-                onPressed: {
-                    if (typeof win.startSystemMove === "function")
-                        win.startSystemMove();
-                }
-                onDoubleClicked: win.toggleMaximized()
+                window: win
             }
 
             RowLayout {
                 anchors.fill: parent
                 spacing: 0
 
+                Image {
+                    Layout.leftMargin: 12
+                    Layout.preferredWidth: 16
+                    Layout.preferredHeight: 16
+                    source: "qrc:/qt/qml/com/kara/ui/icons/kara.svg"
+                    sourceSize.width: 16
+                    sourceSize.height: 16
+                }
                 Text {
-                    Layout.leftMargin: 14
-                    text: qsTr("Kara")
+                    Layout.leftMargin: 8
+                    Layout.fillWidth: true
+                    // Lo mismo que dice el selector de ventanas del escritorio.
+                    text: win.title
+                    elide: Text.ElideRight
                     color: Theme.text
                     font.family: Theme.family
                     font.pixelSize: Theme.sizeTitle
-                    font.weight: Font.DemiBold
-                }
-                Item {
-                    Layout.fillWidth: true
                 }
 
                 TitleButton {
-                    glyph: Theme.dark ? "☀" : "☾"
+                    kind: Theme.dark ? "sun" : "moon"
                     tip: qsTr("Cambiar tema")
                     onClicked: Theme.toggle()
                 }
                 TitleButton {
-                    glyph: "–"
+                    kind: "minimize"
                     tip: qsTr("Minimizar")
                     onClicked: win.showMinimized()
                 }
                 TitleButton {
-                    glyph: win.visibility === Window.Maximized ? "❐" : "□"
-                    tip: qsTr("Maximizar")
+                    kind: win.visibility === Window.Maximized ? "restore" : "maximize"
+                    tip: win.visibility === Window.Maximized ? qsTr("Restaurar") : qsTr("Maximizar")
                     onClicked: win.toggleMaximized()
                 }
                 TitleButton {
-                    glyph: "✕"
+                    kind: "close"
                     danger: true
                     tip: qsTr("Cerrar")
                     onClicked: win.close()
@@ -854,6 +909,59 @@ Window {
                     }
                 }
 
+                // What is worth telling and is not an error: a drive being
+                // ejected while its cache is written out, then that it may be
+                // pulled out. Work in progress stays; news fades.
+                Rectangle {
+                    id: noticeBanner
+                    anchors.top: errorBanner.bottom
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    height: visible ? 34 : 0
+                    visible: app.notice !== ""
+                    color: Theme.selection
+                    z: 10
+
+                    Timer {
+                        running: noticeBanner.visible && !app.notice_sticky
+                        interval: 6000
+                        onTriggered: app.dismiss_notice()
+                    }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 14
+                        anchors.rightMargin: 6
+                        spacing: 8
+
+                        Text {
+                            text: app.notice
+                            Layout.fillWidth: true
+                            elide: Text.ElideRight
+                            color: Theme.text
+                            font.family: Theme.family
+                            font.pixelSize: Theme.sizeBase
+                        }
+                        Item {
+                            implicitWidth: 26
+                            implicitHeight: 26
+                            visible: !app.notice_sticky
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "✕"
+                                color: Theme.textDim
+                                font.pixelSize: Theme.sizeSmall
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: app.dismiss_notice()
+                            }
+                        }
+                    }
+                }
+
                 // Vacío explícito: una lista en blanco no distingue «carpeta vacía»
                 // de «el filtro no deja pasar nada», y son dos situaciones distintas.
                 Text {
@@ -924,6 +1032,14 @@ Window {
         app: app
     }
 
+    AppChooserDialog {
+        app: app
+    }
+
+    UnlockDialog {
+        app: app
+    }
+
     OperationDialog {
         id: ops
         app: app
@@ -980,7 +1096,11 @@ Window {
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.bottom: parent.bottom
-        anchors.margins: 6
+        // Only along the edge: the margins leave the corners to their own
+        // handles. A plain `anchors.margins` also pushed the strip 6 px in from
+        // the edge, so the outermost pixels did not resize at all.
+        anchors.topMargin: 8
+        anchors.bottomMargin: 8
         width: 6
     }
     ResizeHandle {
@@ -989,7 +1109,8 @@ Window {
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.bottom: parent.bottom
-        anchors.margins: 6
+        anchors.topMargin: 8
+        anchors.bottomMargin: 8
         width: 6
     }
     ResizeHandle {
@@ -998,7 +1119,8 @@ Window {
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.margins: 6
+        anchors.leftMargin: 8
+        anchors.rightMargin: 8
         height: 6
     }
     ResizeHandle {
@@ -1007,7 +1129,8 @@ Window {
         anchors.bottom: parent.bottom
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.margins: 6
+        anchors.leftMargin: 8
+        anchors.rightMargin: 8
         height: 6
     }
     ResizeHandle {

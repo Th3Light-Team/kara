@@ -436,6 +436,37 @@ impl Icons {
         }
     }
 
+    /// Like [`Icons::load`], with the theme named by the caller instead of the
+    /// one the configuration files name. On GNOME the theme is published by
+    /// the Settings portal, which `kara-desktop` reads; a `kdeglobals` left
+    /// behind by an earlier Plasma session would otherwise win.
+    #[must_use]
+    pub fn with_theme(theme: &str, size: u32) -> Self {
+        Self {
+            theme: IconTheme::named(theme),
+            mime: MimeDatabase::load(),
+            size,
+            resolved: HashMap::new(),
+        }
+    }
+
+    /// The size icons are looked up at.
+    #[must_use]
+    pub fn size(&self) -> u32 {
+        self.size
+    }
+
+    /// Looks icons up at another size from now on, forgetting what was found
+    /// at the old one. Themes that ship bitmaps (Yaru, Humanity) have a
+    /// different file per size, and a 16-pixel PNG scaled up to a 96-pixel
+    /// grid cell is a blur.
+    pub fn set_size(&mut self, size: u32) {
+        if size != self.size {
+            self.size = size;
+            self.resolved.clear();
+        }
+    }
+
     /// El tipo MIME de un nombre, según la base que este resolutor ya tiene
     /// cargada. Se ofrece aquí para que quien pinta la columna «Tipo» no tenga
     /// que cargar una segunda copia de la base entera.

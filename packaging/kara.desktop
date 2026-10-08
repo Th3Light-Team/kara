@@ -2,9 +2,13 @@
 Type=Application
 Name=Kara
 GenericName=File Manager
+GenericName[es]=Explorador de archivos
 Comment=A file explorer with the feel of Windows 11, built for Linux
-Exec=kara-ui %f
+Comment[es]=Un explorador de archivos con la sensación de Windows 11, hecho para Linux
+Exec=kara-ui %U
 Icon=kara
 Terminal=false
+StartupNotify=true
 Categories=System;FileTools;FileManager;
+Keywords=folder;files;explorer;disk;drive;carpeta;archivos;explorador;
 MimeType=inode/directory;

@@ -45,12 +45,29 @@ fetch linuxdeploy-plugin-qt https://github.com/linuxdeploy/linuxdeploy-plugin-qt
 export APPIMAGE_EXTRACT_AND_RUN=1
 # The plugin reads the QML sources to learn which modules Kara imports.
 export QML_SOURCES_PATHS="$here/crates/kara-ui/qml"
-# Only Qt's X11 platform plugin is bundled, and packaging/AppRun makes it the
-# default: a bundle with the Wayland plugin but without its graphics integration
-# aborts at start-up on a Wayland session (found by running the first release).
-# On Wayland that means XWayland.
 export LINUXDEPLOY_OUTPUT_VERSION="$version"
 export PATH="$tools:$PATH"
+
+# Wayland. Qt's Wayland platform plugin is useless without the plugins it
+# loads at run time — the graphics integration, the shell integration, the
+# decorations — and a bundle with the first and not the rest aborts on a
+# Wayland session (that is what the first release did). Nothing links to those
+# plugins, so the deployer does not find them; they are copied in by hand below
+# and their libraries deployed after. Both halves exist or neither is shipped,
+# and packaging/AppRun only picks Wayland when they are there.
+plugins=$("$QMAKE" -query QT_INSTALL_PLUGINS)
+wayland_dirs=(wayland-graphics-integration-client wayland-shell-integration wayland-decoration-client)
+wayland=yes
+[ -e "$plugins/platforms/libqwayland.so" ] || wayland=no
+for dir in "${wayland_dirs[@]}"; do
+    [ -d "$plugins/$dir" ] || wayland=no
+done
+if [ "$wayland" = yes ]; then
+    export EXTRA_PLATFORM_PLUGINS="libqwayland.so"
+    echo "build-appimage: bundling the Wayland platform plugin and its integrations"
+else
+    echo "build-appimage: this Qt lacks a complete Wayland plugin set; the AppImage will use XWayland on Wayland sessions"
+fi
 
 rm -rf "$here/AppDir"
 cd "$out"
@@ -61,7 +78,21 @@ cd "$out"
     --icon-file "$here/packaging/kara.svg" \
     --icon-filename kara \
     --custom-apprun "$here/packaging/AppRun" \
-    --plugin qt \
+    --plugin qt
+
+deps=()
+if [ "$wayland" = yes ]; then
+    for dir in "${wayland_dirs[@]}"; do
+        mkdir -p "$here/AppDir/usr/plugins/$dir"
+        cp -a "$plugins/$dir/." "$here/AppDir/usr/plugins/$dir/"
+        deps+=(--deploy-deps-only "$here/AppDir/usr/plugins/$dir")
+    done
+fi
+
+# Second pass: the libraries those plugins need, then the image itself.
+"$tools/linuxdeploy" \
+    --appdir "$here/AppDir" \
+    "${deps[@]}" \
     --output appimage
 
 # linuxdeploy names it after the desktop file's Name.

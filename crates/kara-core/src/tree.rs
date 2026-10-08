@@ -35,6 +35,8 @@ pub enum SectionId {
     QuickAccess,
     /// La raíz y los volúmenes montados.
     ThisComputer,
+    /// Network locations: shares, servers and devices the desktop mounted.
+    Network,
 }
 
 /// Una carpeta del árbol.

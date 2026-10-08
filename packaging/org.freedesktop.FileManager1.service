@@ -1,0 +1,12 @@
+# Lets the session bus start Kara when another application asks the file
+# manager to show something — a browser's «Show in folder», or the OpenURI
+# portal's OpenDirectory. Kara also answers on this name whenever it is the
+# default application for folders.
+#
+# For a system-wide install this file goes to /usr/share/dbus-1/services/.
+# For a per-user one, `scripts/install-desktop-integration` writes a copy with
+# the real path of the binary to ~/.local/share/dbus-1/services/, which the
+# session bus reads before the system directories.
+[D-BUS Service]
+Name=org.freedesktop.FileManager1
+Exec=/usr/bin/kara-ui --dbus-service

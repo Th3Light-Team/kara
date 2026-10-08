@@ -29,7 +29,10 @@ Item {
     anchors.fill: parent
 
     /// A question is open: the window's shortcuts must stand down.
-    readonly property bool promptOpen: root.app.delete_prompt || root.app.op_state === "conflict" || root.app.op_state === "failure" || root.app.op_state === "summary"
+    // The passphrase prompt and the application chooser count too: a
+    // window shortcut takes its key before the focused field, and Supr typed
+    // into a passphrase must not send the selection to the trash.
+    readonly property bool promptOpen: root.app.delete_prompt || root.app.op_state === "conflict" || root.app.op_state === "failure" || root.app.op_state === "summary" || root.app.unlock_prompt || root.app.chooser_open
 
     readonly property bool progressVisible: root.app.op_state === "calculating" || root.app.op_state === "running" || root.app.op_state === "conflict" || root.app.op_state === "failure"
 

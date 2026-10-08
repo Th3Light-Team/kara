@@ -17,6 +17,20 @@ MouseArea {
     /// La vista abre el editor de nombre sobre esta entrada.
     signal renameRequested
 
+    // One application of «Abrir con». A menu cannot hold a Repeater, and the
+    // list is short — the type's default, what the user picked recently, what
+    // declares the type — so a fixed set of slots, hidden when unused, does.
+    component AppItem: MenuItem {
+        required property var app
+        required property int slot
+        text: app.open_with_names[slot] ?? ""
+        icon.source: app.open_with_icons[slot] ?? ""
+        icon.color: "transparent"
+        visible: slot < app.open_with_names.length
+        height: visible ? implicitHeight : 0
+        onTriggered: app.open_with(slot)
+    }
+
     anchors.fill: parent
     hoverEnabled: true
     acceptedButtons: Qt.LeftButton | Qt.RightButton
@@ -56,6 +70,7 @@ MouseArea {
         property string folder: ""
         property bool pinned: false
         onAboutToShow: {
+            control.app.prepare_menu();
             const separador = control.app.path.endsWith("/") ? "" : "/";
             entryMenu.folder = control.app.path + separador + control.app.entry_names[control.index];
             entryMenu.pinned = control.app.is_pinned(entryMenu.folder);
@@ -65,6 +80,60 @@ MouseArea {
             visible: !control.app.in_trash
             height: visible ? implicitHeight : 0
             onTriggered: control.app.open_entry(control.index)
+        }
+        // Reference: `ground/spec/06-contexto-power.md`, «Abrir con».
+        Menu {
+            id: openWith
+            title: qsTr("Abrir con")
+            enabled: !control.app.in_trash
+
+            AppItem {
+                app: control.app
+                slot: 0
+            }
+            AppItem {
+                app: control.app
+                slot: 1
+            }
+            AppItem {
+                app: control.app
+                slot: 2
+            }
+            AppItem {
+                app: control.app
+                slot: 3
+            }
+            AppItem {
+                app: control.app
+                slot: 4
+            }
+            AppItem {
+                app: control.app
+                slot: 5
+            }
+            AppItem {
+                app: control.app
+                slot: 6
+            }
+            AppItem {
+                app: control.app
+                slot: 7
+            }
+            MenuSeparator {
+                visible: control.app.open_with_names.length > 0
+            }
+            MenuItem {
+                text: qsTr("Elegir otra aplicación…")
+                onTriggered: control.app.open_chooser()
+            }
+        }
+        MenuItem {
+            // A disk image becomes a drive of its own: «montar una partición o
+            // imagen ISO la hace navegable».
+            text: qsTr("Montar")
+            visible: !control.app.in_trash && control.app.menu_is_image
+            height: visible ? implicitHeight : 0
+            onTriggered: control.app.mount_selected_image()
         }
         MenuItem {
             text: qsTr("Abrir en una pestaña nueva")

@@ -1,11 +1,24 @@
 #!/bin/sh
 # Entry point of the AppImage.
 #
-# The bundle carries Qt's X11 platform plugin and not a working Wayland one (the
-# Qt used for the release lacks the Wayland graphics integration, and without it
-# Qt aborts at start-up on a Wayland session). So Kara starts on X11 by default,
-# which on Wayland means XWayland. Set QT_QPA_PLATFORM yourself to override it.
+# Kara runs as a native Wayland client when the bundle carries Qt's Wayland
+# platform plugin together with its graphics integration (scripts/build-appimage
+# ships both or neither): the plugin without the integration aborts at start-up
+# on a Wayland session, which is what the first releases hit. Without them the
+# AppImage runs on X11, which on a Wayland session means XWayland. A
+# QT_QPA_PLATFORM set by the user always wins.
 HERE=$(dirname "$(readlink -f "$0")")
-: "${QT_QPA_PLATFORM:=xcb}"
-export QT_QPA_PLATFORM
+if [ -z "${QT_QPA_PLATFORM:-}" ]; then
+    if [ -n "${WAYLAND_DISPLAY:-}" ] \
+        && [ -e "$HERE/usr/plugins/platforms/libqwayland.so" ] \
+        && [ -d "$HERE/usr/plugins/wayland-graphics-integration-client" ]; then
+        QT_QPA_PLATFORM="wayland;xcb"
+    else
+        QT_QPA_PLATFORM=xcb
+    fi
+    export QT_QPA_PLATFORM
+    # Tells Kara this choice was the bundle's, not the user's, so the
+    # applications it starts do not inherit it.
+    export KARA_APPRUN_QPA=1
+fi
 exec "$HERE/usr/bin/kara-ui" "$@"
