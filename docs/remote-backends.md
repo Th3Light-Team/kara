@@ -9,8 +9,9 @@ behaves like any other place: browse, select, copy, move, rename, delete, drag,
 progress, conflicts. **There is one UI.** The QML never learns which protocol is
 underneath.
 
-First adapters: **SFTP** and **S3**. The contract must not be shaped around
-either of them.
+First adapter: **SFTP**. **S3 is deferred**, but the contract is still checked
+against it (it is the awkward case: no real directories, no atomic rename), so
+it must not be shaped around SFTP alone.
 
 ## Where it goes
 
@@ -22,7 +23,7 @@ kara-ui → kara-ops → { kara-fs, kara-remote, kara-index } → kara-vfs → k
 |---|---|
 | `kara-vfs` (new) | `Location`, the `Backend` trait, `BackendError`, `Capabilities`, and the conformance suite (feature `conformance`). No protocol code. |
 | `kara-fs` | Gains `LocalBackend`: the existing code behind the trait. Public functions stay. |
-| `kara-remote` (new) | `MemoryBackend` (tests), `sftp` and `s3` behind cargo features. |
+| `kara-remote` (new) | `MemoryBackend` (tests) and `sftp` (`russh` + `russh-sftp`) behind a cargo feature; `s3` later, same shape. |
 
 `kara-core` stays free of I/O, so the trait does not live there. `kara-vfs`
 depends on `kara-core` only for `FileEntry`.
@@ -122,8 +123,10 @@ deleted if the copy failed or the sizes differ.** This is the invariant that
 ## Drives
 
 - `DriveConfig { id, kind, label, params }` is persisted in `settings.conf`
-  (non-secret fields only). Secrets go through a `SecretStore` trait; the
-  implementation is an open question below.
+  (non-secret fields only). **Secrets are stored in the system keyring** (Secret
+  Service) behind a `SecretStore` trait: the user adds a drive once and the
+  credential is kept. Never in `settings.conf`. If no keyring is available the
+  drive still connects, the secret is asked each time, and the UI says so.
 - `DriveRegistry` maps `DriveId` to `Arc<dyn Backend>`, and tracks state
   (`Connecting`, `Ready`, `Lost`, `Reconnecting`) so the panel can draw it.
 - Connecting never blocks the UI. Anything that needs the user (SFTP unknown
@@ -137,7 +140,7 @@ deleted if the copy failed or the sizes differ.** This is the invariant that
 a *changed* key is a hard refusal. Keepalive plus reconnect. Writes go to a temp
 name then rename. mtime preserved when the server allows it.
 
-**S3.** One drive = endpoint + bucket (+ optional prefix) + credentials, so MinIO,
+**S3 (deferred).** One drive = endpoint + bucket (+ optional prefix) + credentials, so MinIO,
 R2 and B2 work. Listing uses `delimiter=/` and pagination, streaming entries so
 a 100 000-object prefix does not block. No `created`/`accessed`; `modified` is
 `LastModified`; storage class and ETag go in the `MetadataBag`. Upload is
@@ -167,20 +170,22 @@ environment variables and `#[ignore]` otherwise. Add them in new test files;
 2. `LocalBackend` in `kara-fs`, passing the suite. Existing tests untouched.
 3. `Location` through `kara-ops`, then `kara-ui` (`present.rs` first, then the bridge).
 4. `DriveRegistry`, config, and the panel entry «Añadir unidad…» (QML is presentation only).
-5. SFTP adapter.
-6. S3 adapter.
+5. SFTP adapter on `russh-sftp`, with the keyring `SecretStore`.
+6. S3 adapter (deferred; the contract must already accommodate it).
 
 Steps 1–2 and the Rust side of 3–4 can be built and tested without Qt. Only the
 panel and the bridge need a Qt build.
 
+## Decisions
+
+- **Secrets:** system keyring, stored when the user adds the drive.
+- **SFTP crate:** `russh-sftp` (pure Rust, async) under a private runtime inside the adapter.
+- **S3:** deferred. Its crate is chosen when it is picked up.
+
 ## Open questions
 
-1. **Secrets:** system keyring (Secret Service) or not stored (ask every time)?
-   Never plain text in `settings.conf`.
-2. **Crates:** SFTP via `russh-sftp` (pure Rust, async, private runtime) or `ssh2`
-   (libssh2, blocking, C dependency in CI). S3 via `aws-sdk-s3` (standard, heavy) or
-   `rust-s3`. Decide at steps 5 and 6, after the trait is frozen.
-3. **Search and folder size** (`kara-index`) over a remote drive: not in scope. They
+1. **Keyring crate** (`keyring` vs `oo7`): decide at step 5.
+2. **Search and folder size** (`kara-index`) over a remote drive: not in scope. They
    report «no disponible» until a backend declares a cheap way to do it.
-4. **Thumbnails** on remote drives: on demand only, per the spec; cache key must
+3. **Thumbnails** on remote drives: on demand only, per the spec; cache key must
    include the drive.
