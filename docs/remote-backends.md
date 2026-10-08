@@ -180,12 +180,12 @@ panel and the bridge need a Qt build.
 
 - **Secrets:** system keyring, stored when the user adds the drive.
 - **SFTP crate:** `russh-sftp` (pure Rust, async) under a private runtime inside the adapter.
+- **Keyring crate:** `oo7`.
 - **S3:** deferred. Its crate is chosen when it is picked up.
 
 ## Open questions
 
-1. **Keyring crate** (`keyring` vs `oo7`): decide at step 5.
-2. **Search and folder size** (`kara-index`) over a remote drive: not in scope. They
+1. **Search and folder size** (`kara-index`) over a remote drive: not in scope. They
    report «no disponible» until a backend declares a cheap way to do it.
-3. **Thumbnails** on remote drives: on demand only, per the spec; cache key must
+2. **Thumbnails** on remote drives: on demand only, per the spec; cache key must
    include the drive.
