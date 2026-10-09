@@ -12,7 +12,10 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 crossbeam-channel = "0.5.16"
 kara-core.workspace = true
 kara-fs.workspace = true
+kara-vfs.workspace = true
 thiserror = "2.0.20"
 
 [dev-dependencies]
+# MemoryBackend (with fault injection) is the remote drive of the tests.
+kara-vfs = { workspace = true, features = ["memory"] }
 tempfile = "3.27.0"

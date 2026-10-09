@@ -24,6 +24,13 @@
 //!   Across volumes every file is copied, then removed, one at a time; a file
 //!   that failed to copy stays where it was.
 //! - **No `unwrap`/`expect` on the way.** Every syscall result is handled.
+//!
+//! # Locations
+//!
+//! [`spawn_with`] takes a [`LocationRequest`], whose items may live on remote
+//! drives. An all-local request is handed to [`spawn`] unchanged; anything
+//! else runs in `remote`, with the same events, questions, batch policy and
+//! undo records. See [`crate::location`].
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -39,7 +46,10 @@ use kara_fs::trash::{Flow as WalkFlow, TrashError, TrashObserver, delete_permane
 use crate::batch::{BatchPolicy, BatchReport, ErrorDecision, Failure, FailureKind};
 use crate::clock::trash_policy;
 use crate::conflict::{ConflictDecisions, ConflictKind, Resolution, ResolutionCounts};
+use crate::location::{BackendResolver, LocationRequest, RequestError};
 use crate::undo::Action;
+
+mod remote;
 
 /// Chunk size of the byte loop. Big enough for throughput, small enough that a
 /// cancel is felt within a few milliseconds even on a slow disk.
@@ -50,6 +60,9 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(80);
 
 /// How often a worker blocked on a question looks at the cancel flag.
 const ANSWER_POLL: Duration = Duration::from_millis(100);
+
+/// How often a paused worker looks at the pause and cancel flags.
+const PAUSE_POLL: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
@@ -142,6 +155,9 @@ pub struct Outcome {
 pub struct Handle {
     answers: Sender<Answer>,
     cancel: Arc<AtomicBool>,
+    /// The same cancel, as the token a backend call watches.
+    token: kara_vfs::Cancel,
+    paused: Arc<AtomicBool>,
 }
 
 impl Handle {
@@ -154,23 +170,93 @@ impl Handle {
     /// Stops after the file in flight, leaving what was already done as it is.
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::SeqCst);
+        self.token.cancel();
     }
+
+    /// Holds the transfer at the next chunk boundary. A cancel still works
+    /// while paused.
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+    }
+
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::SeqCst);
+    }
+
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
+    }
+}
+
+/// Builds the handle and the worker's ends of it.
+fn channels() -> (Handle, Receiver<Answer>) {
+    let (answers_tx, answers_rx) = unbounded();
+    let handle = Handle {
+        answers: answers_tx,
+        cancel: Arc::new(AtomicBool::new(false)),
+        token: kara_vfs::Cancel::new(),
+        paused: Arc::new(AtomicBool::new(false)),
+    };
+    (handle, answers_rx)
 }
 
 /// Starts the job. Every event goes through `sink`, on the worker thread.
 pub fn spawn(request: Request, sink: impl Fn(Event) + Send + 'static) -> Handle {
-    let (answers_tx, answers_rx) = unbounded();
-    let cancel = Arc::new(AtomicBool::new(false));
-    let handle = Handle {
-        answers: answers_tx,
-        cancel: Arc::clone(&cancel),
-    };
+    let (handle, answers_rx) = channels();
+    let worker_handle = handle.clone();
 
     std::thread::spawn(move || {
-        let mut worker = Worker::new(request, Box::new(sink), answers_rx, cancel);
+        let mut worker = Worker::new(request, Box::new(sink), answers_rx, &worker_handle);
         worker.run();
     });
     handle
+}
+
+/// Starts a job over [`kara_vfs::Location`]s. Every event goes through `sink`,
+/// on the worker thread, exactly as with [`spawn`].
+///
+/// Refused before anything is touched when a delete is not confirmed
+/// ([`LocationRequest::confirmed_permanent`]) or a drive does not resolve. An
+/// all-local request is run by [`spawn`] itself, so its behaviour is the old
+/// one bit for bit.
+pub fn spawn_with(
+    request: LocationRequest,
+    resolver: BackendResolver,
+    sink: impl Fn(Event) + Send + 'static,
+) -> Result<Handle, RequestError> {
+    if request.op == Op::Delete && !request.confirmed_permanent {
+        return Err(RequestError::PermanentDeleteNotConfirmed);
+    }
+    let destination = (request.op != Op::Delete).then_some(&request.dest_dir);
+    for location in request.sources.iter().chain(destination) {
+        if let Some(drive) = location.drive()
+            && resolver(drive).is_none()
+        {
+            return Err(RequestError::DriveUnavailable(drive.clone()));
+        }
+    }
+    if let Some(local) = request.to_local() {
+        return Ok(spawn(local, sink));
+    }
+
+    let (handle, answers_rx) = channels();
+    let worker_handle = handle.clone();
+    std::thread::spawn(move || {
+        let legacy = Request {
+            op: request.op,
+            sources: Vec::new(),
+            dest_dir: PathBuf::new(),
+        };
+        let mut worker = Worker::new(legacy, Box::new(sink), answers_rx, &worker_handle);
+        worker.job = Some(remote::LocationJob {
+            sources: request.sources,
+            dest_dir: request.dest_dir,
+            resolver,
+        });
+        worker.run();
+    });
+    Ok(handle)
 }
 
 /// Carries a [`delete_permanently`] walk's progress and cancel into the worker.
@@ -234,6 +320,10 @@ struct Worker {
     bytes_done: u64,
     items_done: u64,
     last_emit: Instant,
+    /// Set by [`spawn_with`] for a request that involves a remote drive.
+    job: Option<remote::LocationJob>,
+    token: kara_vfs::Cancel,
+    paused: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -241,7 +331,7 @@ impl Worker {
         request: Request,
         sink: Box<dyn Fn(Event) + Send>,
         answers: Receiver<Answer>,
-        cancel: Arc<AtomicBool>,
+        handle: &Handle,
     ) -> Self {
         Self {
             op: request.op,
@@ -249,13 +339,16 @@ impl Worker {
             dest_dir: request.dest_dir,
             sink,
             answers,
-            cancel,
+            cancel: Arc::clone(&handle.cancel),
             decisions: ConflictDecisions::new(),
             policy: BatchPolicy::new(),
             actions: Vec::new(),
             bytes_done: 0,
             items_done: 0,
             last_emit: Instant::now(),
+            job: None,
+            token: handle.token.clone(),
+            paused: Arc::clone(&handle.paused),
         }
     }
 
@@ -267,7 +360,18 @@ impl Worker {
         self.cancel.load(Ordering::SeqCst)
     }
 
+    /// Blocks while the job is paused, until it is resumed or cancelled.
+    fn wait_while_paused(&self) {
+        while self.paused.load(Ordering::SeqCst) && !self.cancelled() {
+            std::thread::sleep(PAUSE_POLL);
+        }
+    }
+
     fn run(&mut self) {
+        if let Some(job) = self.job.take() {
+            self.run_locations(job);
+            return;
+        }
         self.emit(Event::Calculating);
 
         let mut total_bytes = 0;
@@ -317,6 +421,11 @@ impl Worker {
             }
         }
 
+        self.finish();
+    }
+
+    /// The last progress and the summary.
+    fn finish(&mut self) {
         self.tick(String::new(), true);
         let cancelled = self.cancelled() || self.policy.is_cancelled();
         let report = BatchReport {
@@ -435,33 +544,43 @@ impl Worker {
                 kind: classify(&error),
                 reason: error.to_string(),
             };
-            let decision = match self.policy.decide(&failure) {
-                Some(decision) => decision,
-                None => {
-                    self.emit(Event::Failure(FailurePrompt {
-                        path: failure.path.clone(),
-                        reason: failure.reason.clone(),
-                        kind: failure.kind,
-                    }));
-                    match self.wait_for_answer() {
-                        Some(Answer::Error(decision)) => decision,
-                        _ => ErrorDecision::Cancel,
-                    }
-                }
-            };
-            if decision == ErrorDecision::SkipAll {
-                self.policy.apply_to_all(decision);
+            if !self.settle(failure)? {
+                return Ok(None);
             }
-            match decision {
-                ErrorDecision::Retry => {}
-                ErrorDecision::Skip | ErrorDecision::SkipAll => {
-                    self.policy.record(failure, decision);
-                    return Ok(None);
+        }
+    }
+
+    /// Asks (or applies the standing decision) about one failure.
+    ///
+    /// `Ok(true)` — retry. `Ok(false)` — skipped, recorded. `Err(Cancelled)` —
+    /// stop, recorded.
+    fn settle(&mut self, failure: Failure) -> Result<bool, Cancelled> {
+        let decision = match self.policy.decide(&failure) {
+            Some(decision) => decision,
+            None => {
+                self.emit(Event::Failure(FailurePrompt {
+                    path: failure.path.clone(),
+                    reason: failure.reason.clone(),
+                    kind: failure.kind,
+                }));
+                match self.wait_for_answer() {
+                    Some(Answer::Error(decision)) => decision,
+                    _ => ErrorDecision::Cancel,
                 }
-                ErrorDecision::Cancel => {
-                    self.policy.record(failure, decision);
-                    return Err(Cancelled);
-                }
+            }
+        };
+        if decision == ErrorDecision::SkipAll {
+            self.policy.apply_to_all(decision);
+        }
+        match decision {
+            ErrorDecision::Retry => Ok(true),
+            ErrorDecision::Skip | ErrorDecision::SkipAll => {
+                self.policy.record(failure, decision);
+                Ok(false)
+            }
+            ErrorDecision::Cancel => {
+                self.policy.record(failure, decision);
+                Err(Cancelled)
             }
         }
     }
@@ -742,6 +861,7 @@ impl Worker {
         let mut buffer = vec![0u8; CHUNK];
         let result = (|| -> io::Result<()> {
             loop {
+                self.wait_while_paused();
                 if self.cancelled() {
                     return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelado"));
                 }

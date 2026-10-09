@@ -770,6 +770,7 @@ dependencies = [
  "crossbeam-channel",
  "kara-core",
  "kara-fs",
+ "kara-vfs",
  "tempfile",
  "thiserror 2.0.20",
 ]
