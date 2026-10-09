@@ -2,7 +2,7 @@
 
 use std::io::{Read, Write};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use kara_core::FileEntry;
 
@@ -22,18 +22,18 @@ impl Cancel {
     /// A fresh, not cancelled token.
     #[must_use]
     pub fn new() -> Cancel {
-        todo!("Cancel::new")
+        Cancel(Arc::new(AtomicBool::new(false)))
     }
 
     /// Requests cancellation. There is no way back.
     pub fn cancel(&self) {
-        todo!("Cancel::cancel")
+        self.0.store(true, Ordering::Relaxed);
     }
 
     /// Whether cancellation was requested on this token or any clone.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        todo!("Cancel::is_cancelled")
+        self.0.load(Ordering::Relaxed)
     }
 }
 

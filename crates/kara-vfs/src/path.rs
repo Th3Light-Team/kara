@@ -35,72 +35,129 @@ impl RemotePath {
     /// The drive root, `"/"`.
     #[must_use]
     pub fn root() -> RemotePath {
-        todo!("RemotePath::root")
+        RemotePath(String::from("/"))
     }
 
     /// Parses and normalises a path (cb_01, cb_02, cb_03).
-    pub fn parse(_s: &str) -> Result<RemotePath, RemotePathError> {
-        todo!("RemotePath::parse")
+    pub fn parse(s: &str) -> Result<RemotePath, RemotePathError> {
+        if s.is_empty() {
+            return Err(RemotePathError::Empty);
+        }
+        if s.contains('\0') {
+            return Err(RemotePathError::ContainsNul);
+        }
+        if !s.starts_with('/') {
+            return Err(RemotePathError::NotAbsolute { raw: s.to_owned() });
+        }
+        let mut canonical = String::with_capacity(s.len());
+        for segment in s.split('/').filter(|segment| !segment.is_empty()) {
+            if segment == "." || segment == ".." {
+                return Err(RemotePathError::DotSegment { raw: s.to_owned() });
+            }
+            canonical.push('/');
+            canonical.push_str(segment);
+        }
+        if canonical.is_empty() {
+            return Ok(RemotePath::root());
+        }
+        Ok(RemotePath(canonical))
     }
 
     /// Like [`RemotePath::parse`], from raw bytes that must be UTF-8.
-    pub fn from_bytes(_bytes: &[u8]) -> Result<RemotePath, RemotePathError> {
-        todo!("RemotePath::from_bytes")
+    pub fn from_bytes(bytes: &[u8]) -> Result<RemotePath, RemotePathError> {
+        if bytes.is_empty() {
+            return Err(RemotePathError::Empty);
+        }
+        // A NUL is reported as such even when the rest is not UTF-8.
+        if bytes.contains(&0) {
+            return Err(RemotePathError::ContainsNul);
+        }
+        let text = std::str::from_utf8(bytes).map_err(|_| RemotePathError::NotUtf8)?;
+        RemotePath::parse(text)
     }
 
     /// The canonical string.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        todo!("RemotePath::as_str")
+        &self.0
     }
 
     /// Whether this is the drive root.
     #[must_use]
     pub fn is_root(&self) -> bool {
-        todo!("RemotePath::is_root")
+        self.0 == "/"
     }
 
     /// The containing directory; `None` for the root.
     #[must_use]
     pub fn parent(&self) -> Option<RemotePath> {
-        todo!("RemotePath::parent")
+        if self.is_root() {
+            return None;
+        }
+        let cut = self.0.rfind('/')?;
+        if cut == 0 {
+            return Some(RemotePath::root());
+        }
+        self.0.get(..cut).map(|head| RemotePath(head.to_owned()))
     }
 
     /// The last segment; `None` for the root.
     #[must_use]
     pub fn file_name(&self) -> Option<&str> {
-        todo!("RemotePath::file_name")
+        if self.is_root() {
+            return None;
+        }
+        let cut = self.0.rfind('/')?;
+        self.0.get(cut + 1..)
     }
 
     /// Appends exactly one segment (cb_04).
-    pub fn join(&self, _segment: &str) -> Result<RemotePath, RemotePathError> {
-        todo!("RemotePath::join")
+    pub fn join(&self, segment: &str) -> Result<RemotePath, RemotePathError> {
+        if segment.contains('\0') {
+            return Err(RemotePathError::ContainsNul);
+        }
+        if segment.is_empty() || segment == "." || segment == ".." || segment.contains('/') {
+            return Err(RemotePathError::InvalidSegment {
+                segment: segment.to_owned(),
+            });
+        }
+        let mut joined = String::with_capacity(self.0.len() + 1 + segment.len());
+        if !self.is_root() {
+            joined.push_str(&self.0);
+        }
+        joined.push('/');
+        joined.push_str(segment);
+        Ok(RemotePath(joined))
     }
 
     /// The segments, root first; empty for the root.
-    #[allow(unreachable_code)]
     pub fn segments(&self) -> impl Iterator<Item = &str> {
-        todo!("RemotePath::segments");
-        std::iter::empty()
+        self.0.split('/').filter(|segment| !segment.is_empty())
     }
 
     /// Segment-aware prefix test: `/ab` does not start with `/a`.
     #[must_use]
-    pub fn starts_with(&self, _base: &RemotePath) -> bool {
-        todo!("RemotePath::starts_with")
+    pub fn starts_with(&self, base: &RemotePath) -> bool {
+        if base.is_root() {
+            return true;
+        }
+        match self.0.strip_prefix(base.0.as_str()) {
+            Some(rest) => rest.is_empty() || rest.starts_with('/'),
+            None => false,
+        }
     }
 }
 
 impl fmt::Display for RemotePath {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!("RemotePath Display")
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
 impl FromStr for RemotePath {
     type Err = RemotePathError;
 
-    fn from_str(_s: &str) -> Result<Self, Self::Err> {
-        todo!("RemotePath FromStr")
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        RemotePath::parse(s)
     }
 }
