@@ -256,7 +256,11 @@ fn run_case(
     // Best effort and also after a failure: scratch must be left empty.
     let cleanup = backend.remove_tree(&dir, &Cancel::new());
     match (result, cleanup) {
-        (Ok(()), Ok(())) => CaseOutcome::Passed,
+        (Ok(()), Ok(())) => match backend.stat(&dir) {
+            Err(e) if e.kind == BackendErrorKind::NotFound => CaseOutcome::Passed,
+            Err(e) => failed(format!("checking that {dir} is gone failed: {e}")),
+            Ok(_) => failed(format!("remove_tree({dir}) returned Ok but left {dir} behind")),
+        },
         (Ok(()), Err(e)) => failed(format!("the case held but cleaning up {dir} failed: {e}")),
         (Err(detail), Ok(())) => failed(detail),
         (Err(detail), Err(e)) => failed(format!("{detail} (cleaning up {dir} also failed: {e})")),
@@ -1039,9 +1043,15 @@ fn rename_dir_subtree(c: &Ctx<'_>) -> Check {
         let name = rel.rsplit('/').next().unwrap_or(rel);
         c.put(&c.under(dir, name)?, content)?;
     }
+    // A sibling whose name merely starts with "src" is not inside it.
+    let sibling = c.at("src2")?;
+    c.mkdir(&sibling)?;
+    let sibling_file = c.under(&sibling, "keep")?;
+    c.put(&sibling_file, b"keep")?;
     c.backend
         .rename(&src, &dst)
         .map_err(|e| format!("rename({src}, {dst}) failed: {e}"))?;
+    c.content_is(&sibling_file, b"keep")?;
     for (rel, content) in &files {
         let mut path = dst.clone();
         for part in rel.split('/') {
@@ -1049,7 +1059,14 @@ fn rename_dir_subtree(c: &Ctx<'_>) -> Check {
         }
         c.content_is(&path, content)?;
     }
-    c.is_missing(&src)
+    c.is_missing(&src)?;
+    // Renaming to a name that merely extends the old one is not "into itself".
+    let dst2 = c.at("dst2")?;
+    c.backend
+        .rename(&dst, &dst2)
+        .map_err(|e| format!("rename({dst}, {dst2}) failed: {e}"))?;
+    c.content_is(&c.under(&c.under(&dst2, "sub")?, "f2")?, b"two")?;
+    c.is_missing(&dst)
 }
 
 fn rename_never_overwrites(c: &Ctx<'_>) -> Check {
@@ -1064,7 +1081,38 @@ fn rename_never_overwrites(c: &Ctx<'_>) -> Check {
         Some(&b),
     )?;
     c.content_is(&a, b"A")?;
-    c.content_is(&b, b"B")
+    c.content_is(&b, b"B")?;
+
+    // Nothing is replaced silently: not an empty directory, not a directory
+    // onto a directory (POSIX rename(2) would do both).
+    let empty = c.at("empty")?;
+    c.mkdir(&empty)?;
+    expect_err(
+        "rename of a file onto an existing empty directory",
+        c.backend.rename(&a, &empty),
+        BackendErrorKind::AlreadyExists,
+        Some(&empty),
+    )?;
+    let d1 = c.at("d1")?;
+    c.mkdir(&d1)?;
+    expect_err(
+        "rename of a directory onto an existing directory",
+        c.backend.rename(&d1, &empty),
+        BackendErrorKind::AlreadyExists,
+        Some(&empty),
+    )?;
+    c.content_is(&a, b"A")?;
+    if c.caps.real_directories {
+        let orphan = c.under(&c.at("no-such-dir")?, "x")?;
+        expect_err(
+            "rename into a missing parent",
+            c.backend.rename(&a, &orphan),
+            BackendErrorKind::NotFound,
+            Some(&orphan),
+        )?;
+        c.content_is(&a, b"A")?;
+    }
+    Ok(())
 }
 
 fn rename_same_is_noop(c: &Ctx<'_>) -> Check {
@@ -1154,12 +1202,17 @@ fn remove_tree(c: &Ctx<'_>) -> Check {
     let root = c.at("tree")?;
     let outside = c.at("outside")?;
     c.put(&outside, b"stays")?;
+    // Shares a string prefix with "tree" without being inside it.
+    let sibling = c.under(&c.at("tree2")?, "f")?;
+    c.mkdir(&c.at("tree2")?)?;
+    c.put(&sibling, b"survives")?;
     three_level_tree(c, &root)?;
     c.backend
         .remove_tree(&root, &Cancel::new())
         .map_err(|e| format!("remove_tree({root}) failed: {e}"))?;
     c.is_missing(&root)?;
     c.content_is(&outside, b"stays")?;
+    c.content_is(&sibling, b"survives")?;
 
     let single = c.at("single")?;
     c.put(&single, b"s")?;
@@ -1327,6 +1380,12 @@ fn implicit_directories(c: &Ctx<'_>) -> Check {
     c.put(&object, b"f")?;
     c.is_directory(&prefix)
         .map_err(|e| format!("a prefix with an object should be a directory: {e}"))?;
+    expect_err(
+        "begin_write onto an implicit prefix",
+        c.backend.begin_write(&prefix, None, true),
+        BackendErrorKind::AlreadyExists,
+        Some(&prefix),
+    )?;
     c.backend
         .remove(&object)
         .map_err(|e| format!("remove({object}) failed: {e}"))?;

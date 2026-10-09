@@ -258,6 +258,15 @@ impl Location {
 /// deduplicate by URI): `%2F` for `/`, repeated `/`, lowercase hex and unescaped
 /// spaces are all refused.
 fn canonical(uri: &str, location: Location) -> Result<Location, LocationError> {
+    // A local path must already be in the form `components()` yields: no
+    // repeated or trailing `/`, no `.` segment. `PathBuf` equality ignores those,
+    // so two spellings would compare equal and hash apart in the URI.
+    if let Location::Local(path) = &location {
+        let normal: PathBuf = path.components().collect();
+        if normal.as_os_str() != path.as_os_str() {
+            return Err(LocationError::InvalidPercentEncoding);
+        }
+    }
     let expected = location.to_uri()?;
     // The contract (cb_08) lets a remote root be written with or without its `/`.
     let root_alias = matches!(&location, Location::Remote { path, .. } if path.is_root())

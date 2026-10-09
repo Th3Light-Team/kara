@@ -24,6 +24,8 @@ use crate::path::RemotePath;
 
 /// How many symbolic links are followed before a chain counts as broken.
 const MAX_LINK_HOPS: usize = 8;
+/// Links followed by one resolution, however they nest.
+const LINK_BUDGET: usize = MAX_LINK_HOPS * 4;
 
 /// A stored object. Times live here, not in [`MemoryNode`], so snapshots compare
 /// by value.
@@ -80,6 +82,8 @@ struct State {
     stats: MemoryStats,
     /// Bytes buffered by open write sessions, counted against the capacity.
     session_bytes: u64,
+    /// Bumped by every `disconnect`: sessions and readers opened before it are dead.
+    epoch: u64,
 }
 
 /// An in-memory [`Backend`]. Its behaviour follows `real_directories`,
@@ -281,6 +285,7 @@ impl State {
             connected: true,
             stats: MemoryStats::default(),
             session_bytes: 0,
+            epoch: 0,
         }
     }
 
@@ -314,18 +319,29 @@ impl State {
     }
 
     /// Where a link ends up: the first path that is not itself a link, if it exists.
+    /// Links on the way to the target are followed too.
     fn final_path(&self, link: &RemotePath, target: &str) -> Option<RemotePath> {
-        let mut current = absolutize(link, target)?;
-        for _ in 0..MAX_LINK_HOPS {
+        self.final_path_within(link, target, &mut { LINK_BUDGET })
+    }
+
+    /// `budget` is shared by the whole resolution, so a cycle of links ends.
+    fn final_path_within(
+        &self,
+        link: &RemotePath,
+        target: &str,
+        budget: &mut usize,
+    ) -> Option<RemotePath> {
+        let mut current = self.canon_within(&absolutize(link, target)?, budget);
+        loop {
+            *budget = budget.checked_sub(1)?;
             match self.lookup(&current) {
                 Lookup::Missing => return None,
                 Lookup::Node(Node::Symlink { target, .. }) => {
-                    current = absolutize(&current, target)?;
+                    current = self.canon_within(&absolutize(&current, target)?, budget);
                 }
                 _ => return Some(current),
             }
         }
-        None
     }
 
     /// Follows a path through links to the node it finally names.
@@ -340,28 +356,32 @@ impl State {
     /// `path` with every link on the way to it followed. The last component is
     /// never followed, so a destructive operation acts on the link itself.
     fn canon(&self, path: &RemotePath) -> RemotePath {
+        self.canon_within(path, &mut { LINK_BUDGET })
+    }
+
+    fn canon_within(&self, path: &RemotePath, budget: &mut usize) -> RemotePath {
         match (path.parent(), path.file_name()) {
             (Some(parent), Some(name)) => self
-                .canon_dir(&parent)
+                .canon_dir_within(&parent, budget)
                 .join(name)
                 .unwrap_or_else(|_| path.clone()),
             _ => path.clone(),
         }
     }
 
-    /// Like [`State::canon`], but also follows the last component.
-    fn canon_dir(&self, path: &RemotePath) -> RemotePath {
+    /// Like [`State::canon_within`], but also follows the last component.
+    fn canon_dir_within(&self, path: &RemotePath, budget: &mut usize) -> RemotePath {
         let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
             return path.clone();
         };
         let candidate = self
-            .canon_dir(&parent)
+            .canon_dir_within(&parent, budget)
             .join(name)
             .unwrap_or_else(|_| path.clone());
         match self.lookup(&candidate) {
-            Lookup::Node(Node::Symlink { target, .. }) => {
-                self.final_path(&candidate, target).unwrap_or(candidate)
-            }
+            Lookup::Node(Node::Symlink { target, .. }) => self
+                .final_path_within(&candidate, target, budget)
+                .unwrap_or(candidate),
             _ => candidate,
         }
     }
@@ -603,7 +623,9 @@ impl MemoryBackend {
     }
 
     pub fn disconnect(&self) -> Result<(), BackendError> {
-        self.lock().connected = false;
+        let mut st = self.lock();
+        st.connected = false;
+        st.epoch = st.epoch.saturating_add(1);
         Ok(())
     }
 
@@ -618,12 +640,13 @@ impl MemoryBackend {
         if !st.caps.symlinks {
             return Err(err(BackendErrorKind::Unsupported, link));
         }
-        if !matches!(st.lookup(link), Lookup::Missing) {
+        let real = st.canon(link);
+        if !matches!(st.lookup(&real), Lookup::Missing) {
             return Err(err(BackendErrorKind::AlreadyExists, link));
         }
-        st.check_parent(link)?;
+        st.check_parent(&real).map_err(|e| named(e, link, &real))?;
         st.nodes.insert(
-            link.as_str().to_owned(),
+            real.as_str().to_owned(),
             Node::Symlink {
                 target: target.to_owned(),
                 modified: SystemTime::now(),
@@ -668,6 +691,7 @@ struct MemoryReader {
     data: Arc<Vec<u8>>,
     position: usize,
     transferred: u64,
+    epoch: u64,
 }
 
 impl MemoryReader {
@@ -680,6 +704,9 @@ impl Read for MemoryReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let mut st = lock(&self.state);
         st.ensure_connected(&self.path).map_err(|e| self.fail(e))?;
+        if st.epoch != self.epoch {
+            return Err(self.fail(err(BackendErrorKind::Unavailable, &self.path)));
+        }
         if let Some(effect) = st.take_fault(Op::Read, &[&self.path], self.transferred) {
             return Err(self.fail(effect_error(effect, &self.path)));
         }
@@ -707,6 +734,7 @@ struct MemorySession {
     path: RemotePath,
     /// Where the object lands, with links on the way followed.
     real: RemotePath,
+    epoch: u64,
     replace: bool,
     buffer: Vec<u8>,
     /// Kind of the first failure; the session is poisoned from then on.
@@ -741,6 +769,9 @@ impl MemorySession {
             return Err(err(kind, &self.path));
         }
         st.ensure_connected(&self.path)?;
+        if st.epoch != self.epoch {
+            return Err(err(BackendErrorKind::Unavailable, &self.path));
+        }
         if let Some(effect) = st.take_fault(Op::Finish, &[&self.path], u64::MAX) {
             return Err(effect_error(effect, &self.path));
         }
@@ -770,7 +801,7 @@ impl Write for MemorySession {
         }
         let state = Arc::clone(&self.state);
         let mut st = lock(&state);
-        if !st.connected {
+        if !st.connected || st.epoch != self.epoch {
             return Err(self.poisoned(&mut st, BackendErrorKind::Unavailable));
         }
         if let Some(effect) = st.take_fault(Op::Write, &[&self.path], self.counted()) {
@@ -944,6 +975,7 @@ impl Backend for MemoryBackend {
             data,
             position,
             transferred: 0,
+            epoch: st.epoch,
         }))
     }
 
@@ -963,6 +995,7 @@ impl Backend for MemoryBackend {
             state: Arc::clone(&self.state),
             path: path.clone(),
             real,
+            epoch: st.epoch,
             replace,
             buffer: Vec::new(),
             poison: None,
