@@ -520,10 +520,22 @@ fn place_in_trash(
 /// is narrow and, for the trash, already guarded on the other side by the
 /// `.trashinfo` name reservation (cb_08).
 pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> Result<(), rustix::io::Errno> {
+    rename_noreplace_at(rustix::fs::CWD, from, rustix::fs::CWD, to)
+}
+
+/// [`rename_noreplace`] with each name relative to a directory descriptor, so
+/// the rename happens in the directories that were opened, whatever their
+/// paths mean by now.
+pub(crate) fn rename_noreplace_at<P: rustix::path::Arg + Copy>(
+    from_dir: std::os::fd::BorrowedFd<'_>,
+    from: P,
+    to_dir: std::os::fd::BorrowedFd<'_>,
+    to: P,
+) -> Result<(), rustix::io::Errno> {
     match rustix::fs::renameat_with(
-        rustix::fs::CWD,
+        from_dir,
         from,
-        rustix::fs::CWD,
+        to_dir,
         to,
         rustix::fs::RenameFlags::NOREPLACE,
     ) {
@@ -534,26 +546,13 @@ pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> Result<(), rustix::io:
             // no-clobber guarantee where RENAME_NOREPLACE is missing. Directories
             // and filesystems without hard links refuse it; only those fall
             // through to the check-then-rename below.
-            match rustix::fs::linkat(
-                rustix::fs::CWD,
-                from,
-                rustix::fs::CWD,
-                to,
-                rustix::fs::AtFlags::empty(),
-            ) {
+            match rustix::fs::linkat(from_dir, from, to_dir, to, rustix::fs::AtFlags::empty()) {
                 Ok(()) => {
-                    return match rustix::fs::unlinkat(
-                        rustix::fs::CWD,
-                        from,
-                        rustix::fs::AtFlags::empty(),
-                    ) {
+                    return match rustix::fs::unlinkat(from_dir, from, rustix::fs::AtFlags::empty())
+                    {
                         Ok(()) => Ok(()),
                         Err(errno) => {
-                            let _ = rustix::fs::unlinkat(
-                                rustix::fs::CWD,
-                                to,
-                                rustix::fs::AtFlags::empty(),
-                            );
+                            let _ = rustix::fs::unlinkat(to_dir, to, rustix::fs::AtFlags::empty());
                             Err(errno)
                         }
                     };
@@ -561,10 +560,10 @@ pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> Result<(), rustix::io:
                 Err(rustix::io::Errno::EXIST) => return Err(rustix::io::Errno::EXIST),
                 Err(_) => {}
             }
-            if std::fs::symlink_metadata(to).is_ok() {
+            if rustix::fs::statat(to_dir, to, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).is_ok() {
                 return Err(rustix::io::Errno::EXIST);
             }
-            rustix::fs::renameat(rustix::fs::CWD, from, rustix::fs::CWD, to)
+            rustix::fs::renameat(from_dir, from, to_dir, to)
         }
         other => other,
     }

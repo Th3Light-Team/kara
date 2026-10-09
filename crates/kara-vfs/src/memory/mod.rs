@@ -325,12 +325,15 @@ impl State {
     }
 
     /// `budget` is shared by the whole resolution, so a cycle of links ends.
+    /// It is spent before the target's own path is resolved: a link whose
+    /// target runs through itself (`/l -> l/x`) recurses through this call.
     fn final_path_within(
         &self,
         link: &RemotePath,
         target: &str,
         budget: &mut usize,
     ) -> Option<RemotePath> {
+        *budget = budget.checked_sub(1)?;
         let mut current = self.canon_within(&absolutize(link, target)?, budget);
         loop {
             *budget = budget.checked_sub(1)?;
@@ -447,7 +450,12 @@ impl State {
         if self.caps.real_directories {
             return match self.lookup(&parent) {
                 l if l.is_directory() => Ok(()),
-                Lookup::Missing => Err(err(BackendErrorKind::NotFound, path)),
+                // `parent` comes out of `canon`, which follows every link that
+                // leads somewhere: a link still standing here is dangling, so
+                // the parent does not exist (POSIX: ENOENT).
+                Lookup::Missing | Lookup::Node(Node::Symlink { .. }) => {
+                    Err(err(BackendErrorKind::NotFound, path))
+                }
                 _ => Err(other(io::ErrorKind::NotADirectory, path)),
             };
         }
@@ -1055,7 +1063,13 @@ impl Backend for MemoryBackend {
         if src == dst {
             return Ok(());
         }
-        if dst.starts_with(&src) {
+        // Only a directory can be moved into itself, and only to a place that
+        // exists: below a file, or below a missing or dangling parent, there
+        // is no parent at all, which the parent check reports (POSIX: ENOTDIR
+        // or ENOENT, not EINVAL). An object store has a parent everywhere.
+        let parent_exists = !st.caps.real_directories
+            || dst.parent().is_some_and(|parent| st.lookup(&parent).is_directory());
+        if dst.starts_with(&src) && st.lookup(&src).is_directory() && parent_exists {
             return Err(other(io::ErrorKind::InvalidInput, to));
         }
         if !matches!(st.lookup(&dst), Lookup::Missing) {

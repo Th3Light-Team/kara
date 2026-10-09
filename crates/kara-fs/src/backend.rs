@@ -15,11 +15,13 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use kara_core::{EntryKind, FileEntry};
+use rustix::fs::AtFlags;
 use kara_vfs::{
     Backend, BackendError, BackendErrorKind, Cancel, Capabilities, Listing, RemotePath,
     RemotePathError, WriteSession,
@@ -65,9 +67,34 @@ fn io_error(error: io::Error, path: &RemotePath) -> BackendError {
     BackendError::from_io(error, Some(path))
 }
 
-/// Like [`io_error`] for lookups: a path under a non-directory does not exist.
+/// ENOTDIR or ELOOP: something on the way is not a directory, or is a link
+/// that resolves nowhere (a cycle is a broken link, as `stat` reports it).
+fn unresolvable(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotADirectory
+        || error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error())
+}
+
+/// Like [`io_error`] for lookups: a path under a non-directory, or through a
+/// broken link, does not exist.
 fn lookup_error(error: io::Error, path: &RemotePath) -> BackendError {
-    if error.kind() == io::ErrorKind::NotADirectory {
+    if unresolvable(&error) {
+        return BackendError::new(BackendErrorKind::NotFound, Some(path.clone()))
+            .with_source(error);
+    }
+    io_error(error, path)
+}
+
+/// Like [`io_error`] for an operation that creates `local`. ENOTDIR (or ELOOP)
+/// means a non-directory (or a broken link) on the way: when the parent itself
+/// is a file the answer is `Other` (not a directory), but when the parent does
+/// not resolve at all, the parent is missing, which is `NotFound` as for any
+/// other missing parent.
+fn create_error(error: io::Error, path: &RemotePath, local: &Path) -> BackendError {
+    if unresolvable(&error)
+        && local
+            .parent()
+            .is_some_and(|parent| fs::metadata(parent).is_err())
+    {
         return BackendError::new(BackendErrorKind::NotFound, Some(path.clone()))
             .with_source(error);
     }
@@ -242,14 +269,16 @@ impl Backend for LocalBackend {
         let reader = match fs::read_dir(&local) {
             Ok(reader) => reader,
             Err(error) if error.kind() == io::ErrorKind::NotADirectory => {
-                // Either `dir` is a file, or something above it is: only a
-                // stat of the path itself tells them apart.
-                return Err(match fs::symlink_metadata(&local) {
+                // Either `dir` is a file, or something above it (or above
+                // the target of a link) is: only a stat that follows the path
+                // as read_dir did tells them apart. A link that resolves
+                // nowhere is broken, and listing it is NotFound.
+                return Err(match fs::metadata(&local) {
                     Ok(_) => io_error(error, dir),
                     Err(_) => lookup_error(error, dir),
                 });
             }
-            Err(error) => return Err(io_error(error, dir)),
+            Err(error) => return Err(lookup_error(error, dir)),
         };
         let mut listing = Listing::default();
         for item in reader {
@@ -381,13 +410,14 @@ impl Backend for LocalBackend {
                 refuse_read_only(&existing, path)?;
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(io_error(error, path)),
+            Err(error) => return Err(create_error(error, path, &final_path)),
         }
-        let (file, temp_path) = create_temp(&final_path, name, path)?;
+        let (file, dir, temp_name) = create_temp(&final_path, name, path)?;
         Ok(Box::new(LocalWriteSession {
             target: path.clone(),
-            final_path,
-            temp_path,
+            dir,
+            final_name: name.to_owned(),
+            temp_name,
             file: Some(file),
             replace,
             poisoned: None,
@@ -402,10 +432,11 @@ impl Backend for LocalBackend {
                 Some(path.clone()),
             ));
         }
+        let local = self.to_local(path);
         fs::DirBuilder::new()
             .mode(0o777)
-            .create(self.to_local(path))
-            .map_err(|error| io_error(error, path))
+            .create(&local)
+            .map_err(|error| create_error(error, path, &local))
     }
 
     fn rename(&self, from: &RemotePath, to: &RemotePath) -> Result<(), BackendError> {
@@ -420,11 +451,24 @@ impl Backend for LocalBackend {
         }
         let source = self.to_local(from);
         let destination = self.to_local(to);
-        fs::symlink_metadata(&source).map_err(|error| lookup_error(error, from))?;
-        if from == to {
+        let moved = fs::symlink_metadata(&source).map_err(|error| lookup_error(error, from))?;
+        // Two spellings of one directory entry (a link on the way to one of
+        // them leads to the other): renaming it onto itself does nothing.
+        if from == to || same_entry(&source, &destination) {
             return Ok(());
         }
-        if to.starts_with(from) {
+        // Only a directory can be moved into itself, and only to a parent that
+        // exists; below a file or a missing or dangling parent the destination
+        // checks report it. A link on the way to `to` can lead into `from` as
+        // well, and this is checked before whether `to` exists, so it must be
+        // resolved here.
+        let parent_exists = destination
+            .parent()
+            .is_some_and(|parent| fs::metadata(parent).is_ok_and(|found| found.is_dir()));
+        if moved.is_dir()
+            && parent_exists
+            && (to.starts_with(from) || resolves_inside(&source, &destination))
+        {
             return Err(backend_error(
                 BackendErrorKind::Other,
                 to,
@@ -439,7 +483,7 @@ impl Backend for LocalBackend {
                 ));
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(io_error(error, to)),
+            Err(error) => return Err(create_error(error, to, &destination)),
         }
         match trash::rename_noreplace(&source, &destination) {
             Ok(()) => Ok(()),
@@ -538,21 +582,37 @@ fn refuse_read_only(existing: &fs::Metadata, target: &RemotePath) -> Result<(), 
 /// power cut can lose the new name while a later unlink of the source persists,
 /// which is how a move would lose data. Filesystems that cannot fsync a
 /// directory answer EINVAL or ENOTSUP and are let through.
-fn sync_parent(path: &Path) -> io::Result<()> {
-    let Some(directory) = path.parent() else {
-        return Ok(());
-    };
-    match File::open(directory).and_then(|handle| handle.sync_all()) {
-        Err(error)
-            if matches!(
-                error.raw_os_error(),
-                Some(code) if code == rustix::io::Errno::INVAL.raw_os_error()
-                    || code == rustix::io::Errno::NOTSUP.raw_os_error()
-            ) =>
-        {
-            Ok(())
+fn sync_directory(directory: &OwnedFd) -> io::Result<()> {
+    match rustix::fs::fsync(directory) {
+        Ok(()) | Err(rustix::io::Errno::INVAL | rustix::io::Errno::NOTSUP) => Ok(()),
+        Err(errno) => Err(errno.into()),
+    }
+}
+
+/// Whether two paths name the same directory entry once the links on the way
+/// to each are followed: the same name in the same directory.
+fn same_entry(a: &Path, b: &Path) -> bool {
+    match (a.parent(), a.file_name(), b.parent(), b.file_name()) {
+        (Some(a_dir), Some(a_name), Some(b_dir), Some(b_name)) if a_name == b_name => {
+            matches!(
+                (fs::canonicalize(a_dir), fs::canonicalize(b_dir)),
+                (Ok(x), Ok(y)) if x == y
+            )
         }
-        other => other,
+        _ => false,
+    }
+}
+
+/// Whether `destination`, with the links on the way to it followed, lies inside
+/// the directory `source`. `false` when either does not resolve: the checks
+/// that follow report that.
+fn resolves_inside(source: &Path, destination: &Path) -> bool {
+    let (Some(parent), Some(name)) = (destination.parent(), destination.file_name()) else {
+        return false;
+    };
+    match (fs::canonicalize(source), fs::canonicalize(parent)) {
+        (Ok(source), Ok(parent)) => parent.join(name).starts_with(source),
+        _ => false,
     }
 }
 
@@ -575,29 +635,39 @@ fn rename_failure(
     io_error(io::Error::from(errno), if about_source { from } else { to })
 }
 
-/// Creates the hidden temporary sibling of `final_path`.
+/// Opens the directory of `final_path` and creates the hidden temporary in
+/// it. The session keeps that descriptor: the temporary is renamed, synced and
+/// removed relative to it, so the file lands in the directory resolved here
+/// even if a link on the way is replaced meanwhile (by this very write, too).
 fn create_temp(
     final_path: &Path,
     name: &str,
     target: &RemotePath,
-) -> Result<(File, PathBuf), BackendError> {
+) -> Result<(File, OwnedFd, String), BackendError> {
+    use rustix::fs::{Mode, OFlags};
     let directory = final_path.parent().unwrap_or(Path::new("/"));
+    let dir = rustix::fs::open(
+        directory,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|errno| create_error(errno.into(), target, final_path))?;
     let mut last = None;
     for _ in 0..TEMP_ATTEMPTS {
         let serial = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp_path = directory.join(temp_name(name, serial));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o666)
-            .open(&temp_path)
-        {
-            Ok(file) => return Ok((file, temp_path)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => last = Some(error),
-            Err(error) => return Err(io_error(error, target)),
+        let temp = temp_name(name, serial);
+        match rustix::fs::openat(
+            &dir,
+            temp.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o666),
+        ) {
+            Ok(fd) => return Ok((File::from(fd), dir, temp)),
+            Err(rustix::io::Errno::EXIST) => last = Some(rustix::io::Errno::EXIST),
+            Err(errno) => return Err(create_error(errno.into(), target, final_path)),
         }
     }
-    let error = last.unwrap_or_else(|| io::Error::from(io::ErrorKind::AlreadyExists));
+    let error = io::Error::from(last.unwrap_or(rustix::io::Errno::EXIST));
     Err(io_error(error, target))
 }
 
@@ -638,8 +708,10 @@ impl Read for LocalReader {
 /// renamed over the final name by `finish`.
 struct LocalWriteSession {
     target: RemotePath,
-    final_path: PathBuf,
-    temp_path: PathBuf,
+    /// The directory the file lands in, opened by `begin_write`.
+    dir: OwnedFd,
+    final_name: String,
+    temp_name: String,
     file: Option<File>,
     replace: bool,
     poisoned: Option<BackendErrorKind>,
@@ -659,9 +731,8 @@ impl LocalWriteSession {
             self.file = None;
             // `done` only once the temporary is really gone, so `Drop` retries a
             // removal that failed instead of leaving a `.kara-part` behind.
-            match fs::remove_file(&self.temp_path) {
-                Ok(()) => self.done = true,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => self.done = true,
+            match rustix::fs::unlinkat(&self.dir, self.temp_name.as_str(), AtFlags::empty()) {
+                Ok(()) | Err(rustix::io::Errno::NOENT) => self.done = true,
                 Err(_) => {}
             }
         }
@@ -677,31 +748,26 @@ impl LocalWriteSession {
         file.sync_all()
             .map_err(|error| io_error(error, &self.target))?;
         drop(file);
-        if self.replace {
-            match fs::rename(&self.temp_path, &self.final_path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::IsADirectory => {
-                    return Err(BackendError::new(
-                        BackendErrorKind::AlreadyExists,
-                        Some(self.target.clone()),
-                    ));
-                }
-                Err(error) => return Err(io_error(error, &self.target)),
-            }
+        let (temp, name) = (self.temp_name.as_str(), self.final_name.as_str());
+        let renamed = if self.replace {
+            rustix::fs::renameat(&self.dir, temp, &self.dir, name)
         } else {
-            match trash::rename_noreplace(&self.temp_path, &self.final_path) {
-                Ok(()) => {}
-                Err(rustix::io::Errno::EXIST) => {
-                    return Err(BackendError::new(
-                        BackendErrorKind::AlreadyExists,
-                        Some(self.target.clone()),
-                    ));
-                }
-                Err(errno) => return Err(io_error(io::Error::from(errno), &self.target)),
+            trash::rename_noreplace_at(self.dir.as_fd(), temp, self.dir.as_fd(), name)
+        };
+        match renamed {
+            Ok(()) => {}
+            // A directory took the name meanwhile (replace), or anything did
+            // (no replace): either way the name is taken.
+            Err(rustix::io::Errno::EXIST | rustix::io::Errno::ISDIR) => {
+                return Err(BackendError::new(
+                    BackendErrorKind::AlreadyExists,
+                    Some(self.target.clone()),
+                ));
             }
+            Err(errno) => return Err(io_error(io::Error::from(errno), &self.target)),
         }
         self.done = true;
-        sync_parent(&self.final_path).map_err(|error| io_error(error, &self.target))
+        sync_directory(&self.dir).map_err(|error| io_error(error, &self.target))
     }
 }
 
@@ -757,17 +823,13 @@ impl WriteSession for LocalWriteSession {
         if self.done {
             return Ok(());
         }
-        match fs::remove_file(&self.temp_path) {
-            Ok(()) => {
-                self.done = true;
-                Ok(())
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+        match rustix::fs::unlinkat(&self.dir, self.temp_name.as_str(), AtFlags::empty()) {
+            Ok(()) | Err(rustix::io::Errno::NOENT) => {
                 self.done = true;
                 Ok(())
             }
             // Not done: `Drop` tries once more.
-            Err(error) => Err(io_error(error, &self.target)),
+            Err(errno) => Err(io_error(errno.into(), &self.target)),
         }
     }
 }
