@@ -214,13 +214,34 @@ fn path_of(key: &str, fallback: &RemotePath) -> RemotePath {
 }
 
 /// Resolves a link target against the directory of the link.
+///
+/// `.` and `..` are folded here, segment by segment: `RemotePath::parse` rejects
+/// them, and relative links such as `../t/x` are the common case on POSIX servers.
 fn absolutize(link: &RemotePath, target: &str) -> Option<RemotePath> {
-    if target.starts_with('/') {
-        return RemotePath::parse(target).ok();
-    }
     let parent = link.parent()?;
-    let base = parent.as_str().trim_end_matches('/');
-    RemotePath::parse(&format!("{base}/{target}")).ok()
+    let mut segments: Vec<&str> = if target.starts_with('/') {
+        Vec::new()
+    } else {
+        parent.segments().collect()
+    };
+    for segment in target.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            name => segments.push(name),
+        }
+    }
+    RemotePath::parse(&format!("/{}", segments.join("/"))).ok()
+}
+
+/// Puts back the path the caller used in an error that names the resolved one.
+fn named(mut error: BackendError, used: &RemotePath, real: &RemotePath) -> BackendError {
+    if error.path.as_ref() == Some(real) {
+        error.path = Some(used.clone());
+    }
+    error
 }
 
 fn entry(
@@ -316,6 +337,35 @@ impl State {
         }
     }
 
+    /// `path` with every link on the way to it followed. The last component is
+    /// never followed, so a destructive operation acts on the link itself.
+    fn canon(&self, path: &RemotePath) -> RemotePath {
+        match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) => self
+                .canon_dir(&parent)
+                .join(name)
+                .unwrap_or_else(|_| path.clone()),
+            _ => path.clone(),
+        }
+    }
+
+    /// Like [`State::canon`], but also follows the last component.
+    fn canon_dir(&self, path: &RemotePath) -> RemotePath {
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return path.clone();
+        };
+        let candidate = self
+            .canon_dir(&parent)
+            .join(name)
+            .unwrap_or_else(|_| path.clone());
+        match self.lookup(&candidate) {
+            Lookup::Node(Node::Symlink { target, .. }) => {
+                self.final_path(&candidate, target).unwrap_or(candidate)
+            }
+            _ => candidate,
+        }
+    }
+
     fn entry_for(&self, path: &RemotePath, name: &str, node: Option<&Node>) -> FileEntry {
         match node {
             None => entry(name, EntryKind::Directory, None, None, None),
@@ -339,14 +389,20 @@ impl State {
                         Some(*modified),
                         Some(false),
                     ),
-                    Some(Lookup::Node(Node::File { content, .. })) => entry(
+                    Some(Lookup::Node(Node::File { .. })) => entry(
                         name,
                         EntryKind::File,
-                        Some(to_u64(content.len())),
+                        Some(to_u64(target.len())),
                         Some(*modified),
                         Some(false),
                     ),
-                    _ => entry(name, EntryKind::File, None, Some(*modified), Some(true)),
+                    _ => entry(
+                        name,
+                        EntryKind::File,
+                        Some(to_u64(target.len())),
+                        Some(*modified),
+                        Some(true),
+                    ),
                 }
             }
         }
@@ -647,7 +703,10 @@ impl Read for MemoryReader {
 /// An upload in progress: bytes are buffered and only `finish` makes them visible.
 struct MemorySession {
     state: Arc<Mutex<State>>,
+    /// The path the caller used: faults and errors name this one.
     path: RemotePath,
+    /// Where the object lands, with links on the way followed.
+    real: RemotePath,
     replace: bool,
     buffer: Vec<u8>,
     /// Kind of the first failure; the session is poisoned from then on.
@@ -685,12 +744,13 @@ impl MemorySession {
         if let Some(effect) = st.take_fault(Op::Finish, &[&self.path], u64::MAX) {
             return Err(effect_error(effect, &self.path));
         }
-        st.check_target(&self.path, self.replace)?;
+        st.check_target(&self.real, self.replace)
+            .map_err(|e| named(e, &self.path, &self.real))?;
         let content = std::mem::take(&mut self.buffer);
         // The bytes move from "open session" to "committed".
         st.session_bytes = st.session_bytes.saturating_sub(to_u64(content.len()));
         st.nodes.insert(
-            self.path.as_str().to_owned(),
+            self.real.as_str().to_owned(),
             Node::File {
                 content: Arc::new(content),
                 modified: SystemTime::now(),
@@ -785,17 +845,18 @@ impl Backend for MemoryBackend {
         if cancel.is_cancelled() {
             return Err(err(BackendErrorKind::Cancelled, dir));
         }
-        let target = match st.lookup(dir) {
+        let real = st.canon(dir);
+        let target = match st.lookup(&real) {
             Lookup::Missing => return Err(err(BackendErrorKind::NotFound, dir)),
             Lookup::Node(Node::File { .. }) => {
                 return Err(other(io::ErrorKind::NotADirectory, dir));
             }
-            Lookup::Node(Node::Symlink { .. }) => match st.resolve(dir) {
+            Lookup::Node(Node::Symlink { .. }) => match st.resolve(&real) {
                 Some(final_path) if st.lookup(&final_path).is_directory() => final_path,
                 Some(_) => return Err(other(io::ErrorKind::NotADirectory, dir)),
                 None => return Err(err(BackendErrorKind::NotFound, dir)),
             },
-            _ => dir.clone(),
+            _ => real,
         };
 
         let prefix = child_prefix(&target);
@@ -808,7 +869,15 @@ impl Backend for MemoryBackend {
                 .range((cursor.clone(), upper.clone()))
                 .next()
                 .map(|(key, node)| (key.clone(), node.clone()));
-            let Some((key, node)) = next else { break };
+            let Some((key, node)) = next else {
+                // An empty directory must honour `after: 0` as well.
+                if entries.is_empty()
+                    && let Some(effect) = st.take_fault(Op::List, &[dir], 0)
+                {
+                    return Err(effect_error(effect, dir));
+                }
+                break;
+            };
 
             let index = to_u64(entries.len());
             if let Some(effect) = st.take_fault(Op::List, &[dir], index) {
@@ -846,7 +915,8 @@ impl Backend for MemoryBackend {
     fn stat(&self, path: &RemotePath) -> Result<FileEntry, BackendError> {
         let mut st = self.lock();
         st.begin_op(Op::Stat, path)?;
-        st.stat_entry(path)
+        let real = st.canon(path);
+        st.stat_entry(&real).map_err(|e| named(e, path, &real))
     }
 
     fn open_read(
@@ -856,8 +926,9 @@ impl Backend for MemoryBackend {
     ) -> Result<Box<dyn Read + Send>, BackendError> {
         let mut st = self.lock();
         st.begin_op(Op::OpenRead, path)?;
+        let real = st.canon(path);
         let resolved = st
-            .resolve(path)
+            .resolve(&real)
             .ok_or_else(|| err(BackendErrorKind::NotFound, path))?;
         let data = match st.lookup(&resolved) {
             Lookup::Node(Node::File { content, .. }) => Arc::clone(content),
@@ -884,11 +955,14 @@ impl Backend for MemoryBackend {
     ) -> Result<Box<dyn WriteSession>, BackendError> {
         let mut st = self.lock();
         st.begin_op(Op::BeginWrite, path)?;
-        st.check_target(path, replace)?;
+        let real = st.canon(path);
+        st.check_target(&real, replace)
+            .map_err(|e| named(e, path, &real))?;
         st.stats.open_sessions = st.stats.open_sessions.saturating_add(1);
         Ok(Box::new(MemorySession {
             state: Arc::clone(&self.state),
             path: path.clone(),
+            real,
             replace,
             buffer: Vec::new(),
             poison: None,
@@ -899,17 +973,18 @@ impl Backend for MemoryBackend {
     fn create_dir(&self, path: &RemotePath) -> Result<(), BackendError> {
         let mut st = self.lock();
         st.begin_op(Op::CreateDir, path)?;
-        if !matches!(st.lookup(path), Lookup::Missing) {
+        let real = st.canon(path);
+        if !matches!(st.lookup(&real), Lookup::Missing) {
             return Err(err(BackendErrorKind::AlreadyExists, path));
         }
-        st.check_parent(path)?;
+        st.check_parent(&real).map_err(|e| named(e, path, &real))?;
         let modified = SystemTime::now();
         let node = if st.caps.real_directories {
             Node::Dir { modified }
         } else {
             Node::Marker { modified }
         };
-        st.nodes.insert(path.as_str().to_owned(), node);
+        st.nodes.insert(real.as_str().to_owned(), node);
         Ok(())
     }
 
@@ -922,23 +997,25 @@ impl Backend for MemoryBackend {
         if to.is_root() {
             return Err(other(io::ErrorKind::InvalidInput, to));
         }
-        if matches!(st.lookup(from), Lookup::Missing) {
+        let (src, dst) = (st.canon(from), st.canon(to));
+        if matches!(st.lookup(&src), Lookup::Missing) {
             return Err(err(BackendErrorKind::NotFound, from));
         }
-        if from == to {
+        if src == dst {
             return Ok(());
         }
-        if to.starts_with(from) {
+        if dst.starts_with(&src) {
             return Err(other(io::ErrorKind::InvalidInput, to));
         }
-        if !matches!(st.lookup(to), Lookup::Missing) {
+        if !matches!(st.lookup(&dst), Lookup::Missing) {
             return Err(err(BackendErrorKind::AlreadyExists, to));
         }
-        st.check_parent(to)?;
+        st.check_parent(&dst).map_err(|e| named(e, to, &dst))?;
 
-        let keys = st.subtree_keys(from);
+        let keys = st.subtree_keys(&src);
         let atomic = st.caps.atomic_rename;
-        if atomic && let Some(effect) = st.take_fault(Op::Rename, &[from, to], 0) {
+        // An atomic rename fails as a whole, so a fault fires whatever its `after`.
+        if atomic && let Some(effect) = st.take_fault(Op::Rename, &[from, to], u64::MAX) {
             return Err(effect_error(effect, from));
         }
         for (index, key) in keys.iter().enumerate() {
@@ -947,9 +1024,9 @@ impl Backend for MemoryBackend {
             if !atomic && let Some(effect) = st.take_fault(Op::Rename, &[from, to], to_u64(index)) {
                 return Err(effect_error(effect, &path_of(key, from)));
             }
-            let suffix = key.get(from.as_str().len()..).unwrap_or_default();
+            let suffix = key.get(src.as_str().len()..).unwrap_or_default();
             if let Some(node) = st.nodes.remove(key) {
-                st.nodes.insert(format!("{}{suffix}", to.as_str()), node);
+                st.nodes.insert(format!("{}{suffix}", dst.as_str()), node);
             }
         }
         Ok(())
@@ -961,15 +1038,16 @@ impl Backend for MemoryBackend {
         if path.is_root() {
             return Err(other(io::ErrorKind::InvalidInput, path));
         }
-        match st.lookup(path) {
+        let real = st.canon(path);
+        match st.lookup(&real) {
             Lookup::Missing => return Err(err(BackendErrorKind::NotFound, path)),
             Lookup::Implicit => return Err(other(io::ErrorKind::DirectoryNotEmpty, path)),
-            Lookup::Node(Node::Dir { .. } | Node::Marker { .. }) if st.has_children(path) => {
+            Lookup::Node(Node::Dir { .. } | Node::Marker { .. }) if st.has_children(&real) => {
                 return Err(other(io::ErrorKind::DirectoryNotEmpty, path));
             }
             _ => {}
         }
-        st.nodes.remove(path.as_str());
+        st.nodes.remove(real.as_str());
         Ok(())
     }
 
@@ -982,12 +1060,13 @@ impl Backend for MemoryBackend {
         if path.is_root() {
             return Err(other(io::ErrorKind::InvalidInput, path));
         }
-        if matches!(st.lookup(path), Lookup::Missing) {
+        let real = st.canon(path);
+        if matches!(st.lookup(&real), Lookup::Missing) {
             return Err(err(BackendErrorKind::NotFound, path));
         }
         // Children before parents, so a failure never leaves a child whose
         // parent is gone. Links are removed as links, never followed.
-        let mut keys = st.subtree_keys(path);
+        let mut keys = st.subtree_keys(&real);
         keys.reverse();
         for (index, key) in keys.iter().enumerate() {
             let object = path_of(key, path);
@@ -1012,17 +1091,24 @@ impl Backend for MemoryBackend {
         if !st.caps.server_side_copy {
             return Err(err(BackendErrorKind::Unsupported, from));
         }
-        let content = match st.lookup(from) {
+        let (src, dst) = (st.canon(from), st.canon(to));
+        let content = match st.lookup(&src) {
             Lookup::Missing => return Err(err(BackendErrorKind::NotFound, from)),
             Lookup::Node(Node::File { content, .. }) => Arc::clone(content),
             _ => return Err(err(BackendErrorKind::Unsupported, from)),
         };
-        if !matches!(st.lookup(to), Lookup::Missing) {
+        if !matches!(st.lookup(&dst), Lookup::Missing) {
             return Err(err(BackendErrorKind::AlreadyExists, to));
         }
-        st.check_parent(to)?;
+        st.check_parent(&dst).map_err(|e| named(e, to, &dst))?;
+        if let Some(capacity) = st.capacity {
+            let used = st.committed_bytes().saturating_add(st.session_bytes);
+            if used.saturating_add(to_u64(content.len())) > capacity {
+                return Err(err(BackendErrorKind::NoSpace, to));
+            }
+        }
         st.nodes.insert(
-            to.as_str().to_owned(),
+            dst.as_str().to_owned(),
             Node::File {
                 content,
                 modified: SystemTime::now(),

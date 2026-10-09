@@ -584,7 +584,7 @@ fn list_file_is_error(c: &Ctx<'_>) -> Check {
         "list of a file",
         c.backend.list(&file, &Cancel::new()),
         BackendErrorKind::Other,
-        None,
+        Some(&file),
     )
 }
 
@@ -598,7 +598,7 @@ fn list_precancelled(c: &Ctx<'_>) -> Check {
         "list with an already cancelled token",
         c.backend.list(&c.dir, &token),
         BackendErrorKind::Cancelled,
-        None,
+        Some(&c.dir),
     )
 }
 
@@ -693,13 +693,17 @@ fn read_offsets(c: &Ctx<'_>) -> Check {
             ));
         }
     }
-    match read_from(c, &path, 11) {
-        Err(_) => Ok(()),
-        Ok(got) => Err(format!(
-            "open_read({path}, 11) past the end of a 10 byte file succeeded with {} bytes",
-            got.len()
-        )),
+    // Past the end the error comes at open time, not as a short read, and it
+    // must not overflow on the largest offset.
+    for from in [11, u64::MAX] {
+        expect_err(
+            &format!("open_read({path}, {from}) past the end of a 10 byte file"),
+            c.backend.open_read(&path, from),
+            BackendErrorKind::Other,
+            Some(&path),
+        )?;
     }
+    Ok(())
 }
 
 fn read_missing_and_dir(c: &Ctx<'_>) -> Check {
@@ -713,9 +717,10 @@ fn read_missing_and_dir(c: &Ctx<'_>) -> Check {
     let dir = c.at("dir")?;
     c.mkdir(&dir)?;
     match read_from(c, &dir, 0) {
-        Err(e) if e.kind == BackendErrorKind::Other => Ok(()),
+        Err(e) if e.kind == BackendErrorKind::Other && e.path.as_ref() == Some(&dir) => Ok(()),
         Err(e) => Err(format!(
-            "reading the directory {dir} should fail with Other, got {e}"
+            "reading the directory {dir} should fail with Other naming it, got {e} ({:?})",
+            e.path
         )),
         Ok(got) => Err(format!(
             "reading the directory {dir} succeeded with {} bytes",
@@ -1083,7 +1088,7 @@ fn rename_into_own_subtree(c: &Ctx<'_>) -> Check {
         "rename of a directory into itself",
         c.backend.rename(&d, &into),
         BackendErrorKind::Other,
-        None,
+        Some(&into),
     )?;
     c.content_is(&f, b"f")?;
     c.is_missing(&into)
@@ -1112,7 +1117,7 @@ fn remove_nonempty_dir(c: &Ctx<'_>) -> Check {
         "remove of a non-empty directory",
         c.backend.remove(&dir),
         BackendErrorKind::Other,
-        None,
+        Some(&dir),
     )?;
     c.content_is(&child, b"f")
 }
@@ -1173,7 +1178,7 @@ fn remove_tree_precancelled(c: &Ctx<'_>) -> Check {
         "remove_tree with a cancelled token",
         c.backend.remove_tree(&root, &token),
         BackendErrorKind::Cancelled,
-        None,
+        Some(&root),
     )?;
     for file in &files {
         c.stat(file)
@@ -1312,7 +1317,7 @@ fn copy_within(c: &Ctx<'_>) -> Check {
         "copy_within of a directory",
         c.backend.copy_within(&dir, &c.at("dir2")?),
         BackendErrorKind::Unsupported,
-        None,
+        Some(&dir),
     )
 }
 
