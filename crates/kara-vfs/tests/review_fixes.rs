@@ -233,3 +233,29 @@ mod nameless_errors {
         }
     }
 }
+
+// Two different strings must not name the same place: bookmarks and history
+// deduplicate by URI.
+mod uri_aliases {
+    use kara_vfs::location::Location;
+
+    #[test]
+    fn non_canonical_forms_are_refused() {
+        for uri in [
+            "kara+sftp://w/a%2Fb",
+            "kara+sftp://w//x//",
+            "kara+sftp://w/a%c3%a9",
+            "file:///a b",
+        ] {
+            assert!(Location::from_uri(uri).is_err(), "{uri} should be refused");
+        }
+    }
+
+    #[test]
+    fn canonical_forms_round_trip() {
+        for uri in ["kara+sftp://w/a/b", "kara+sftp://w/a%C3%A9", "kara+sftp://w", "file:///a%20b"] {
+            let location = Location::from_uri(uri).expect(uri);
+            assert_eq!(Location::from_uri(&location.to_uri().expect("uri")), Ok(location));
+        }
+    }
+}

@@ -202,7 +202,7 @@ impl Location {
                 if bytes.first() != Some(&b'/') {
                     return Err(LocationError::RelativeLocalPath);
                 }
-                Ok(Location::Local(PathBuf::from(OsStr::from_bytes(&bytes))))
+                canonical(uri, Location::Local(PathBuf::from(OsStr::from_bytes(&bytes))))
             }
             Some(drive_scheme) => {
                 let drive = DriveId::new(drive_scheme, authority)?;
@@ -211,7 +211,7 @@ impl Location {
                 } else {
                     RemotePath::from_bytes(&bytes)?
                 };
-                Ok(Location::Remote { drive, path })
+                canonical(uri, Location::Remote { drive, path })
             }
         }
     }
@@ -250,6 +250,22 @@ impl Location {
                 path: parent,
             }),
         }
+    }
+}
+
+/// Accepts `location` only if `uri` is exactly what [`Location::to_uri`] emits for
+/// it, so two different strings never name the same place (bookmarks and history
+/// deduplicate by URI): `%2F` for `/`, repeated `/`, lowercase hex and unescaped
+/// spaces are all refused.
+fn canonical(uri: &str, location: Location) -> Result<Location, LocationError> {
+    let expected = location.to_uri()?;
+    // The contract (cb_08) lets a remote root be written with or without its `/`.
+    let root_alias = matches!(&location, Location::Remote { path, .. } if path.is_root())
+        && expected.strip_suffix('/') == Some(uri);
+    if expected == uri || root_alias {
+        Ok(location)
+    } else {
+        Err(LocationError::InvalidPercentEncoding)
     }
 }
 
