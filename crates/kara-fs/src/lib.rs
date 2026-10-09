@@ -11,6 +11,10 @@
 
 pub mod trash;
 
+pub mod backend;
+
+pub use backend::{LocalBackend, LocalPathError};
+
 pub mod clipboard;
 
 pub mod listing;

@@ -740,6 +740,7 @@ dependencies = [
  "flate2",
  "image",
  "kara-core",
+ "kara-vfs",
  "md-5",
  "percent-encoding",
  "png",
