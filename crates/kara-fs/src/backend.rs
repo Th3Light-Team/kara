@@ -215,9 +215,13 @@ impl LocalBackend {
             TrashError::NotFound { path, source }
             | TrashError::PermissionDenied { path, source }
             | TrashError::Io { path, source } => io_error(source, &about(&path)),
-            TrashError::RefusedSpecialPath { .. } => {
-                backend_error(BackendErrorKind::Other, arg, io::ErrorKind::InvalidInput)
-            }
+            // A nested mount point names itself, so the caller sees which
+            // directory stopped the walk; any other refusal is about `arg`.
+            TrashError::RefusedSpecialPath { path, .. } => backend_error(
+                BackendErrorKind::Other,
+                &about(&path),
+                io::ErrorKind::InvalidInput,
+            ),
             TrashError::Cancelled => BackendError::new(BackendErrorKind::Cancelled, Some(arg.clone())),
             other => BackendError::new(BackendErrorKind::Other, Some(arg.clone())).with_source(other),
         }
