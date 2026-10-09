@@ -518,7 +518,7 @@ fn place_in_trash(
 /// FreeDesktop implementation does unconditionally. The window between the two
 /// is narrow and, for the trash, already guarded on the other side by the
 /// `.trashinfo` name reservation (cb_08).
-fn rename_noreplace(from: &Path, to: &Path) -> Result<(), rustix::io::Errno> {
+pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> Result<(), rustix::io::Errno> {
     match rustix::fs::renameat_with(
         rustix::fs::CWD,
         from,

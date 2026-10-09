@@ -151,7 +151,7 @@ pub fn describe(path: &Path) -> Result<FileEntry, EntryError> {
 }
 
 /// Entrada con lo único que se sabe seguro —el nombre— cuando el `stat` falla.
-fn bare_entry(path: &Path) -> FileEntry {
+pub(crate) fn bare_entry(path: &Path) -> FileEntry {
     let name = path
         .file_name()
         .map_or_else(|| OsString::from(path), std::ffi::OsStr::to_os_string);
