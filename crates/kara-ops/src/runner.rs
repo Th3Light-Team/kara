@@ -324,6 +324,10 @@ struct Worker {
     job: Option<remote::LocationJob>,
     token: kara_vfs::Cancel,
     paused: Arc<AtomicBool>,
+    /// Sources already copied by a folder move across backends, children
+    /// before parents, waiting for the whole folder to arrive. The flag says
+    /// whether it is a folder.
+    copied_sources: Vec<(crate::location::Endpoint, bool)>,
 }
 
 impl Worker {
@@ -349,6 +353,7 @@ impl Worker {
             job: None,
             token: handle.token.clone(),
             paused: Arc::clone(&handle.paused),
+            copied_sources: Vec::new(),
         }
     }
 

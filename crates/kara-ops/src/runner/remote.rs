@@ -15,7 +15,8 @@
 //!   cancelled, skipped or mismatched copy keeps the source.
 //! - **A folder moved across backends is removed only after its whole subtree
 //!   copied without a failure or a skip**; until then nothing under it is
-//!   removed either.
+//!   removed either. Then exactly what was copied is removed, children first:
+//!   a file that appeared in the source meanwhile keeps its folder alive.
 //! - **Nothing is overwritten silently.** A remote Replace is only file over
 //!   file, through `begin_write(replace = true)`; replacing a folder on a drive
 //!   without trash would destroy it, so it is reported instead.
@@ -435,8 +436,9 @@ impl Worker {
 
         // Children of a folder renamed child by child (a merge on one drive
         // with atomic rename) move themselves; anything else is copied first
-        // and the tree removed at the end.
+        // and removed once all of it arrived.
         let children_move = self.renames(src, dst, move_now);
+        let mark = self.copied_sources.len();
         for child in names {
             let (Some(child_src), Some(child_dst)) = (src.join(&child), dst.join(&child)) else {
                 whole = Flow::Partial;
@@ -448,20 +450,40 @@ impl Worker {
             }
         }
 
-        if self.op == Op::Move && move_now && whole == Flow::Done {
-            if children_move {
-                // Empty by now unless something else wrote into it; a failure
-                // to remove it loses nothing.
-                let _ = src.backend.remove(&src.path);
-            } else {
-                let token = self.token.clone();
-                let removed = self.guarded_loc(&src.display(), |_| {
-                    src.backend.remove_tree(&src.path, &token).map_err(Fail::from)
+        if self.op != Op::Move {
+            return Ok(whole);
+        }
+        if !move_now {
+            // Below a folder moved by copying: removed by that folder, after
+            // its children.
+            self.copied_sources.push((src.clone(), true));
+            return Ok(whole);
+        }
+        if !children_move {
+            let copied = self.copied_sources.split_off(mark);
+            if whole == Flow::Partial {
+                // Something did not arrive: every source stays.
+                return Ok(whole);
+            }
+            for (end, is_dir) in copied {
+                if is_dir {
+                    // Empty by now unless something new appeared in it, and
+                    // then it must stay.
+                    let _ = end.backend.remove(&end.path);
+                    continue;
+                }
+                let removed = self.guarded_loc(&end.display(), |_| {
+                    end.backend.remove(&end.path).map_err(Fail::from)
                 })?;
                 if removed.is_none() {
-                    return Ok(Flow::Partial);
+                    whole = Flow::Partial;
                 }
             }
+        }
+        if whole == Flow::Done {
+            // Empty by now unless something else wrote into it; a failure to
+            // remove it loses nothing.
+            let _ = src.backend.remove(&src.path);
         }
         Ok(whole)
     }
@@ -517,6 +539,10 @@ impl Worker {
         self.items_done = self.items_done.saturating_add(1);
         if record {
             self.record_loc(src, dst, replace);
+        }
+        if self.op == Op::Move && !move_now {
+            // Removed by the folder being moved, once all of it arrived.
+            self.copied_sources.push((src.clone(), false));
         }
 
         if self.op == Op::Move && move_now {

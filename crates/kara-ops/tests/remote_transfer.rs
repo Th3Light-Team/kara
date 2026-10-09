@@ -572,3 +572,70 @@ fn a_local_source_with_a_name_the_drive_cannot_take_is_reported_not_guessed() {
     assert_eq!(outcome.report.skipped, vec![odd]);
     let _ = Backend::capabilities(memory.as_ref());
 }
+
+#[test]
+fn a_file_that_appears_in_the_source_during_a_folder_move_is_not_deleted() {
+    let a = Arc::new(MemoryBackend::posix_like());
+    let b = Arc::new(MemoryBackend::posix_like());
+    put(a.as_ref(), "/d/a", &bytes(BIG));
+    put(a.as_ref(), "/d/b", b"b");
+    let (gated, gate) = Gated::new(a.clone(), 256 * 1024);
+    let resolver = resolver(vec![(drive("a"), Arc::new(gated)), (drive("b"), b.clone())]);
+
+    let job = start(
+        request(Op::Move, vec![rloc(&drive("a"), "/d")], rloc(&drive("b"), "/")),
+        resolver,
+    );
+    gate.wait();
+    // Written by someone else after the folder was listed: never copied.
+    put(a.as_ref(), "/d/zz", b"recien llegado");
+    gate.release();
+    let (outcome, _) = job.finish(&Script::errors(ErrorDecision::Cancel));
+
+    assert!(!outcome.cancelled);
+    assert_eq!(content(&b, "/d/a"), Some(bytes(BIG)));
+    assert_eq!(content(&b, "/d/b"), Some(b"b".to_vec()));
+    assert_eq!(content(&a, "/d/zz"), Some(b"recien llegado".to_vec()), "never copied, never deleted");
+    assert!(!exists(a.as_ref(), "/d/a") && !exists(a.as_ref(), "/d/b"), "{:?}", keys(&a));
+}
+
+#[test]
+fn a_tree_moves_out_of_an_object_store_and_leaves_no_prefix_behind() {
+    let a = Arc::new(MemoryBackend::object_store_like());
+    let b = Arc::new(MemoryBackend::posix_like());
+    put(a.as_ref(), "/d/x", b"x");
+    put(a.as_ref(), "/d/e/y", b"y");
+    let resolver = resolver(vec![(drive("a"), a.clone()), (drive("b"), b.clone())]);
+
+    let (outcome, transcript) = run(
+        request(Op::Move, vec![rloc(&drive("a"), "/d")], rloc(&drive("b"), "/")),
+        &resolver,
+        &Script::errors(ErrorDecision::Cancel),
+    );
+
+    assert!(transcript.failures.is_empty(), "{:?}", transcript.failures);
+    assert!(outcome.report.is_clean(), "{:?}", outcome.report);
+    assert_eq!(content(&b, "/d/e/y"), Some(b"y".to_vec()));
+    assert!(keys(&a).is_empty(), "{:?}", keys(&a));
+}
+
+#[test]
+fn a_local_folder_moved_to_a_drive_is_removed_locally_only_after_it_arrived() {
+    let (_root, src, _) = local_world();
+    fs::create_dir_all(src.join("d/e")).unwrap();
+    write(&src.join("d/1"), b"1");
+    write(&src.join("d/e/2"), b"2");
+    let memory = Arc::new(MemoryBackend::posix_like());
+    let id = drive("nas");
+    let resolver = resolver(vec![(id.clone(), memory.clone())]);
+
+    let (outcome, _) = run(
+        request(Op::Move, vec![Location::Local(src.join("d"))], rloc(&id, "/")),
+        &resolver,
+        &Script::errors(ErrorDecision::Cancel),
+    );
+
+    assert!(outcome.report.is_clean(), "{:?}", outcome.report);
+    assert_eq!(content(&memory, "/d/e/2"), Some(b"2".to_vec()));
+    assert!(!src.join("d").exists());
+}
