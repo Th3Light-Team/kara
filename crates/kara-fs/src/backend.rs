@@ -19,7 +19,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use kara_core::FileEntry;
+use kara_core::{EntryKind, FileEntry};
 use kara_vfs::{
     Backend, BackendError, BackendErrorKind, Cancel, Capabilities, Listing, RemotePath,
     RemotePathError, WriteSession,
@@ -268,6 +268,26 @@ impl Backend for LocalBackend {
         let mut entry =
             describe(&self.to_local(path)).map_err(|failure| lookup_error(failure.source, path))?;
         if path.is_root() {
+            // A root given as a symlink to a directory is that directory: the
+            // drive is what the link leads to, not the link.
+            if entry.is_symlink {
+                let target = fs::metadata(&self.root).map_err(|error| io_error(error, path))?;
+                entry.kind = if target.is_dir() {
+                    EntryKind::Directory
+                } else {
+                    EntryKind::File
+                };
+                entry.is_symlink = false;
+                entry.symlink_broken = false;
+                entry.size = if target.is_dir() {
+                    None
+                } else {
+                    Some(target.len())
+                };
+                entry.modified = target.modified().ok();
+                entry.created = target.created().ok();
+                entry.accessed = target.accessed().ok();
+            }
             // The drive root is not named after the local folder that backs it.
             entry.name = "/".into();
             entry.display = String::from("/");
@@ -283,11 +303,22 @@ impl Backend for LocalBackend {
         from: u64,
     ) -> Result<Box<dyn Read + Send>, BackendError> {
         let local = self.to_local(path);
-        // O_NONBLOCK so that a FIFO without a writer cannot hang the worker; the
-        // kind is checked with fstat on the descriptor that was opened.
+        // Only a regular file is ever opened. Opening anything else can act on
+        // it: a FIFO wakes up a writer blocked in open(2), a tape device
+        // rewinds, a terminal can become the controlling one. So the kind is
+        // checked on the path first, and opening is left for regular files.
+        let found = fs::metadata(&local).map_err(|error| lookup_error(error, path))?;
+        refuse_non_file(&found, path)?;
+        // O_NONBLOCK so that a FIFO swapped in after the check still cannot
+        // hang the worker; the kind is checked again with fstat on the
+        // descriptor that was opened, which is the one that counts.
         let opened = OpenOptions::new()
             .read(true)
-            .custom_flags(rustix::fs::OFlags::NONBLOCK.bits().cast_signed())
+            .custom_flags(
+                (rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::NOCTTY)
+                    .bits()
+                    .cast_signed(),
+            )
             .open(&local);
         let mut file = match opened {
             Ok(file) => file,
@@ -301,19 +332,12 @@ impl Backend for LocalBackend {
             Err(error) => return Err(lookup_error(error, path)),
         };
         let metadata = file.metadata().map_err(|error| io_error(error, path))?;
-        if metadata.is_dir() {
-            return Err(backend_error(
-                BackendErrorKind::Other,
-                path,
-                io::ErrorKind::IsADirectory,
-            ));
-        }
-        if !metadata.is_file() {
-            return Err(BackendError::new(
-                BackendErrorKind::Unsupported,
-                Some(path.clone()),
-            ));
-        }
+        refuse_non_file(&metadata, path)?;
+        // A regular file it is: from here on reads block as they normally do.
+        let flags =
+            rustix::fs::fcntl_getfl(&file).map_err(|errno| io_error(errno.into(), path))?;
+        rustix::fs::fcntl_setfl(&file, flags - rustix::fs::OFlags::NONBLOCK)
+            .map_err(|errno| io_error(errno.into(), path))?;
         if from > metadata.len() {
             return Err(backend_error(
                 BackendErrorKind::Other,
@@ -478,6 +502,25 @@ impl Backend for LocalBackend {
             Some(from.clone()),
         ))
     }
+}
+
+/// `open_read` reads regular files only: a directory is `Other` with an
+/// `IsADirectory` source, anything else (FIFO, device, socket) `Unsupported`.
+fn refuse_non_file(metadata: &fs::Metadata, path: &RemotePath) -> Result<(), BackendError> {
+    if metadata.is_dir() {
+        return Err(backend_error(
+            BackendErrorKind::Other,
+            path,
+            io::ErrorKind::IsADirectory,
+        ));
+    }
+    if !metadata.is_file() {
+        return Err(BackendError::new(
+            BackendErrorKind::Unsupported,
+            Some(path.clone()),
+        ));
+    }
+    Ok(())
 }
 
 /// Replacing a read-only regular file is refused, as writing it in place would be.
