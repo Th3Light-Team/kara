@@ -15,7 +15,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -115,6 +115,10 @@ impl LocalBackend {
     }
 
     /// A backend rooted at `root`, which must be an existing directory.
+    ///
+    /// The root is a path prefix, **not a sandbox**: a symlink inside it that
+    /// points outside is followed by every operation. Do not use it to confine
+    /// untrusted paths.
     pub fn with_root(root: &Path) -> Result<LocalBackend, BackendError> {
         if !root.is_absolute() {
             return Err(BackendError::new(BackendErrorKind::Other, None)
@@ -346,6 +350,7 @@ impl Backend for LocalBackend {
                         Some(path.clone()),
                     ));
                 }
+                refuse_read_only(&existing, path)?;
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(io_error(error, path)),
@@ -418,7 +423,7 @@ impl Backend for LocalBackend {
                 io::Error::from(rustix::io::Errno::XDEV),
                 from,
             )),
-            Err(errno) => Err(io_error(io::Error::from(errno), to)),
+            Err(errno) => Err(rename_failure(errno, from, to, &source)),
         }
     }
 
@@ -469,6 +474,58 @@ impl Backend for LocalBackend {
             Some(from.clone()),
         ))
     }
+}
+
+/// Replacing a read-only regular file is refused, as writing it in place would be.
+fn refuse_read_only(existing: &fs::Metadata, target: &RemotePath) -> Result<(), BackendError> {
+    if existing.is_file() && existing.permissions().mode() & 0o222 == 0 {
+        return Err(BackendError::new(
+            BackendErrorKind::PermissionDenied,
+            Some(target.clone()),
+        ));
+    }
+    Ok(())
+}
+
+/// Flushes the directory entry of a file just renamed into place. Without it a
+/// power cut can lose the new name while a later unlink of the source persists,
+/// which is how a move would lose data. Filesystems that cannot fsync a
+/// directory answer EINVAL or ENOTSUP and are let through.
+fn sync_parent(path: &Path) -> io::Result<()> {
+    let Some(directory) = path.parent() else {
+        return Ok(());
+    };
+    match File::open(directory).and_then(|handle| handle.sync_all()) {
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(code) if code == rustix::io::Errno::INVAL.raw_os_error()
+                    || code == rustix::io::Errno::NOTSUP.raw_os_error()
+            ) =>
+        {
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+/// Which path a failed `rename` is about: the source if it vanished or its
+/// directory cannot be written, otherwise the destination.
+fn rename_failure(
+    errno: rustix::io::Errno,
+    from: &RemotePath,
+    to: &RemotePath,
+    source: &Path,
+) -> BackendError {
+    use rustix::io::Errno;
+    let about_source = match errno {
+        Errno::NOENT => fs::symlink_metadata(source).is_err(),
+        Errno::ACCESS | Errno::PERM | Errno::ROFS => source.parent().is_some_and(|dir| {
+            rustix::fs::access(dir, rustix::fs::Access::WRITE_OK).is_err()
+        }),
+        _ => false,
+    };
+    io_error(io::Error::from(errno), if about_source { from } else { to })
 }
 
 /// Creates the hidden temporary sibling of `final_path`.
@@ -552,9 +609,14 @@ impl LocalWriteSession {
     /// original error is the one worth reporting.
     fn discard(&mut self) {
         if !self.done {
-            self.done = true;
             self.file = None;
-            let _ = fs::remove_file(&self.temp_path);
+            // `done` only once the temporary is really gone, so `Drop` retries a
+            // removal that failed instead of leaving a `.kara-part` behind.
+            match fs::remove_file(&self.temp_path) {
+                Ok(()) => self.done = true,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => self.done = true,
+                Err(_) => {}
+            }
         }
     }
 
@@ -592,7 +654,7 @@ impl LocalWriteSession {
             }
         }
         self.done = true;
-        Ok(())
+        sync_parent(&self.final_path).map_err(|error| io_error(error, &self.target))
     }
 }
 
@@ -648,10 +710,16 @@ impl WriteSession for LocalWriteSession {
         if self.done {
             return Ok(());
         }
-        self.done = true;
         match fs::remove_file(&self.temp_path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Ok(()) => {
+                self.done = true;
+                Ok(())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.done = true;
+                Ok(())
+            }
+            // Not done: `Drop` tries once more.
             Err(error) => Err(io_error(error, &self.target)),
         }
     }

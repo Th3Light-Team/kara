@@ -529,6 +529,37 @@ pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> Result<(), rustix::io:
         Err(rustix::io::Errno::NOSYS)
         | Err(rustix::io::Errno::INVAL)
         | Err(rustix::io::Errno::OPNOTSUPP) => {
+            // `link` fails with EEXIST atomically, so link-then-unlink keeps the
+            // no-clobber guarantee where RENAME_NOREPLACE is missing. Directories
+            // and filesystems without hard links refuse it; only those fall
+            // through to the check-then-rename below.
+            match rustix::fs::linkat(
+                rustix::fs::CWD,
+                from,
+                rustix::fs::CWD,
+                to,
+                rustix::fs::AtFlags::empty(),
+            ) {
+                Ok(()) => {
+                    return match rustix::fs::unlinkat(
+                        rustix::fs::CWD,
+                        from,
+                        rustix::fs::AtFlags::empty(),
+                    ) {
+                        Ok(()) => Ok(()),
+                        Err(errno) => {
+                            let _ = rustix::fs::unlinkat(
+                                rustix::fs::CWD,
+                                to,
+                                rustix::fs::AtFlags::empty(),
+                            );
+                            Err(errno)
+                        }
+                    };
+                }
+                Err(rustix::io::Errno::EXIST) => return Err(rustix::io::Errno::EXIST),
+                Err(_) => {}
+            }
             if std::fs::symlink_metadata(to).is_ok() {
                 return Err(rustix::io::Errno::EXIST);
             }
