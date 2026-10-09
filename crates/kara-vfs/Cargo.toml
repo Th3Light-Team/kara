@@ -1,0 +1,27 @@
+[package]
+name = "kara-vfs"
+description = "Protocol-free foundation for Kara's remote drives: Location, RemotePath, the Backend trait, errors, capabilities, an in-memory backend and the conformance suite."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kara-core.workspace = true
+percent-encoding = "2.3.2"
+thiserror = "2.0.20"
+
+[features]
+default = []
+# In-memory backend with an SFTP-like and an S3-like profile plus fault injection.
+memory = []
+# The generic conformance suite every backend runs.
+conformance = []
+
+[dev-dependencies]
+# Self dev-dependency (contract dec_06): plain `cargo test` enables both features,
+# so the suite is never silently skipped.
+kara-vfs = { path = ".", features = ["memory", "conformance"] }
+# Already a normal dependency; tests name EntryKind / FileEntry directly.
+kara-core.workspace = true

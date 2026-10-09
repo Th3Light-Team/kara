@@ -789,6 +789,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kara-vfs"
+version = "0.1.0"
+dependencies = [
+ "kara-core",
+ "kara-vfs",
+ "percent-encoding",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
