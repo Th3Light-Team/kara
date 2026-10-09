@@ -58,6 +58,19 @@ pub const CASE_IDS: &[&str] = &[
     "implicit_directories",
 ];
 
+/// Cases that hold for every backend but are not part of the normative list
+/// [`CASE_IDS`] (whose order and length other suites pin): run them with
+/// [`run_extra`]. Same rules: own subdirectory, cleaned up, never panics.
+///
+/// A cancel landing in the middle of `list` needs a second thread, which this
+/// crate's sources may not start (source rule cb_48); each backend's own tests
+/// race it instead.
+pub const EXTRA_CASE_IDS: &[&str] = &[
+    "root_is_a_directory",
+    "path_under_a_file_is_not_found",
+    "transfer_cancel_midway",
+];
+
 /// One entry per [`CASE_IDS`] id, in that order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConformanceReport {
@@ -121,20 +134,7 @@ pub fn run(
     backend: &dyn Backend,
     scratch: &RemotePath,
 ) -> Result<ConformanceReport, ConformanceError> {
-    let found = backend
-        .stat(scratch)
-        .map_err(ConformanceError::ScratchUnreachable)?;
-    if found.kind != EntryKind::Directory {
-        return Err(ConformanceError::ScratchNotDirectory);
-    }
-    let listing = backend
-        .list(scratch, &Cancel::new())
-        .map_err(ConformanceError::ScratchUnreachable)?;
-    let entries = listing.entries.len().saturating_add(listing.errors.len());
-    if entries > 0 {
-        return Err(ConformanceError::ScratchNotEmpty { entries });
-    }
-
+    check_scratch(backend, scratch)?;
     let caps = backend.capabilities();
     let mut cases: Vec<CaseResult> = CASE_IDS
         .iter()
@@ -158,6 +158,41 @@ pub fn run(
         }
     }
     Ok(ConformanceReport { cases })
+}
+
+/// Runs every case of [`EXTRA_CASE_IDS`], with the same scratch rules as [`run`].
+pub fn run_extra(
+    backend: &dyn Backend,
+    scratch: &RemotePath,
+) -> Result<ConformanceReport, ConformanceError> {
+    check_scratch(backend, scratch)?;
+    let caps = backend.capabilities();
+    let cases = EXTRA_CASE_IDS
+        .iter()
+        .map(|id| CaseResult {
+            id,
+            outcome: run_case(backend, scratch, caps, id),
+        })
+        .collect();
+    Ok(ConformanceReport { cases })
+}
+
+/// Refuses a missing, non-directory or non-empty scratch before any mutation.
+fn check_scratch(backend: &dyn Backend, scratch: &RemotePath) -> Result<(), ConformanceError> {
+    let found = backend
+        .stat(scratch)
+        .map_err(ConformanceError::ScratchUnreachable)?;
+    if found.kind != EntryKind::Directory {
+        return Err(ConformanceError::ScratchNotDirectory);
+    }
+    let listing = backend
+        .list(scratch, &Cancel::new())
+        .map_err(ConformanceError::ScratchUnreachable)?;
+    let entries = listing.entries.len().saturating_add(listing.errors.len());
+    if entries > 0 {
+        return Err(ConformanceError::ScratchNotEmpty { entries });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +251,9 @@ fn case_for(id: &str) -> Option<CaseFn> {
         "capabilities_stable" => capabilities_stable,
         "copy_within" => copy_within,
         "implicit_directories" => implicit_directories,
+        "root_is_a_directory" => root_is_a_directory,
+        "path_under_a_file_is_not_found" => path_under_a_file_is_not_found,
+        "transfer_cancel_midway" => transfer_cancel_midway,
         _ => return None,
     };
     Some(case)
@@ -1397,4 +1435,130 @@ fn implicit_directories(c: &Ctx<'_>) -> Check {
     } else {
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// The extra cases, in EXTRA_CASE_IDS order.
+
+fn root_is_a_directory(c: &Ctx<'_>) -> Check {
+    let root = RemotePath::root();
+    let found = c.stat(&root)?;
+    if found.kind != EntryKind::Directory {
+        return Err(format!("stat(/) says {:?}, not a directory", found.kind));
+    }
+    if found.display != "/" || found.name != "/" {
+        return Err(format!(
+            "stat(/) is named {:?} / {:?}, not \"/\"",
+            found.name, found.display
+        ));
+    }
+    if found.is_symlink || found.symlink_broken {
+        return Err(String::from("stat(/) describes a link, not the drive"));
+    }
+    if found.is_hidden {
+        return Err(String::from("the drive root is hidden"));
+    }
+    if found.size.is_some() {
+        return Err(format!("stat(/) has size {:?}, a directory has None", found.size));
+    }
+    Ok(())
+}
+
+fn path_under_a_file_is_not_found(c: &Ctx<'_>) -> Check {
+    let file = c.at("file")?;
+    c.put(&file, b"f")?;
+    let under = c.under(&file, "x")?;
+    let deeper = c.under(&under, "y")?;
+    let b = c.backend;
+    for path in [&under, &deeper] {
+        expect_err(
+            "stat under a file",
+            b.stat(path),
+            BackendErrorKind::NotFound,
+            Some(path),
+        )?;
+        expect_err(
+            "open_read under a file",
+            b.open_read(path, 0),
+            BackendErrorKind::NotFound,
+            Some(path),
+        )?;
+        expect_err(
+            "remove under a file",
+            b.remove(path),
+            BackendErrorKind::NotFound,
+            Some(path),
+        )?;
+        expect_err(
+            "remove_tree under a file",
+            b.remove_tree(path, &Cancel::new()),
+            BackendErrorKind::NotFound,
+            Some(path),
+        )?;
+        expect_err(
+            "list under a file",
+            b.list(path, &Cancel::new()),
+            BackendErrorKind::NotFound,
+            Some(path),
+        )?;
+    }
+    c.content_is(&file, b"f")
+}
+
+/// What `kara-ops` does when a transfer is cancelled between two chunks: the
+/// reader is dropped and the write session aborted (or dropped).
+fn transfer_cancel_midway(c: &Ctx<'_>) -> Check {
+    let source = c.at("source")?;
+    let content = pattern(3 * TRANSFER_CHUNK + 5);
+    c.put(&source, &content)?;
+    let existing = c.at("existing")?;
+    c.put(&existing, b"old bytes")?;
+    let before = c.names(&c.dir)?;
+    for (target, replace) in [(c.at("new")?, false), (existing.clone(), true)] {
+        for by_drop in [false, true] {
+            let mut reader = c
+                .backend
+                .open_read(&source, 0)
+                .map_err(|e| format!("open_read({source}) failed: {e}"))?;
+            let mut session = c
+                .backend
+                .begin_write(&target, Some(to_u64(content.len())), replace)
+                .map_err(|e| format!("begin_write({target}, replace={replace}) failed: {e}"))?;
+            let mut chunk = vec![0u8; TRANSFER_CHUNK];
+            for _ in 0..2 {
+                reader
+                    .read_exact(&mut chunk)
+                    .map_err(|e| format!("reading a chunk of {source} failed: {e}"))?;
+                session
+                    .write_all(&chunk)
+                    .map_err(|e| format!("writing a chunk to {target} failed: {e}"))?;
+            }
+            drop(reader);
+            if by_drop {
+                drop(session);
+            } else {
+                session
+                    .abort()
+                    .map_err(|e| format!("abort of the transfer to {target} failed: {e}"))?;
+            }
+            let after = c.names(&c.dir)?;
+            if after != before {
+                return Err(format!(
+                    "a transfer cancelled midway changed {}: {before:?} became {after:?}",
+                    c.dir
+                ));
+            }
+            if replace {
+                c.content_is(&target, b"old bytes")?;
+            } else {
+                c.is_missing(&target)?;
+            }
+            c.content_is(&source, &content)?;
+        }
+    }
+    Ok(())
+}
+
+fn to_u64(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
 }

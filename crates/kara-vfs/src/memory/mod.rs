@@ -505,6 +505,14 @@ impl State {
             .fold(0, u64::saturating_add)
     }
 
+    /// The size of the file stored at `path`; 0 for anything else.
+    fn file_bytes(&self, path: &RemotePath) -> u64 {
+        match self.nodes.get(path.as_str()) {
+            Some(Node::File { content, .. }) => to_u64(content.len()),
+            _ => 0,
+        }
+    }
+
     /// Fires the first matching fault whose `after` has been reached, consuming one
     /// of its `times`. Operations that ignore `after` pass `u64::MAX`.
     fn take_fault(&mut self, op: Op, paths: &[&RemotePath], progress: u64) -> Option<FaultEffect> {
@@ -815,7 +823,17 @@ impl Write for MemorySession {
             n = n.min(allowed);
         }
         if let Some(capacity) = st.capacity {
-            let used = st.committed_bytes().saturating_add(st.session_bytes);
+            // A replacing session is measured against the drive as it will be
+            // after `finish`: the object it replaces is not counted twice.
+            let replaced = if self.replace {
+                st.file_bytes(&self.real)
+            } else {
+                0
+            };
+            let used = st
+                .committed_bytes()
+                .saturating_add(st.session_bytes)
+                .saturating_sub(replaced);
             if used.saturating_add(to_u64(n)) > capacity {
                 return Err(self.poisoned(&mut st, BackendErrorKind::NoSpace));
             }
