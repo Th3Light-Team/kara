@@ -796,6 +796,7 @@ dependencies = [
  "kara-core",
  "kara-vfs",
  "percent-encoding",
+ "proptest",
  "thiserror 2.0.20",
 ]
 

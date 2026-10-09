@@ -25,3 +25,5 @@ conformance = []
 kara-vfs = { path = ".", features = ["memory", "conformance"] }
 # Already a normal dependency; tests name EntryKind / FileEntry directly.
 kara-core.workspace = true
+# Property tests of RemotePath and Location (same version kara-core uses).
+proptest = "1.11.0"
