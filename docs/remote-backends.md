@@ -23,7 +23,7 @@ kara-ui → kara-ops → { kara-fs, kara-remote, kara-index } → kara-vfs → k
 |---|---|
 | `kara-vfs` (new) | `Location`, the `Backend` trait, `BackendError`, `Capabilities`, and the conformance suite (feature `conformance`). No protocol code. |
 | `kara-fs` | Gains `LocalBackend`: the existing code behind the trait. Public functions stay. |
-| `kara-remote` (new) | `MemoryBackend` (tests) and `sftp` (`russh` + `russh-sftp`) behind a cargo feature; `s3` later, same shape. |
+| `kara-remote` (new) | `MemoryBackend` (tests) and `sftp` (`russh` + `russh-sftp`) behind a cargo feature; `s3` (`object_store`) later, same shape. |
 
 `kara-core` stays free of I/O, so the trait does not live there. `kara-vfs`
 depends on `kara-core` only for `FileEntry`.
@@ -171,7 +171,7 @@ environment variables and `#[ignore]` otherwise. Add them in new test files;
 3. `Location` through `kara-ops`, then `kara-ui` (`present.rs` first, then the bridge).
 4. `DriveRegistry`, config, and the panel entry «Añadir unidad…» (QML is presentation only).
 5. SFTP adapter on `russh-sftp`, with the keyring `SecretStore`.
-6. S3 adapter (deferred; the contract must already accommodate it).
+6. S3 adapter on `object_store` (deferred; the contract must already accommodate it).
 
 Steps 1–2 and the Rust side of 3–4 can be built and tested without Qt. Only the
 panel and the bridge need a Qt build.
@@ -181,7 +181,10 @@ panel and the bridge need a Qt build.
 - **Secrets:** system keyring, stored when the user adds the drive.
 - **SFTP crate:** `russh-sftp` (pure Rust, async) under a private runtime inside the adapter.
 - **Keyring crate:** `oo7`.
-- **S3:** deferred. Its crate is chosen when it is picked up.
+- **S3:** deferred. Crate: `object_store` (Apache Arrow): concurrent multipart and ranged reads,
+  paginated listing with delimiter, server-side copy, S3-compatible endpoints (MinIO, R2, B2),
+  lighter to build than `aws-sdk-s3`. Fall back to `aws-sdk-s3` only if the full AWS credential
+  chain (SSO, profiles) is needed. Measure throughput against MinIO before trusting it.
 
 ## Open questions
 
