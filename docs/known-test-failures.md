@@ -53,8 +53,8 @@ Both are hash-pinned test files, so they were not edited.
 
 - `kara-vfs/tests/source_rules.rs` · `cb_48_no_other_crate_depends_on_kara_vfs_yet`
   — written for step 1, when nothing depended on `kara-vfs`. `kara-fs` now does
-  (step 2: `LocalBackend`). Intended change: allow `kara-fs` (later also
-  `kara-ops`, `kara-remote`).
+  (step 2: `LocalBackend`), and since step 3 so does `kara-ops`. Intended
+  change: allow `kara-fs` and `kara-ops` (later also `kara-remote`).
 - `kara-fs/tests/local_backend_rules.rs` · `cb_30_kara_vfs_and_kara_core_are_unchanged`
   — pins the hashes of `kara-vfs` sources as they were at the end of step 1.
   `kara-vfs` was fixed after two independent reviews. Intended change: re-pin to

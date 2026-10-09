@@ -122,3 +122,69 @@ Both are pinned by `cb_07_list_entries_are_exactly_what_describe_returns` in
   `entry.location == Some(<local dir>)`.
 
 Changing either one means changing that contract first.
+
+## `kara-ops` over Locations (step 3)
+
+Same method, over `crates/kara-ops/src/` (`R` is `runner/remote.rs`, `RU`
+`runner.rs`, `L` `location.rs`, `U` `undo.rs`, `RD` `remote_undo.rs`), running
+all of `cargo test -p kara-ops` for each mutation. The remote drive is
+`MemoryBackend` (both profiles) with fault injection; the tests wrap it to
+spy on calls (`Spy`, which also logs `finish`/`abort`/drop of each session),
+to hold a reader mid-copy (`Gated`), to lie about sizes (`LyingStat`), to hide
+a name from `stat` (`Blind`) or to break the contract on purpose
+(`Defective`). A crashed test binary counts as caught (M17).
+
+29 mutations: 24 caught at once, 3 survived and are caught now, 2 are
+equivalent.
+
+| # | Invariant | Mutation | Caught by |
+|---|---|---|---|
+| M01 | the source is never deleted after a failed copy | `R` `loc_leaf` ignores `copied.is_none()` | `a_failure_mid_copy_leaves_no_destination_and_keeps_the_source_of_a_move`, `one_failing_child_keeps_the_whole_source_tree_of_a_move` (+3) |
+| M02 | the size of the copy is verified | `R` `verify` always `Ok` | `a_size_mismatch_keeps_the_source_and_removes_the_bad_copy`, `…_after_a_server_side_copy_keeps_the_source_too` |
+| M03 | a failed or cancelled session is aborted, not just dropped | `abort()` → `drop(session)` | `a_failed_copy_aborts_its_session`, `cancelling_mid_copy_aborts_the_session_and_keeps_the_source` |
+| M04 | an unconfirmed permanent delete is refused | `RU` confirmation check → `false` | `an_unconfirmed_delete_is_refused_before_anything_is_touched` |
+| M05 | `Unavailable` → `MediaGone` | `L` → `Other` | `every_backend_error_kind_maps_onto_the_failure_kinds`, `a_lost_connection_is_media_gone_and_a_blanket_retry_does_not_loop` (+2) |
+| M06 | a conflict is never replaced silently | `begin_write(…, replace)` → `true` | `a_name_taken_behind_the_conflict_check_is_never_overwritten` |
+| M07 | server-side copy is used when declared | `server_side` → `false` | `a_copy_inside_a_drive_with_server_side_copy_moves_no_bytes`, `a_move_inside_an_object_store_is_copy_verify_delete` |
+| M08 | a move without `undo_move` is recorded as not undoable | `move_record` capability check → `true` | `a_move_on_a_drive_without_undo_move_is_recorded_and_disabled_with_a_reason` (+1) |
+| M09 | undo re-checks the capability | `RD` `rename_back` ignores `allowed` | `a_recorded_remote_move_is_not_undone_if_the_drive_no_longer_allows_it` |
+| M10 | a move between backends is not undoable | cross-backend check → `false` | `a_move_across_backends_and_a_replacing_copy_are_never_undoable` (+1) |
+| M11 | an all-local request runs the old code | `RU` `to_local()` routing skipped | **equivalent**: the location worker hands local → local items to the old `node()` itself (see M11b, M11c) |
+| M11b | a local item in a mixed job runs the old code | `R` local → local delegation removed | **survived** (LocalBackend's `rename` is rename(2) too, so the inode test cannot tell) → `local_copies_inside_any_location_job_keep_mode_and_mtime` |
+| M11c | both of the above | M11 + M11b | `every_local_scenario_gives_the_same_outcome_through_both_apis`, `a_local_folder_moved_on_one_volume_is_renamed_not_copied`, `local_copies_…_keep_mode_and_mtime` |
+| M12 | the job's cancel reaches `remove_tree` | fresh `Cancel` passed | `cancelling_a_remote_delete_reaches_remove_tree_through_its_token` |
+| M13 | a folder move removes only what it copied | `remove_tree` on the source instead | `a_file_that_appears_in_the_source_during_a_folder_move_is_not_deleted` (+2) |
+| M14 | remote Replace is file over file only | the `FileOverFile` check → `true` | `replace_never_destroys_a_remote_folder_or_puts_a_folder_over_a_file` |
+| M15 | cancel is checked at every chunk | check removed from the loop | `cancelling_mid_copy_aborts_the_session_and_keeps_the_source`, `a_paused_copy_…` |
+| M16 | a retry does not count bytes twice | counter not reset | `retry_after_a_transient_failure_copies_once_and_counts_bytes_once` |
+| M17 | a folder is not copied into itself | into-itself check → `false` | `copying_a_remote_folder_into_itself_is_refused` (stack overflow: the binary aborts) |
+| M18 | a not-undoable record disables «Deshacer» | `can_undo` → `!is_empty()` | `a_move_on_a_drive_without_undo_move_…`, `a_move_across_backends_…` |
+| M19 | a copy that replaced a remote file is not undoable | replaced guard → `false` | `replace_on_a_remote_file_writes_with_replace_and_is_not_undoable` (+1) |
+| M20 | «Calculando…» measures remote trees | `measure` does not recurse | `a_remote_tree_is_copied_to_a_local_folder_and_measured_first`, `a_confirmed_remote_delete_…` |
+| M21 | a mismatched fresh copy is removed | removal skipped | both size-mismatch tests |
+| M22 | pause holds at a chunk boundary | `wait_while_paused` removed | `a_paused_copy_waits_at_a_chunk_boundary_and_a_cancel_still_works` |
+| M23 | a listing with errors is not treated as complete | `listing.errors` ignored | **survived** → `a_folder_listed_with_errors_is_reported_and_its_move_keeps_every_source` |
+| M24 | a source that cannot be removed marks the folder partial | the `whole = Partial` after a failed removal dropped | **equivalent**: the only consequence is the final `remove` of the folder, which a backend refuses while the file is still in it. The failure is still reported (`a_source_that_cannot_be_removed_after_a_folder_move_is_reported_and_kept`) |
+| M25 | undo never overwrites what took the old place | `ensure_free` removed | **survived** (MemoryBackend's `rename` refuses anyway) → `undo_checks_the_old_place_itself_instead_of_trusting_the_backend`, with a backend whose `rename` overwrites |
+| M26 | undo of a new remote folder removes it only while empty | `remove` → `remove_tree` | `undo_of_a_remote_new_folder_removes_it_only_while_empty` |
+| M27 | children of a folder moved by copying are not removed one by one | per-file removal regardless of `move_now` | `one_failing_child_keeps_the_whole_source_tree_of_a_move`, `a_symlink_is_not_turned_into_a_copy_of_its_target` |
+
+Why the survivors slipped through:
+
+- **M11b:** both paths move by rename(2), so the inode stays the same either
+  way. A copy is what tells them apart: only the old path keeps mode and mtime.
+- **M23:** `MemoryBackend` never returns a partial listing. `Defective` hides
+  one entry and reports an error for it, which is what a real backend does
+  with an entry it cannot read.
+- **M25:** the conformance suite guarantees that `rename` never overwrites, so
+  the check in `kara-ops` is only defence in depth. The test uses a backend
+  that breaks that rule on purpose.
+
+Also found in review before the pass (not a mutation): the end of a folder
+move across backends used `remove_tree` on the source, which deleted a file
+written into the source after the folder was listed. Fixed (only the copied
+sources are removed); M13 is the regression check.
+
+Not tested here: the bridge and QML (no Qt), real SFTP/S3 latency and partial
+reads, and a backend whose `stat` reports no size (verification then fails and
+the source stays, by design, but no backend in the tree does that).
