@@ -1,6 +1,6 @@
 # Remote drives: what is built, what is left
 
-Status after steps 1–4 (Rust side). Everything below the UI is done and tested in
+Status after steps 1–5 (Rust side). Everything below the UI is done and tested in
 the cloud container; what is left either needs Qt, a real server, or an owner
 decision. Design: `remote-backends.md`. Tests and mutation tables:
 `remote-backends-testing.md`. Known red tests: `known-test-failures.md`.
@@ -14,6 +14,7 @@ Job API for the UI: `remote-ops-integration.md`.
 | 2 | `kara-fs` | `LocalBackend` (fd-based delete, temp-file + atomic rename, parent fsync) |
 | 3 | `kara-ops` | `LocationRequest`, `spawn_with`, streaming copy/move with size check, remote delete (confirmed), undo rules |
 | 4 | `kara-remote` | `DriveConfig` <-> `settings.conf`, `SecretStore` (+ `oo7` keyring), groups with shared secrets, CSV / `ssh_config` import, `DriveRegistry`, `BackendFactory`, prompts |
+| 5 | `kara-remote` (`--features sftp`) | `sftp::SftpFactory` / `SftpBackend` on `russh` 0.64 + `russh-sftp` 3.0, `known_hosts` handling, hermetic test server |
 
 ### `kara-remote` in one page
 
@@ -65,7 +66,7 @@ Not built, with the reason:
 |---|---|
 | Discovery through the Proxmox API (list containers and their IPs with an API token) | Needs an HTTPS/JSON client; none is in the dependency set yet (`ureq` or `reqwest` would be the first). Produces `DriveConfig`s; nothing else changes. |
 | «Connect the whole group» with a concurrency limit | Trivial on top of `connect` (worker pool, N at a time); wait for the UI to know what it wants to show while 50 drives connect. |
-| Bulk trust of host keys | Deliberately absent. Trusting 50 unknown keys in one click defeats the check. Proposal: one prompt per drive, plus an explicit «trust all keys in this import» that lists the fingerprints and is off by default. Decide with SFTP (step 5). |
+| Bulk trust of host keys | Deliberately absent. Trusting 50 unknown keys in one click defeats the check. Proposal: one prompt per drive, plus an explicit «trust all keys in this import» that lists the fingerprints and is off by default. Still open after step 5: SFTP asks once per drive (and «trust once» lasts for the run). |
 | Per-group parameters (same user/key for every member) | The CSV/ssh_config columns cover it today; a group-level default param set would be a small addition to `DriveConfig`. |
 | Incus/LXD file API adapter (no `sshd` needed) | A second `BackendFactory` (scheme `incus`); see below. |
 
@@ -83,11 +84,12 @@ mode/uid/gid (open decision 4 below) to be useful, since the API takes them on w
 - **No Qt** in the cloud container: nothing under `kara-ui` builds, so the panel,
   the dialogs and the bridge are written from the specs in this file and
   `remote-ops-integration.md`, untested.
-- **No `ssh`/`sshd` binaries** and an empty apt index: the SFTP adapter cannot be
-  conformance-tested against OpenSSH here. Plan: `russh` also ships a server; an
-  in-process `russh` + `russh-sftp` server on `127.0.0.1` over a tempdir gives a
-  hermetic test (auth, host keys, the conformance suite), with a real `sshd`
-  container as the second, ignored-by-default check.
+- **No `ssh`/`sshd` binaries** and an empty apt index: the SFTP adapter is tested
+  against an in-process `russh` + `russh-sftp` server on `127.0.0.1` over a
+  tempdir (`crates/kara-remote/tests/support/`), written to answer like
+  OpenSSH's `sftp-server`; the real `sshd` check is ignored by default.
+- **`russh` pulls `aws-lc-rs`** (its default crypto backend; needs cmake and a C
+  compiler, both present). Behind `--features sftp` only.
 - **No session bus / keyring**: `KeyringSecretStore` is compiled and linted only.
 - **`oo7` is heavy**: with it the lockfile grows by ~750 lines (zbus, ashpd, crypto).
   It is behind `--features keyring`, but Cargo.lock lists it either way.
@@ -130,41 +132,68 @@ Wiring in `kara-ui` (nothing of this is business logic; it lives in Rust, QML on
    (`Capabilities::watch == false`). Thumbnails on remote drives: on demand only,
    cache key includes the drive.
 
-## Left: step 5, SFTP adapter (`russh` + `russh-sftp`)
+## Step 5, SFTP adapter: done (`kara-remote/src/sftp/`, feature `sftp`)
 
-New module `kara-remote/src/sftp/` behind `--features sftp`; a `SftpFactory`
-implementing `BackendFactory` for scheme `sftp`, a `SftpBackend` implementing
-`kara_vfs::Backend`. Decisions already taken: pure Rust, async inside, a private
-runtime per backend, blocking trait outside.
+Module docs (`src/sftp/mod.rs`) list the parameters, the auth order, the host-key
+rules and how `kara-ui` registers it (`registry.register_factory(SftpFactory::new())`,
+build with `kara-remote/sftp`). Decisions taken while building it:
 
-- **Params:** `host`, `port` (22), `user`, `key_file` (optional), `known_hosts`
-  (optional, default `~/.ssh/known_hosts`), `root` (optional start path).
-- **Auth order:** agent → `key_file` (passphrase = secret) → password (secret).
-  Return `ConnectError::AuthRequired` when a secret is needed and none was given,
-  `AuthFailed` when it was rejected.
-- **Host keys:** known and equal → connect; unknown → `Prompt::TrustHostKey`
-  (remember → append to known_hosts); different → `Prompt::HostKeyChanged`, refuse
-  unless the user insists, never auto-update.
-- **Capabilities:** `trash=false`, `atomic_rename=true` (posix-rename@openssh.com
-  when offered, otherwise rename + report), `server_side_copy=false` (copy-data
-  extension is optional: enable only after probing), `real_directories=true`,
-  `posix_permissions=true`, `symlinks=true`, `watch=false`, undo flags true.
-- **Writes:** `begin_write` → `.<name>.<pid>.<n>.kara-part` in the same directory,
-  `finish` = fsync (extension if present) + rename (no-replace: link/`ssh_rename`
-  semantics, never silent overwrite), `abort`/`Drop` = remove. Same invariants as
-  `LocalBackend`; the conformance suite and the mutation checklist in
-  `remote-backends-testing.md` apply unchanged.
-- **Reads:** `open_read(path, from)` with an offset; chunked 256 KiB
-  (`TRANSFER_CHUNK`); map `SSH_FX_*` to `BackendErrorKind` (NO_SUCH_FILE → NotFound,
-  PERMISSION_DENIED → PermissionDenied, FAILURE on write → NoSpace only when the
-  server says so, connection reset / EOF → `Unavailable`).
-- **Session health:** keepalive every 30 s; on `Unavailable` the backend returns
-  errors without retrying forever and the caller calls `report_failure`.
-- **Cancellation:** check the `Cancel` token per chunk and per directory entry.
-- **Tests:** `Backend` conformance via `kara_vfs::conformance::run` against a real
-  `sshd` (container) gated by `KARA_TEST_SFTP=host:port,user,key` and `#[ignore]`
-  otherwise; unit tests for the error mapping and the known_hosts logic with
-  fixtures; the registry/prompt flow is already covered with `MemoryFactory`.
+- **Runtime:** one private tokio multi-thread runtime (1 worker) per connected
+  drive; the trait stays blocking. A call from inside an async runtime is refused
+  with `Other` instead of panicking.
+- **Params:** `host`, `port`, `user` (default `$USER`), `key_file`, `known_hosts`,
+  `root` (absolute, or `~`/relative resolved by the server; default the server's
+  `/`), `agent` (`$SSH_AUTH_SOCK` by default, `none`, or a socket path),
+  `timeout_s` (30, per request; connect gets twice that), `keepalive_s` (30).
+- **Auth:** agent → key file → password. With `key_file` the secret is the
+  passphrase, there is no password fallback, and only the agent identity of that
+  key is offered (a crowded agent cannot exhaust `MaxAuthTries`).
+  Keyboard-interactive is **not** implemented (servers with
+  `PasswordAuthentication no` + PAM keyboard-interactive will answer `AuthFailed`).
+- **Host keys:** an untrusted key ends the handshake; the factory asks on the
+  connecting thread and connects again accepting exactly that key (no blocking
+  inside the runtime). «Trust once» lasts for the life of the factory (so the
+  registry's password retry does not ask about the key again). A changed key is
+  never written, even on `Trust { remember: true }`. New lines are plain
+  (`[host]:port type key`), not hashed. A failed append still connects.
+- **Bulk trust of host keys:** still **not built**, deliberately. One prompt per
+  drive; the «trust all keys in this import» proposal stays open for the owner.
+- **Capabilities:** probed once (`posix-rename@openssh.com`, `fsync@openssh.com`);
+  `atomic_rename`/`undo_*` follow posix-rename.
+- **Writes:** the target directory is resolved once with `realpath` at
+  `begin_write` (as `LocalBackend` opens its directory fd); no-replace commit is
+  plain `SSH_FXP_RENAME` after an `lstat` check (OpenSSH links + unlinks, so it is
+  race-free there; on servers whose rename replaces, the check closes all but a
+  tiny race). Replace without posix-rename is remove + rename, **not atomic**.
+- **Errors:** OpenSSH folds `ENOTDIR`/`ELOOP` into `NO_SUCH_FILE` and most errnos
+  into «Failure»; the backend looks (`lstat`/`stat`) after a failure to give the
+  same kinds as `LocalBackend` (differential test). `NoSpace` only when the
+  server's message says so (OpenSSH never does: a full disk is `Other` there).
+- **Throughput:** 32 KiB requests, 16 in flight per reader/writer. Not measured
+  against a real link.
+
+Tests (all hermetic, `cargo test -p kara-remote`): see
+`remote-backends-testing.md` § «SFTP adapter (step 5)».
+
+### Left for SFTP
+
+- **Real-sshd run:** `KARA_TEST_SFTP="host:port,user,keyfile" cargo test -p
+  kara-remote --test sftp_real_server -- --ignored` (password/passphrase in
+  `KARA_TEST_SFTP_PASSWORD`, known_hosts in `KARA_TEST_SFTP_KNOWN_HOSTS`). Never
+  run: no sshd and no network here. Expect possible differences in error kinds
+  where OpenSSH's realpath or rename differs from the test server.
+- **Proxmox:** not tried. Things to check on a real node/container: Debian's
+  `sftp-server` path (`Subsystem sftp /usr/lib/openssh/sftp-server`),
+  `PermitRootLogin` for root with a password, and that unprivileged containers
+  show shifted uids (`posix.uid` in `FileEntry::extra`).
+- Keyboard-interactive auth; `copy-data` (server-side copy) probing; `limits@openssh.com`
+  for bigger requests; preserving mtime/permissions (owner decision 4).
+- `russh-sftp` decodes names and handles as (lossy) UTF-8: non-UTF-8 names are
+  listed with a per-entry error and cannot be opened; servers whose handles are
+  not UTF-8 (OpenSSH's are 4 binary bytes, fine below 128 open handles) could
+  misbehave.
+- With a dead connection a temporary cannot be removed: a hidden
+  `.name.<pid>.<n>.kara-part` stays on the server.
 
 ## Left: step 6, S3 adapter (`object_store`)
 
@@ -184,7 +213,7 @@ Conformance against MinIO (`KARA_TEST_S3`), and measure throughput before trusti
   build with `--features keyring`; call `KeyringSecretStore::open()`, `set`, `get`,
   `delete` for a throwaway `DriveId`; check `secret-tool search application kara`.
   The code compiles and is clippy-clean but has never talked to a keyring.
-- **SFTP and S3 conformance** as above.
+- **SFTP conformance against a real sshd** (`KARA_TEST_SFTP`, above) and S3 against MinIO.
 - **Qt build** of all UI work; `qmllint` per `CLAUDE.md`; run `scripts/kara-e2e` once
   and treat a red run as unverified (see CLAUDE.md).
 - fsync durability and the no-clobber fallback on NFS/FUSE: not testable in a

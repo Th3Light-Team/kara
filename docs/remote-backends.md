@@ -1,6 +1,6 @@
 # Remote drives: one contract, interchangeable adapters
 
-Status: **design, for review.** No code yet.
+Status: steps 1–5 built (see «Order of work»); the UI side and S3 are pending.
 
 ## Goal
 
@@ -173,7 +173,7 @@ Status (see `remote-drives-handoff.md` for what is left in each):
 3. `Location` through `kara-ops` — **done** (Rust side); `kara-ui` pending (needs Qt).
 4. `DriveRegistry`, config, `SecretStore` with `oo7` — **done** in `kara-remote`
    (the «Añadir unidad…» panel and bridge are pending, needs Qt).
-5. SFTP adapter on `russh-sftp` — pending.
+5. SFTP adapter on `russh-sftp` — **done** (`kara-remote`, feature `sftp`); real-sshd run pending.
 6. S3 adapter on `object_store` — deferred.
 
 ## Decisions
