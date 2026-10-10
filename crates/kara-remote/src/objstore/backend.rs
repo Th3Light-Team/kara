@@ -60,6 +60,10 @@ pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 4;
 pub const DEFAULT_PAGE_SIZE: usize = 1000;
 /// Default per-request timeout, in seconds.
 pub const DEFAULT_TIMEOUT_S: u64 = 30;
+/// The slowest uplink an upload part is given time for, in bytes per second,
+/// shared by the parts in flight: a part of 8 MiB with 4 in flight may take
+/// about 35 minutes before the session gives up on it.
+pub const MIN_UPLOAD_RATE: u64 = 16 * 1024;
 /// Objects copied at once by a folder `rename`.
 const COPY_BATCH: usize = 32;
 /// Keys deleted per batch by `remove_tree` (S3 `DeleteObjects` takes 1000).
@@ -401,6 +405,15 @@ impl Inner {
     }
 }
 
+/// The bound of one part upload: the metadata bound plus the time the part
+/// needs at [`MIN_UPLOAD_RATE`] shared by `concurrency` parts.
+fn transfer_limit(base: Duration, part_size: usize, concurrency: usize) -> Duration {
+    let bytes = u64::try_from(part_size)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::try_from(concurrency).unwrap_or(u64::MAX));
+    base.saturating_add(Duration::from_secs(bytes / MIN_UPLOAD_RATE))
+}
+
 /// The key named in an `object_store` error, when it has one.
 fn key_in(fail: &Fail) -> Option<Path> {
     use object_store::Error as E;
@@ -461,6 +474,9 @@ impl ObjectStoreBackend {
         let keys = Keys::new(&options.prefix)?;
         let timeout = options.timeout.max(Duration::from_millis(100));
         let rt = Rt::new(timeout.saturating_mul(4).saturating_add(Duration::from_secs(5)))?;
+        let part_size = options.part_size.max(MIN_PART_SIZE);
+        let concurrency = options.upload_concurrency.max(1);
+        let transfer_limit = transfer_limit(rt.limit(), part_size, concurrency);
         Ok(ObjectStoreBackend {
             inner: Arc::new(Inner {
                 store,
@@ -472,8 +488,9 @@ impl ObjectStoreBackend {
             }),
             rt: Arc::new(rt),
             tuning: WriteTuning {
-                part_size: options.part_size.max(MIN_PART_SIZE),
-                concurrency: options.upload_concurrency.max(1),
+                part_size,
+                concurrency,
+                transfer_limit,
             },
             max_server_copy: options.max_server_copy,
             label: options.label,
@@ -490,6 +507,8 @@ impl ObjectStoreBackend {
         let part_size = options.part_size.max(1);
         let mut backend = ObjectStoreBackend::new(store, options)?;
         backend.tuning.part_size = part_size;
+        backend.tuning.transfer_limit =
+            transfer_limit(backend.rt.limit(), part_size, backend.tuning.concurrency);
         Ok(backend)
     }
 
@@ -540,25 +559,43 @@ impl ObjectStoreBackend {
     }
 
     /// Copies one object by streaming it through the client (for objects the
-    /// service will not copy by itself). Never overwrites.
-    fn stream_copy(&self, from: &Path, to: &Path, size: u64, at: &RemotePath) -> Result<(), BackendError> {
-        let mut reader = ObjectReader::open(&self.inner, &self.rt, at, from, 0, size)?;
+    /// service will not copy by itself). Never overwrites. Errors reading name
+    /// `src_at`, errors writing `dst_at`.
+    fn stream_copy(
+        &self,
+        from: &Path,
+        to: &Path,
+        size: u64,
+        src_at: &RemotePath,
+        dst_at: &RemotePath,
+    ) -> Result<(), BackendError> {
+        let mut reader = ObjectReader::open(&self.inner, &self.rt, src_at, from, 0, size)?;
         let mut session = ObjectWriteSession::new(
             Arc::clone(&self.inner),
             Arc::clone(&self.rt),
-            at.clone(),
+            dst_at.clone(),
             to.clone(),
             false,
             self.tuning,
         );
-        let copied = io::copy(&mut reader, &mut session);
-        match copied {
-            Ok(_) => Box::new(session).finish(),
-            Err(error) => {
+        let mut buffer = vec![0u8; kara_vfs::TRANSFER_CHUNK];
+        loop {
+            let read = match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    let _ = Box::new(session).abort();
+                    return Err(BackendError::from_io(error, Some(src_at)));
+                }
+            };
+            let piece = buffer.get(..read).unwrap_or_default();
+            if let Err(error) = session.write_all(piece) {
                 let _ = Box::new(session).abort();
-                Err(BackendError::from_io(error, Some(at)))
+                return Err(BackendError::from_io(error, Some(dst_at)));
             }
         }
+        Box::new(session).finish()
     }
 
     /// Whether this object needs a streamed copy.
@@ -905,8 +942,9 @@ impl Backend for ObjectStoreBackend {
         let mut streamed_failure = None;
         if failure.is_none() {
             for (from_key, to_key, size) in &big {
-                let at = self.path_or(Some(from_key), from);
-                match self.stream_copy(from_key, to_key, *size, &at) {
+                let src_at = self.path_or(Some(from_key), from);
+                let dst_at = self.path_or(Some(to_key), to);
+                match self.stream_copy(from_key, to_key, *size, &src_at, &dst_at) {
                     Ok(()) => copied.push(to_key.clone()),
                     Err(error) => {
                         streamed_failure = Some(error);
@@ -1070,7 +1108,7 @@ impl Backend for ObjectStoreBackend {
         let dst = self.inner.keys.key(to).map_err(|_| no_key_for_create(to))?;
         self.check_free(to, &dst, false)?;
         if self.too_big_to_copy(meta.size) {
-            return self.stream_copy(&src, &dst, meta.size, to);
+            return self.stream_copy(&src, &dst, meta.size, from, to);
         }
         self.block(self.inner.copy_new(&src, &dst))
             .map_err(|fail| match fail.kind() {

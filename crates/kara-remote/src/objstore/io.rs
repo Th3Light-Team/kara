@@ -46,6 +46,10 @@ use super::runtime::Rt;
 pub(crate) struct WriteTuning {
     pub part_size: usize,
     pub concurrency: usize,
+    /// How long one part, one single `PUT` or the completion may take before
+    /// the session gives up: long enough for a slow uplink (see
+    /// [`super::backend::MIN_UPLOAD_RATE`]), unlike the bound of metadata calls.
+    pub transfer_limit: Duration,
 }
 
 /// Wraps an error so that `BackendError::from_io` gets it back unchanged.
@@ -232,7 +236,7 @@ impl ObjectWriteSession {
         let Some(task) = self.in_flight.pop_front() else {
             return Ok(());
         };
-        match self.rt.block_on(task) {
+        match self.rt.block_on_for(task, self.tuning.transfer_limit) {
             Ok(Ok(Ok(()))) => Ok(()),
             Ok(Ok(Err(e))) => Err(self.fail(&Fail::Store(e))),
             Ok(Err(join)) => Err(self.fail(&Fail::Other(join.to_string()))),
@@ -325,13 +329,13 @@ impl ObjectWriteSession {
             let inner = Arc::clone(&self.inner);
             let key = self.key.clone();
             let replace = self.replace;
-            let outcome = self.rt.block_on(async move {
+            let outcome = self.rt.block_on_for(async move {
                 if replace {
                     inner.store.put(&key, payload).await.map(|_| ()).map_err(Fail::Store)
                 } else {
                     inner.put_new(&key, payload).await
                 }
-            });
+            }, self.tuning.transfer_limit);
             return match outcome {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(fail)) | Err(fail) => Err(self.fail(&fail)),
@@ -355,10 +359,13 @@ impl ObjectWriteSession {
         let Some(mut upload) = self.upload.take() else {
             return Err(self.fail(&Fail::Other(String::from("the upload vanished"))));
         };
-        match self.rt.block_on(async move {
-            let result = upload.complete().await;
-            (result, upload)
-        }) {
+        match self.rt.block_on_for(
+            async move {
+                let result = upload.complete().await;
+                (result, upload)
+            },
+            self.tuning.transfer_limit,
+        ) {
             Ok((Ok(_), _)) => Ok(()),
             Ok((Err(e), upload)) => {
                 // Put it back so the failure path aborts it.

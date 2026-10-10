@@ -98,13 +98,14 @@ impl Tuning {
         })
     }
 
-    /// HTTP client options: the whole request may take four times the
-    /// timeout (a part upload on a slow link), a silent connection only the
-    /// timeout, connecting at most 10 s.
+    /// HTTP client options: no bound on a whole request (its body may be a
+    /// 50 GiB download, which `object_store`'s default 30 s would cut), a
+    /// connection silent for the timeout fails, connecting takes at most 10 s.
+    /// Uploads are bounded by the backend instead (`MIN_UPLOAD_RATE`).
     #[cfg(any(feature = "s3", feature = "gcs"))]
     pub(crate) fn client_options(&self, allow_http: bool) -> object_store::ClientOptions {
         object_store::ClientOptions::new()
-            .with_timeout(self.timeout.saturating_mul(4))
+            .with_timeout_disabled()
             .with_read_timeout(self.timeout)
             .with_connect_timeout(self.timeout.min(Duration::from_secs(10)))
             .with_allow_http(allow_http)

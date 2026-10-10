@@ -33,7 +33,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use hmac::{Hmac, KeyInit, Mac};
-use http_body_util::{BodyExt, Full};
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full, StreamBody};
+use hyper::body::Frame;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -76,6 +78,9 @@ pub struct MockState {
     pub fail_next: AtomicUsize,
     /// Delay every request by this many milliseconds.
     pub delay_ms: AtomicUsize,
+    /// Send `GET` bodies in 16 pieces with this many milliseconds between
+    /// them (a slow download that never goes silent for long).
+    pub trickle_ms: AtomicUsize,
     /// `METHOD kind` of every request served, in order.
     pub log: Mutex<Vec<String>>,
     pub signature_failures: AtomicUsize,
@@ -293,10 +298,28 @@ fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
     }
 }
 
-type Reply = Response<Full<Bytes>>;
+type Reply = Response<BoxBody<Bytes, Infallible>>;
 
 fn reply(status: StatusCode, body: impl Into<Bytes>) -> Reply {
-    let mut response = Response::new(Full::new(body.into()));
+    let mut response = Response::new(Full::new(body.into()).boxed());
+    *response.status_mut() = status;
+    response
+}
+
+/// A body sent in 16 pieces, `pause` apart.
+fn trickled(status: StatusCode, body: Bytes, pause: Duration) -> Reply {
+    let piece = body.len().div_ceil(16).max(1);
+    let stream = futures::stream::unfold((body, true), move |(mut rest, first)| async move {
+        if rest.is_empty() {
+            return None;
+        }
+        if !first {
+            tokio::time::sleep(pause).await;
+        }
+        let chunk = rest.split_to(piece.min(rest.len()));
+        Some((Ok::<_, Infallible>(Frame::data(chunk)), (rest, false)))
+    });
+    let mut response = Response::new(BodyExt::boxed(StreamBody::new(stream)));
     *response.status_mut() = status;
     response
 }
@@ -568,12 +591,20 @@ fn get(state: &MockState, key: &str, range: Option<&str>) -> Reply {
             _ => return error(StatusCode::NOT_IMPLEMENTED, "NotImplemented", "range form"),
         },
     };
+    let pause = state.trickle_ms.load(Ordering::SeqCst);
+    let body = |status: StatusCode, data: Bytes| {
+        if pause > 0 {
+            trickled(status, data, Duration::from_millis(pause as u64))
+        } else {
+            reply(status, data)
+        }
+    };
     match start {
-        None => object_headers(reply(StatusCode::OK, object.data.clone()), &object, len),
+        None => object_headers(body(StatusCode::OK, object.data.clone()), &object, len),
         Some(from) if from >= len => error(StatusCode::RANGE_NOT_SATISFIABLE, "InvalidRange", "range"),
         Some(from) => {
-            let body = object.data.slice(from..);
-            let response = object_headers(reply(StatusCode::PARTIAL_CONTENT, body), &object, len - from);
+            let rest = object.data.slice(from..);
+            let response = object_headers(body(StatusCode::PARTIAL_CONTENT, rest), &object, len - from);
             with_header(response, "content-range", &format!("bytes {from}-{}/{len}", len - 1))
         }
     }
