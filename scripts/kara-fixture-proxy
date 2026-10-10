@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Tiny forwarding proxy used by kara-remote-fixtures for the GCS drive.
+
+object_store's GCS client, with OAuth disabled, still sends an `Authorization`
+header on some requests (PUT) whose value moto cannot parse (it expects a SigV4
+header and answers 500). This proxy drops that header and replaces it with a
+well-formed (unchecked) SigV4 one, so moto sees an authenticated caller instead
+of an anonymous one that may not delete. Everything else is forwarded to the
+S3-compatible server, buffering request bodies. Loopback only; it
+exists only for the fixtures.
+
+usage: kara-fixture-proxy LISTEN_PORT TARGET_PORT
+"""
+import http.client
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+listen_port, target_port = int(sys.argv[1]), int(sys.argv[2])
+FAKE_AUTH = ("AWS4-HMAC-SHA256 Credential=kara/20260101/us-east-1/s3/aws4_request, "
+             "SignedHeaders=host, Signature=" + "0" * 64)
+DROP = {"authorization", "host", "connection", "keep-alive", "transfer-encoding", "te", "upgrade"}
+
+
+class Proxy(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *_args):
+        pass
+
+    def _body(self):
+        if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+            out = b""
+            while True:
+                size = int(self.rfile.readline().split(b";")[0].strip() or b"0", 16)
+                if size == 0:
+                    while self.rfile.readline() not in (b"\r\n", b"\n", b""):
+                        pass
+                    return out
+                out += self.rfile.read(size)
+                self.rfile.readline()
+        length = int(self.headers.get("Content-Length") or 0)
+        return self.rfile.read(length) if length else b""
+
+    def _forward(self):
+        body = self._body()
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in DROP}
+        headers["Content-Length"] = str(len(body))
+        headers["Authorization"] = FAKE_AUTH
+        # GCS names a copy source `x-goog-copy-source`; S3 (moto) `x-amz-copy-source`.
+        for k in list(headers):
+            if k.lower() == "x-goog-copy-source":
+                headers["x-amz-copy-source"] = headers.pop(k)
+        conn = http.client.HTTPConnection("127.0.0.1", target_port, timeout=300)
+        conn.request(self.command, self.path, body=body, headers=headers)
+        resp = conn.getresponse()
+        data = b"" if self.command == "HEAD" else resp.read()
+        self.send_response(resp.status, resp.reason)
+        for k, v in resp.getheaders():
+            if k.lower() not in DROP and k.lower() != "content-length":
+                self.send_header(k, v)
+        length = resp.getheader("Content-Length") if self.command == "HEAD" else str(len(data))
+        self.send_header("Content-Length", length or "0")
+        self.end_headers()
+        if data:
+            self.wfile.write(data)
+        conn.close()
+
+    do_GET = do_PUT = do_POST = do_DELETE = do_HEAD = _forward
+
+
+ThreadingHTTPServer(("127.0.0.1", listen_port), Proxy).serve_forever()

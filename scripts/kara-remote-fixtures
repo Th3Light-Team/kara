@@ -1,0 +1,277 @@
+#!/usr/bin/env bash
+#
+# Throwaway local servers for the remote-drive adapters, so SFTP, S3 and GCS can
+# be tested end to end (gated cargo tests, UI e2e) without cloud accounts.
+#
+#   up       start sftp (docker, openssh), s3 (moto via uv, or minio), gcs
+#            (XML API: the same moto behind a tiny proxy); seed each with the kara-sample tree
+#   down     stop everything and delete the state directory
+#   status   what is running and where
+#   env      print `export` lines for the gated tests (eval "$(... env)")
+#   run CMD  run CMD with those variables set (e.g. run cargo test ...)
+#
+# State lives in $KARA_FIXTURES_DIR (default $XDG_RUNTIME_DIR/kara-remote-fixtures,
+# else /tmp/kara-remote-fixtures-$UID). It holds fixtures.env (shell exports) and
+# fixtures.json (drives for the UI e2e). Nothing outside that directory is
+# written: not ~/.ssh, not Kara's own config. Docs: docs/remote-e2e-fixtures.md.
+#
+# Knobs: KARA_FIX_SFTP_PORT (22222) KARA_FIX_S3_PORT (9000) KARA_FIX_GCS_PORT (4443); KARA_FIX_S3_BACKEND=moto|minio (moto; minio needs KARA_FIX_MINIO_IMAGE
+# to be pullable); KARA_FIX_ONLY="sftp s3 gcs" to start a subset (gcs is a proxy in front of the s3 server).
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+state=${KARA_FIXTURES_DIR:-${XDG_RUNTIME_DIR:-/tmp}/kara-remote-fixtures}
+[ -n "${KARA_FIXTURES_DIR:-}" ] || [ -n "${XDG_RUNTIME_DIR:-}" ] || state=/tmp/kara-remote-fixtures-$(id -u)
+
+sftp_port=${KARA_FIX_SFTP_PORT:-22222}
+s3_port=${KARA_FIX_S3_PORT:-9000}
+gcs_port=${KARA_FIX_GCS_PORT:-4443}
+s3_backend=${KARA_FIX_S3_BACKEND:-moto}
+only=${KARA_FIX_ONLY:-sftp s3 gcs}
+
+# Throwaway credentials: they exist only for this run, on loopback.
+sftp_user=kara
+s3_bucket=kara-test s3_key=kara s3_secret=karakara123
+gcs_bucket=kara-test-gcs
+sftp_image=lscr.io/linuxserver/openssh-server:latest
+
+c_sftp=kara-fixture-sftp-$(id -u)
+c_minio=kara-fixture-minio-$(id -u)
+
+say() { printf 'kara-remote-fixtures: %s\n' "$*" >&2; }
+want() { case " $only " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+wait_port() { # port seconds
+    local i
+    for ((i = 0; i < $2 * 10; i++)); do
+        (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+seed_tree() { # builds $state/seed once with scripts/kara-sample
+    [ -d "$state/seed" ] && return
+    "$here/kara-sample" "$state/seed" >/dev/null
+    # Permission traps do not mean anything on remotes and block uploads.
+    chmod -R u+rwX "$state/seed/Errors" && rm -f "$state/seed/Errors/unreadable.txt"
+    rm -f "$state/seed/.kara-sample"
+}
+
+# ---------------------------------------------------------------- sftp
+sftp_up() {
+    command -v docker >/dev/null || { say "sftp: docker not found, skipped"; return 1; }
+    mkdir -p "$state/ssh" "$state/sftp"
+    if [ ! -f "$state/ssh/id_ed25519" ]; then
+        ssh-keygen -q -t ed25519 -N '' -C kara-fixture -f "$state/ssh/id_ed25519"
+    fi
+    : >"$state/ssh/known_hosts"   # empty on purpose: the tests trust the new key for the run
+    mkdir -p "$state/sftp/sample"
+    cp -a "$state/seed/." "$state/sftp/sample/"
+    docker rm -f "$c_sftp" >/dev/null 2>&1 || true
+    docker run -d --name "$c_sftp" -p "127.0.0.1:$sftp_port:2222" \
+        -e PUID="$(id -u)" -e PGID="$(id -g)" -e USER_NAME="$sftp_user" \
+        -e PUBLIC_KEY="$(cat "$state/ssh/id_ed25519.pub")" \
+        -e PASSWORD_ACCESS=false -e SUDO_ACCESS=false \
+        -v "$state/sftp:/config" "$sftp_image" >/dev/null
+    wait_port "$sftp_port" 60 || { say "sftp: port $sftp_port never opened"; return 1; }
+    # sshd binds a moment before the key is installed: prove a login works.
+    local i
+    for ((i = 0; i < 50; i++)); do
+        ssh -p "$sftp_port" -i "$state/ssh/id_ed25519" -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+            "$sftp_user@127.0.0.1" true 2>/dev/null && { say "sftp: up on 127.0.0.1:$sftp_port"; return 0; }
+        sleep 0.4
+    done
+    say "sftp: server is listening but the key login fails (docker logs $c_sftp)"
+    return 1
+}
+
+# ---------------------------------------------------------------- s3
+urlencode() { # percent-encode a key, keeping "/"
+    local LC_ALL=C s=$1 out="" c i
+    for ((i = 0; i < ${#s}; i++)); do
+        c=${s:i:1}
+        case $c in
+            [a-zA-Z0-9._~/-]) out+=$c ;;
+            *) out+=$(printf '%%%02X' "'$c") ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
+s3_put() { # bucket key file
+    curl -sf --aws-sigv4 "aws:amz:us-east-1:s3" --user "$s3_key:$s3_secret" \
+        -X PUT --data-binary "@$3" "http://127.0.0.1:$s3_port/$1/$(urlencode "$2")" -o /dev/null
+}
+
+# One moto process serves both the S3 drive and the GCS drive (see gcs_up).
+object_server_up() {
+    [ -f "$state/.objsrv" ] && return 0
+    if [ "$s3_backend" = minio ]; then
+        local image=${KARA_FIX_MINIO_IMAGE:-}
+        [ -n "$image" ] || { say "s3: KARA_FIX_S3_BACKEND=minio needs KARA_FIX_MINIO_IMAGE"; return 1; }
+        docker rm -f "$c_minio" >/dev/null 2>&1 || true
+        docker run -d --name "$c_minio" -p "127.0.0.1:$s3_port:9000" \
+            -e MINIO_ROOT_USER="$s3_key" -e MINIO_ROOT_PASSWORD="$s3_secret" \
+            "$image" server /data >/dev/null
+    else
+        command -v uv >/dev/null || { say "s3: uv not found (needed to run moto), skipped"; return 1; }
+        mkdir -p "$state/s3"
+        # moto serves an S3 API from memory; no auth is enforced, any key works.
+        setsid nohup uv tool run --from 'moto[server]' moto_server -H 127.0.0.1 -p "$s3_port" \
+            >"$state/s3/moto.log" 2>&1 </dev/null &
+        echo $! >"$state/s3/moto.pid"
+    fi
+    wait_port "$s3_port" 90 || { say "s3: port $s3_port never opened"; return 1; }
+    sleep 0.5
+    touch "$state/.objsrv"
+}
+
+upload_tree() { # bucket
+    curl -sf --aws-sigv4 "aws:amz:us-east-1:s3" --user "$s3_key:$s3_secret" \
+        -X PUT "http://127.0.0.1:$s3_port/$1" -o /dev/null || { say "cannot create bucket $1"; return 1; }
+    local f
+    while IFS= read -r -d '' f; do
+        s3_put "$1" "sample/${f#"$state/seed/"}" "$f" || { say "upload failed: $f"; return 1; }
+    done < <(find "$state/seed" -type f -readable -print0)
+}
+
+s3_up() {
+    object_server_up && upload_tree "$s3_bucket" || return 1
+    say "s3: up on http://127.0.0.1:$s3_port bucket $s3_bucket ($s3_backend)"
+}
+
+# ---------------------------------------------------------------- gcs
+# The adapter (object_store) speaks GCS's XML API (S3-style `list-type=2`, plain
+# PUT). fake-gcs-server implements only the JSON API and answers 400 "invalid
+# uploadType" to that PUT, so it cannot serve this adapter. moto answers the
+# same wire format, so the GCS drive points at it with a no-auth key file. The
+# GCS client still sends an Authorization header that moto cannot parse on PUT,
+# so scripts/kara-fixture-proxy replaces it with a well-formed one.
+gcs_up() {
+    object_server_up && upload_tree "$gcs_bucket" || return 1
+    mkdir -p "$state/gcs"
+    setsid nohup python3 "$here/kara-fixture-proxy" "$gcs_port" "$s3_port" \
+        >"$state/gcs/proxy.log" 2>&1 </dev/null &
+    echo $! >"$state/gcs/proxy.pid"
+    wait_port "$gcs_port" 10 || { say "gcs: proxy never opened port $gcs_port"; return 1; }
+    cat >"$state/gcs/key.json" <<EOF
+{"gcs_base_url": "http://127.0.0.1:$gcs_port", "disable_oauth": true, "client_email": "", "private_key": "", "private_key_id": ""}
+EOF
+    say "gcs: up on http://127.0.0.1:$gcs_port bucket $gcs_bucket (XML API, proxy to the S3 server)"
+}
+
+# ---------------------------------------------------------------- env files
+write_env() {
+    {
+        echo "# generated by kara-remote-fixtures; eval or source it"
+        want sftp && [ -f "$state/.up-sftp" ] && {
+            echo "export KARA_TEST_SFTP='127.0.0.1:$sftp_port,$sftp_user,$state/ssh/id_ed25519'"
+            echo "export KARA_TEST_SFTP_KNOWN_HOSTS='$state/ssh/known_hosts'"
+        }
+        want s3 && [ -f "$state/.up-s3" ] && {
+            echo "export KARA_TEST_S3='http://127.0.0.1:$s3_port,$s3_bucket,$s3_key,$s3_secret'"
+            echo "export KARA_TEST_S3_MB=\${KARA_TEST_S3_MB:-32}"
+        }
+        want gcs && [ -f "$state/.up-gcs" ] && {
+            echo "export KARA_TEST_GCS='$gcs_bucket,$state/gcs/key.json'"
+            echo "export KARA_TEST_GCS_ENDPOINT='http://127.0.0.1:$gcs_port'"
+        }
+        echo "export KARA_FIXTURES_JSON='$state/fixtures.json'"
+        echo "export KARA_FIXTURES_DIR='$state'"
+    } >"$state/fixtures.env"
+
+    python3 - "$state" "$sftp_port" "$sftp_user" "$s3_port" "$s3_bucket" "$s3_key" "$s3_secret" \
+        "$gcs_port" "$gcs_bucket" <<'PY'
+import json, os, sys
+state, sp, su, s3p, s3b, s3k, s3s, gp, gb = sys.argv[1:]
+up = lambda n: os.path.exists(f"{state}/.up-{n}")
+drives = []
+if up("sftp"):
+    drives.append({"kind": "sftp", "id": "fixture-sftp", "name": "Fixture SFTP", "params": {
+        "host": "127.0.0.1", "port": sp, "user": su, "key_file": f"{state}/ssh/id_ed25519",
+        "known_hosts": f"{state}/ssh/known_hosts", "root": "~/sample"}, "secret": None,
+        "note": "known_hosts starts empty: expect a trust-host-key prompt on first connect"})
+if up("s3"):
+    drives.append({"kind": "s3", "id": "fixture-s3", "name": "Fixture S3", "params": {
+        "endpoint": f"http://127.0.0.1:{s3p}", "allow_http": "true", "bucket": s3b,
+        "region": "us-east-1", "access_key_id": s3k, "prefix": "sample"}, "secret": s3s})
+if up("gcs"):
+    drives.append({"kind": "gcs", "id": "fixture-gcs", "name": "Fixture GCS", "params": {
+        "endpoint": f"http://127.0.0.1:{gp}", "allow_http": "true", "bucket": gb,
+        "service_account_file": f"{state}/gcs/key.json", "prefix": "sample"}, "secret": None})
+json.dump({"state_dir": state, "drives": drives}, open(f"{state}/fixtures.json", "w"), indent=2)
+PY
+}
+
+# ---------------------------------------------------------------- commands
+cmd_up() {
+    mkdir -p "$state"; chmod 700 "$state"
+    seed_tree
+    local name
+    for name in $only; do
+        rm -f "$state/.up-$name"
+        if "${name}_up"; then touch "$state/.up-$name"; fi
+    done
+    write_env
+    say "state in $state; use:  eval \"\$($0 env)\""
+    say "up: $(cd "$state" && ls -a | sed -n 's/^\.up-//p' | tr '\n' ' ')"
+}
+
+cmd_down() {
+    docker rm -f "$c_sftp" "$c_minio" >/dev/null 2>&1 || true
+    if [ -f "$state/s3/moto.pid" ]; then
+        local pid
+        pid=$(cat "$state/s3/moto.pid")
+        # uv spawns moto as a child: take the whole process group down.
+        kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+        sleep 0.3
+        for p in $(pgrep -f "moto_server -H 127.0.0.1 -p $s3_port" || true); do kill "$p" 2>/dev/null || true; done
+    fi
+    if [ -f "$state/gcs/proxy.pid" ]; then
+        kill "$(cat "$state/gcs/proxy.pid")" 2>/dev/null || true
+    fi
+    # The sftp container creates some files as root: hand them back first.
+    if [ -d "$state/sftp" ] && command -v docker >/dev/null; then
+        docker run --rm -v "$state:/s" --entrypoint chown busybox:latest -R "$(id -u):$(id -g)" /s >/dev/null 2>&1 || true
+    fi
+    if [ -d "$state" ]; then
+        chmod -R u+rwX "$state" 2>/dev/null || true
+        rm -rf -- "$state"
+    fi
+    say "down: stopped and removed $state"
+}
+
+cmd_status() {
+    local ok=0
+    for n in sftp:"$sftp_port" s3:"$s3_port" gcs:"$gcs_port"; do
+        if (exec 3<>"/dev/tcp/127.0.0.1/${n#*:}") 2>/dev/null; then
+            echo "${n%%:*}: listening on 127.0.0.1:${n#*:}"; ok=1
+        else
+            echo "${n%%:*}: down"
+        fi
+    done
+    [ -f "$state/fixtures.env" ] && echo "env file: $state/fixtures.env" || echo "no state at $state"
+    [ "$ok" -eq 1 ]
+}
+
+cmd_env() {
+    [ -f "$state/fixtures.env" ] || { say "not up: run '$0 up' first"; exit 1; }
+    cat "$state/fixtures.env"
+}
+
+cmd_run() { # run a command with the fixture environment set
+    [ -f "$state/fixtures.env" ] || { say "not up: run '$0 up' first"; exit 1; }
+    set -a; . "$state/fixtures.env"; set +a
+    exec "$@"
+}
+
+case ${1:-} in
+    up) cmd_up ;;
+    down) cmd_down ;;
+    status) cmd_status ;;
+    env) cmd_env ;;
+    run) shift; cmd_run "$@" ;;
+    *) echo "usage: $0 up|down|status|env|run <cmd...>" >&2; exit 2 ;;
+esac
