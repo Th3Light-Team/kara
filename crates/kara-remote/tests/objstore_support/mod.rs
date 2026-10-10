@@ -76,6 +76,8 @@ pub enum Effect {
     Unauthenticated,
     /// 507, MinIO's «storage full».
     Full,
+    /// 404 `NoSuchBucket`.
+    NoSuchBucket,
     /// Waits this long, then goes on normally.
     Stall(Duration),
     /// Waits this long, then fails as a timeout.
@@ -184,6 +186,9 @@ pub struct Faulty {
     pub list_delay_ms: AtomicUsize,
     /// Delay before each delete.
     pub delete_delay_ms: AtomicUsize,
+    /// A `GET` body ends cleanly after this many 64 KiB pieces (a server
+    /// that closes the connection early).
+    pub truncate_body_after: AtomicUsize,
 }
 
 impl fmt::Debug for Faulty {
@@ -227,6 +232,10 @@ pub fn effect_error(effect: &Effect, key: &str) -> object_store::Error {
             source: "Server returned non-2xx status code: 507 Insufficient Storage: <Error><Code>XMinioStorageFull</Code></Error>"
                 .into(),
         },
+        Effect::NoSuchBucket => object_store::Error::NotFound {
+            path: key.to_owned(),
+            source: "NoSuchBucket: The specified bucket does not exist".into(),
+        },
         Effect::Stall(_) | Effect::Hang(_) => object_store::Error::Generic {
             store: "Faulty",
             source: Box::new(HttpError::new(
@@ -252,6 +261,7 @@ impl Faulty {
             written: Mutex::new(Vec::new()),
             list_delay_ms: AtomicUsize::new(0),
             delete_delay_ms: AtomicUsize::new(0),
+            truncate_body_after: AtomicUsize::new(usize::MAX),
         })
     }
 
@@ -456,6 +466,7 @@ fn faulty_body(
     body: BoxStream<'static, OsResult<bytes::Bytes>>,
 ) -> BoxStream<'static, OsResult<bytes::Bytes>> {
     // Re-chunk in 64 KiB pieces so a fault can land mid-body.
+    let keep = store.truncate_body_after.load(Ordering::SeqCst);
     body.flat_map(|piece| {
         let pieces: Vec<OsResult<bytes::Bytes>> = match piece {
             Ok(bytes) => {
@@ -473,6 +484,7 @@ fn faulty_body(
         };
         futures::stream::iter(pieces)
     })
+    .take(keep)
     .enumerate()
     .then(move |(index, piece)| {
         let store = Arc::clone(&store);
@@ -685,4 +697,96 @@ impl<T: Send, S: futures::Stream<Item = OsResult<T>> + Send> TryCollectVec<T> fo
         }
         Ok(out)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Prompts, drive configs, fake factories and kara-ops jobs.
+
+use kara_remote::objstore::object_store::list::PaginatedListStore as Pager;
+use kara_remote::objstore::{GcsFactory, S3Factory};
+use kara_remote::{DriveConfig, Prompt, PromptAnswer, PromptHandler, Secret};
+
+/// Answers prompts from a script and records what was asked.
+#[derive(Default)]
+pub struct Scripted {
+    pub answers: Mutex<VecDeque<PromptAnswer>>,
+    pub asked: Mutex<Vec<Prompt>>,
+}
+
+impl Scripted {
+    pub fn new(answers: impl IntoIterator<Item = PromptAnswer>) -> Scripted {
+        Scripted {
+            answers: Mutex::new(answers.into_iter().collect()),
+            asked: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn asked(&self) -> Vec<Prompt> {
+        self.asked.lock().map(|a| a.clone()).unwrap_or_default()
+    }
+}
+
+impl PromptHandler for Scripted {
+    fn ask(&self, prompt: &Prompt) -> PromptAnswer {
+        if let Ok(mut asked) = self.asked.lock() {
+            asked.push(prompt.clone());
+        }
+        self.answers
+            .lock()
+            .ok()
+            .and_then(|mut answers| answers.pop_front())
+            .unwrap_or(PromptAnswer::Refuse)
+    }
+}
+
+/// The only secret access key the fake S3 accepts.
+pub const RIGHT_SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+
+pub fn s3_config(name: &str, params: &[(&str, &str)]) -> io::Result<DriveConfig> {
+    DriveConfig::new(
+        "s3",
+        name,
+        name,
+        params.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())),
+    )
+    .map_err(|e| io::Error::other(e.to_string()))
+}
+
+pub fn gcs_config(name: &str, params: &[(&str, &str)]) -> io::Result<DriveConfig> {
+    DriveConfig::new(
+        "gcs",
+        name,
+        name,
+        params.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())),
+    )
+    .map_err(|e| io::Error::other(e.to_string()))
+}
+
+/// An S3 factory whose «service» is `store`: a wrong secret makes every
+/// request answer 401, the right one ([`RIGHT_SECRET`]) lets them through.
+pub fn fake_s3_factory(store: &Arc<Faulty>) -> Arc<S3Factory> {
+    let store = Arc::clone(store);
+    S3Factory::with_connector(Arc::new(move |_params, secret: Option<&Secret>| {
+        let ok = secret.is_some_and(|s| s.expose() == RIGHT_SECRET);
+        let wrapped = if ok {
+            Arc::clone(&store)
+        } else {
+            let denied = Faulty::new();
+            denied.inject(Fault::on(Op::List, Effect::Unauthenticated).always());
+            denied
+        };
+        let pager: Arc<dyn Pager> = Arc::clone(&wrapped) as _;
+        let os: Arc<dyn ObjectStore> = wrapped as _;
+        Ok((os, Some(pager)))
+    }))
+}
+
+/// A GCS factory over `store`.
+pub fn fake_gcs_factory(store: &Arc<Faulty>) -> Arc<GcsFactory> {
+    let store = Arc::clone(store);
+    GcsFactory::with_connector(Arc::new(move |_params| {
+        let pager: Arc<dyn Pager> = Arc::clone(&store) as _;
+        let os: Arc<dyn ObjectStore> = Arc::clone(&store) as _;
+        Ok((os, Some(pager)))
+    }))
 }
