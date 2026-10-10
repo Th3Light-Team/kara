@@ -148,6 +148,8 @@ pub struct Faults {
     pub no_space_after: AtomicU64,
     /// Requests on paths under these prefixes get `PERMISSION_DENIED`.
     pub deny: Mutex<Vec<String>>,
+    /// The most a single read answers with (a short read below what was asked).
+    pub read_cap: AtomicU64,
     /// Every connection is dropped once this many bytes were written (total).
     pub kill_after_written: AtomicU64,
     /// Every connection is dropped once this many bytes were read (total).
@@ -166,6 +168,7 @@ impl Default for Faults {
             stall: AtomicBool::new(false),
             no_space_after: AtomicU64::new(OFF),
             deny: Mutex::new(Vec::new()),
+            read_cap: AtomicU64::new(OFF),
             kill_after_written: AtomicU64::new(OFF),
             kill_after_read: AtomicU64::new(OFF),
             written: AtomicU64::new(0),
@@ -706,7 +709,8 @@ impl russh_sftp::server::Handler for SftpHandler {
         let path = self.handle_path(&handle);
         self.gate(path.as_deref()).await?;
         let file = self.file(&handle)?;
-        let mut buf = vec![0u8; len.min(256 * 1024) as usize];
+        let cap = self.faults.read_cap.load(Ordering::SeqCst).min(256 * 1024);
+        let mut buf = vec![0u8; u64::from(len).min(cap) as usize];
         let n = file.read_at(&mut buf, offset).map_err(|e| self.status(&e))?;
         if n == 0 {
             return Err(StatusReply::new(StatusCode::Eof));
