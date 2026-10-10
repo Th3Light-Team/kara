@@ -665,11 +665,52 @@ struct Loaded {
 /// Lee una carpeta entera, `.hidden` incluido. Bloquea: se llama desde un hilo
 /// aparte, o al arrancar.
 fn read_folder(path: &Path) -> Result<Loaded, String> {
+    if crate::remote_nav::is_remote(path) {
+        return read_remote_folder(path);
+    }
     let listing = list_directory(path).map_err(|error| error.source.to_string())?;
     Ok(Loaded {
         entries: listing.entries,
         hidden: kara_fs::read_hidden_file(path),
     })
+}
+
+/// `name` inside `folder`, local or remote.
+fn child_path(folder: &Path, name: &str) -> PathBuf {
+    crate::remote_nav::child(folder, name).unwrap_or_else(|| folder.join(name))
+}
+
+/// The folder above `folder`; `None` at a local `/` or a drive's root.
+fn parent_path(folder: &Path) -> Option<PathBuf> {
+    if crate::remote_nav::is_remote(folder) {
+        return crate::remote_nav::parent(folder);
+    }
+    folder.parent().map(Path::to_path_buf)
+}
+
+/// Lists a folder of a remote drive. A lost connection marks the drive lost
+/// (the panel then offers «Reconectar»); the listing's per-entry errors are
+/// dropped, as a local listing's are.
+fn read_remote_folder(path: &Path) -> Result<Loaded, String> {
+    use kara_vfs::{BackendErrorKind, Cancel};
+    let (drive, remote) = crate::remote_nav::parse(path)
+        .ok_or_else(|| "dirección de unidad remota no válida".to_string())?;
+    let registry = crate::drives::registry();
+    let backend = registry
+        .backend(&drive)
+        .ok_or_else(|| "la unidad no está conectada".to_string())?;
+    match backend.list(&remote, &Cancel::new()) {
+        Ok(listing) => Ok(Loaded {
+            entries: listing.entries,
+            hidden: std::collections::BTreeSet::new(),
+        }),
+        Err(error) => {
+            if error.kind == BackendErrorKind::Unavailable {
+                registry.report_failure(&drive, &error);
+            }
+            Err(error.to_string())
+        }
+    }
 }
 
 /// Qué hacer con un listado cuando llega del hilo que lo leyó.
@@ -1424,9 +1465,11 @@ impl AppRust {
         // La caché se consulta para todo, no solo para las imágenes: un PDF o
         // un AppImage pueden tener miniatura hecha por otro programa. Generar,
         // en cambio, solo se intenta con imágenes.
+        let remote = crate::remote_nav::is_remote(target);
         let jobs = entries
             .iter()
             .enumerate()
+            .filter(|_| !remote)
             .filter(|(_, entry)| entry.kind != EntryKind::Directory)
             .filter_map(|(row, entry)| {
                 let modified = entry.modified?;
@@ -1447,6 +1490,11 @@ impl AppRust {
         // dice dónde está el usuario, sin fingir una jerarquía.
         let segments = if self.in_trash {
             Vec::new()
+        } else if remote {
+            let label = crate::remote_nav::parse(target)
+                .and_then(|(drive, _)| crate::drives::registry().config(&drive))
+                .map_or_else(|| "Unidad remota".to_string(), |config| config.label);
+            crate::remote_nav::crumbs(target, &label)
         } else {
             breadcrumb::segments(target, self.home.as_deref())
         };
@@ -2864,6 +2912,19 @@ impl qobject::App {
     /// Ninguna operación puede fallar en silencio: es una regla del proyecto, y
     /// una carpeta que no se crea sin decir por qué es indistinguible de un
     /// clic que no llegó.
+    /// File actions on a remote folder are not wired yet: say so instead of
+    /// letting a `kara+…` address be taken for a local path.
+    fn remote_blocked(mut self: Pin<&mut Self>) -> bool {
+        let current = PathBuf::from(self.path().to_string());
+        if !crate::remote_nav::is_remote(&current) {
+            return false;
+        }
+        self.as_mut().report(
+            "Las acciones sobre ficheros de una unidad remota aún no están disponibles: por ahora solo se puede examinar.",
+        );
+        true
+    }
+
     fn report(mut self: Pin<&mut Self>, message: &str) {
         self.as_mut().set_last_error(QString::from(&message.to_string()));
     }
@@ -2905,6 +2966,9 @@ impl qobject::App {
     }
 
     fn create_folder(mut self: Pin<&mut Self>, name: &QString) -> QString {
+        if self.as_mut().remote_blocked() {
+            return QString::default();
+        }
         let parent = PathBuf::from(self.path().to_string());
         let name = name.to_string();
 
@@ -2967,16 +3031,25 @@ impl qobject::App {
     }
 
     fn copy_selection(mut self: Pin<&mut Self>) {
+        if self.as_mut().remote_blocked() {
+            return;
+        }
         self.as_mut()
             .put_on_clipboard(kara_fs::clipboard::ClipboardAction::Copy);
     }
 
     fn cut_selection(mut self: Pin<&mut Self>) {
+        if self.as_mut().remote_blocked() {
+            return;
+        }
         self.as_mut()
             .put_on_clipboard(kara_fs::clipboard::ClipboardAction::Cut);
     }
 
     fn paste(mut self: Pin<&mut Self>) {
+        if self.as_mut().remote_blocked() {
+            return;
+        }
         // Un trabajo a la vez: pegar mientras otro corre mezclaría dos
         // diálogos sobre las mismas propiedades.
         if self.rust().paste_job.is_some() {
@@ -3201,6 +3274,9 @@ impl qobject::App {
     }
 
     fn request_permanent_delete(mut self: Pin<&mut Self>) {
+        if self.as_mut().remote_blocked() {
+            return;
+        }
         if *self.in_trash() {
             self.as_mut()
                 .report("Dentro de la papelera, lo definitivo es «Vaciar la papelera».");
@@ -3253,6 +3329,9 @@ impl qobject::App {
     }
 
     fn show_properties(mut self: Pin<&mut Self>) {
+        if self.as_mut().remote_blocked() {
+            return;
+        }
         if *self.in_trash() {
             return;
         }
@@ -3404,6 +3483,9 @@ impl qobject::App {
     }
 
     fn open_terminal_here(mut self: Pin<&mut Self>, row: i32) {
+        if self.as_mut().remote_blocked() {
+            return;
+        }
         if *self.in_trash() {
             return;
         }
@@ -3740,6 +3822,9 @@ impl qobject::App {
     }
 
     fn trash_selected(mut self: Pin<&mut Self>) {
+        if self.as_mut().remote_blocked() {
+            return;
+        }
         let current = PathBuf::from(self.path().to_string());
         let victims: Vec<PathBuf> = {
             let state = self.rust();
@@ -3800,6 +3885,9 @@ impl qobject::App {
     }
 
     fn rename_entry(mut self: Pin<&mut Self>, from: &QString, to: &QString) {
+        if self.as_mut().remote_blocked() {
+            return;
+        }
         let parent = PathBuf::from(self.path().to_string());
         let source = parent.join(from.to_string());
         let target = to.to_string();
@@ -4165,7 +4253,7 @@ impl qobject::App {
         let current = PathBuf::from(self.path().to_string());
         let Some((target, is_dir)) = self.rust().view().visible.get(row).map(|entry| {
             (
-                current.join(&entry.name),
+                child_path(&current, &entry.name.to_string_lossy()),
                 matches!(entry.kind, kara_core::entry::EntryKind::Directory),
             )
         }) else {
@@ -4197,15 +4285,14 @@ impl qobject::App {
     }
 
     fn cd(mut self: Pin<&mut Self>, name: &QString) {
-        let mut target = PathBuf::from(self.path().to_string());
-        target.push(name.to_string());
+        let current = PathBuf::from(self.path().to_string());
+        let target = child_path(&current, &name.to_string());
         self.as_mut().navigate_to(&target);
     }
 
     fn up(mut self: Pin<&mut Self>) {
         let current = PathBuf::from(self.path().to_string());
-        if let Some(parent) = current.parent() {
-            let parent = parent.to_path_buf();
+        if let Some(parent) = parent_path(&current) {
             self.as_mut().navigate_to(&parent);
         }
     }
@@ -4219,14 +4306,6 @@ impl qobject::App {
     }
 
     fn navigate(mut self: Pin<&mut Self>, path: &QString) {
-        // A remote drive's address (`kara+sftp://…`). Tabs and history still
-        // hold local paths, so say so rather than treat it as a folder name.
-        if path.to_string().starts_with("kara+") {
-            self.as_mut().report(
-                "Examinar unidades remotas dentro de una pestaña aún no está disponible: las pestañas todavía solo guardan carpetas locales.",
-            );
-            return;
-        }
         let target = PathBuf::from(path.to_string());
         self.as_mut().navigate_to(&target);
     }

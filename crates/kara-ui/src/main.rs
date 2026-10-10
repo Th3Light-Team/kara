@@ -5,6 +5,7 @@ mod bridge;
 mod drives;
 mod prefs;
 mod present;
+mod remote_nav;
 mod remote_present;
 mod remote_store;
 
