@@ -24,6 +24,7 @@ mod dir;
 mod error;
 mod info;
 mod listing;
+mod remove;
 
 pub use dir::{
     TrashAvailability, TrashDir, TrashKind, TrashPolicy, home_trash_dir, probe_trash,
@@ -217,7 +218,7 @@ fn check_capacity(
 /// running total exceeds `limit`, so this never scans a whole large tree just
 /// to prove it is over budget; it is only ever called when a limit is set
 /// (cb_02, cb_13). Consults `observer` once per entry, exactly like
-/// `delete_recursive`, so walking a large tree here is cancellable and never
+/// the permanent delete walk, so walking a large tree here is cancellable and never
 /// runs unattended (cb_29).
 fn apparent_size(
     path: &Path,
@@ -518,21 +519,51 @@ fn place_in_trash(
 /// FreeDesktop implementation does unconditionally. The window between the two
 /// is narrow and, for the trash, already guarded on the other side by the
 /// `.trashinfo` name reservation (cb_08).
-fn rename_noreplace(from: &Path, to: &Path) -> Result<(), rustix::io::Errno> {
+pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> Result<(), rustix::io::Errno> {
+    rename_noreplace_at(rustix::fs::CWD, from, rustix::fs::CWD, to)
+}
+
+/// [`rename_noreplace`] with each name relative to a directory descriptor, so
+/// the rename happens in the directories that were opened, whatever their
+/// paths mean by now.
+pub(crate) fn rename_noreplace_at<P: rustix::path::Arg + Copy>(
+    from_dir: std::os::fd::BorrowedFd<'_>,
+    from: P,
+    to_dir: std::os::fd::BorrowedFd<'_>,
+    to: P,
+) -> Result<(), rustix::io::Errno> {
     match rustix::fs::renameat_with(
-        rustix::fs::CWD,
+        from_dir,
         from,
-        rustix::fs::CWD,
+        to_dir,
         to,
         rustix::fs::RenameFlags::NOREPLACE,
     ) {
         Err(rustix::io::Errno::NOSYS)
         | Err(rustix::io::Errno::INVAL)
         | Err(rustix::io::Errno::OPNOTSUPP) => {
-            if std::fs::symlink_metadata(to).is_ok() {
+            // `link` fails with EEXIST atomically, so link-then-unlink keeps the
+            // no-clobber guarantee where RENAME_NOREPLACE is missing. Directories
+            // and filesystems without hard links refuse it; only those fall
+            // through to the check-then-rename below.
+            match rustix::fs::linkat(from_dir, from, to_dir, to, rustix::fs::AtFlags::empty()) {
+                Ok(()) => {
+                    return match rustix::fs::unlinkat(from_dir, from, rustix::fs::AtFlags::empty())
+                    {
+                        Ok(()) => Ok(()),
+                        Err(errno) => {
+                            let _ = rustix::fs::unlinkat(to_dir, to, rustix::fs::AtFlags::empty());
+                            Err(errno)
+                        }
+                    };
+                }
+                Err(rustix::io::Errno::EXIST) => return Err(rustix::io::Errno::EXIST),
+                Err(_) => {}
+            }
+            if rustix::fs::statat(to_dir, to, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).is_ok() {
                 return Err(rustix::io::Errno::EXIST);
             }
-            rustix::fs::renameat(rustix::fs::CWD, from, rustix::fs::CWD, to)
+            rustix::fs::renameat(from_dir, from, to_dir, to)
         }
         other => other,
     }
@@ -919,31 +950,6 @@ pub fn restore_item(
 // Permanent deletion (cb_26)
 // ---------------------------------------------------------------------------
 
-fn delete_recursive(
-    path: &Path,
-    metadata: &std::fs::Metadata,
-    observer: &mut dyn TrashObserver,
-    removed: &mut u64,
-) -> Result<(), TrashError> {
-    if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        let entries = std::fs::read_dir(path).map_err(|source| classify_io_error(path, source))?;
-        for entry in entries {
-            let entry = entry.map_err(|source| classify_io_error(path, source))?;
-            let child_path = entry.path();
-            let child_metadata = dir::lstat(&child_path)?;
-            if observer.on_bytes(*removed, None) == Flow::Cancel {
-                return Err(TrashError::Cancelled);
-            }
-            delete_recursive(&child_path, &child_metadata, observer, removed)?;
-        }
-        std::fs::remove_dir(path).map_err(|source| classify_io_error(path, source))?;
-    } else {
-        std::fs::remove_file(path).map_err(|source| classify_io_error(path, source))?;
-    }
-    *removed = removed.saturating_add(1);
-    Ok(())
-}
-
 /// Deletes a path permanently, recursively and cancellably. Returns how many
 /// entries were removed. This is the explicit way out for volumes with no
 /// trash: nothing in this module ever calls it on its own.
@@ -965,7 +971,7 @@ pub fn delete_permanently(
     }
     let metadata = dir::lstat(path)?;
     refuse_mount_point(path, &metadata)?;
-    let mut removed: u64 = 0;
-    delete_recursive(path, &metadata, observer, &mut removed)?;
-    Ok(removed)
+    // Through directory descriptors: links are never followed, even when one
+    // is swapped in mid-walk, and nested mount points are refused.
+    remove::delete_tree(path, &metadata, observer)
 }

@@ -12,11 +12,13 @@
 
 pub mod batch;
 pub mod clock;
+pub mod location;
 pub mod progress;
 pub mod queue;
 pub mod runner;
 pub mod undo;
 pub mod conflict;
+mod remote_undo;
 
 pub use clock::{local_utc_offset_seconds, trash_policy};
 pub use batch::{BatchPolicy, BatchReport, ErrorDecision, Failure, FailureKind};
@@ -26,5 +28,9 @@ pub use conflict::{
 // Reexportados desde kara-core, donde viven para que kara-fs pueda usarlos.
 pub use kara_core::{split_name, unique_name};
 pub use undo::{Action, UndoError, UndoStack};
+pub use location::{
+    BackendResolver, LocationOpError, LocationRequest, RequestError, create_dir_at, display_path,
+    failure_kind, no_drives, parse_display_path, rename_at,
+};
 pub use progress::{Eta, Meter, Phase, humanize};
 pub use queue::{Concurrency, Job, JobId, JobState, Kind, Queue};

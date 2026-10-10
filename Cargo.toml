@@ -6,7 +6,9 @@ members = [
     "crates/kara-fs",
     "crates/kara-index",
     "crates/kara-ops",
+    "crates/kara-remote",
     "crates/kara-ui",
+    "crates/kara-vfs",
 ]
 
 [workspace.package]
@@ -22,6 +24,8 @@ kara-desktop = { path = "crates/kara-desktop" }
 kara-fs = { path = "crates/kara-fs" }
 kara-index = { path = "crates/kara-index" }
 kara-ops = { path = "crates/kara-ops" }
+kara-remote = { path = "crates/kara-remote" }
+kara-vfs = { path = "crates/kara-vfs" }
 
 [profile.release]
 lto = "thin"
