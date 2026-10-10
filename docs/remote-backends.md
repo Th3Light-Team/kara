@@ -166,15 +166,15 @@ environment variables and `#[ignore]` otherwise. Add them in new test files;
 
 ## Order of work
 
-1. `kara-vfs`: `Location`, `RemotePath`, errors, trait, `MemoryBackend`, conformance suite.
-2. `LocalBackend` in `kara-fs`, passing the suite. Existing tests untouched.
-3. `Location` through `kara-ops`, then `kara-ui` (`present.rs` first, then the bridge).
-4. `DriveRegistry`, config, and the panel entry «Añadir unidad…» (QML is presentation only).
-5. SFTP adapter on `russh-sftp`, with the keyring `SecretStore`.
-6. S3 adapter on `object_store` (deferred; the contract must already accommodate it).
+Status (see `remote-drives-handoff.md` for what is left in each):
 
-Steps 1–2 and the Rust side of 3–4 can be built and tested without Qt. Only the
-panel and the bridge need a Qt build.
+1. `kara-vfs` — **done**.
+2. `LocalBackend` in `kara-fs` — **done**.
+3. `Location` through `kara-ops` — **done** (Rust side); `kara-ui` pending (needs Qt).
+4. `DriveRegistry`, config, `SecretStore` with `oo7` — **done** in `kara-remote`
+   (the «Añadir unidad…» panel and bridge are pending, needs Qt).
+5. SFTP adapter on `russh-sftp` — pending.
+6. S3 adapter on `object_store` — deferred.
 
 ## Decisions
 

@@ -188,3 +188,24 @@ sources are removed); M13 is the regression check.
 Not tested here: the bridge and QML (no Qt), real SFTP/S3 latency and partial
 reads, and a backend whose `stat` reports no size (verification then fails and
 the source stays, by design, but no backend in the tree does that).
+
+## kara-remote (registry, config, secrets)
+
+9 mutations on `registry.rs` and `config.rs`; 7 caught at once, 1 survived and is now
+caught, 1 is equivalent (`backend()` also checks the state, but `set_state` already
+drops the backend of a non-`Ready` drive).
+
+| Invariant | Mutation | Caught by |
+|---|---|---|
+| A secret is stored only after a connection with it worked and only if asked | store without `remember` | `a_secret_is_not_kept_unless_the_user_asked`, `a_wrong_secret_is_not_remembered` |
+| Only a lost connection marks the drive lost | any error marks it lost | `a_lost_connection_stops_the_drive_resolving` |
+| One connect at a time per drive | busy check removed | `a_second_connect_while_connecting_is_refused` |
+| Removing a drive deletes its secret | secret kept | `removing_a_drive_deletes_its_secret` |
+| Secret prompts are bounded | 3 attempts → 1 | `a_secret_is_asked_for_and_remembered_after_it_worked` (needs the retry path) |
+| A cancelled connect never reaches the factory | cancel check removed | **survived** (MemoryFactory checks the token itself) → `registry_cancel::a_cancelled_connect_never_calls_the_factory` |
+| No secret-looking parameter reaches settings | guard disabled | `secret_looking_parameters_are_refused`, `nothing_secret_reaches_the_file` |
+| Re-storing a drive drops parameters that were removed | `remove_section` skipped | `storing_replaces_removed_parameters` |
+| A lost drive does not resolve | state check in `backend()` removed | equivalent mutant |
+
+Not testable here: `KeyringSecretStore` (needs a session bus and an unlocked
+keyring; compiled and linted only, see `remote-drives-handoff.md`).
