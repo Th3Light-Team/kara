@@ -147,6 +147,44 @@ Wiring in `kara-ui` (nothing of this is business logic; it lives in Rust, QML on
    (`Capabilities::watch == false`). Thumbnails on remote drives: on demand only,
    cache key includes the drive.
 
+### Step 4, UI side: what is wired (items 1-4 and 5 in part)
+
+Built in `kara-ui` (second QObject `Drives`, `src/drives.rs`), launched and
+screenshotted under `QT_QPA_PLATFORM=offscreen`:
+
+- **Panel:** `DrivesSection.qml`, a «Unidades remotas» block under the tree, with a
+  «+» in its header. Rows show label, protocol · target, and a state badge;
+  context menu Conectar / Desconectar / Editar… / Quitar… (the last asks, focus
+  on Cancelar); a lost or failed drive shows «Reconectar» on its row.
+- **Dialog:** `DriveDialog.qml`, generic over `kara_remote::form` (descriptors,
+  conditions, validation, per-field errors all in Rust; only protocols with a
+  registered factory are offered, all three are compiled in). «Probar conexión»
+  runs `DriveRegistry::test_connection` on a worker without registering the drive.
+  Secrets go to the keyring store (`FallbackSecretStore`: the keyring, else this
+  run's memory, and `secrets_note` says «no se guardarán»); only the non-secret
+  config reaches `settings.conf` (`remote_store.rs`, which keeps `Prefs` and the
+  panel from erasing each other's sections).
+- **Prompts:** `DrivePrompts.qml` + `UiPrompts` (a `PromptHandler` that posts to the
+  UI thread and blocks the worker on a channel). A host-key question defaults to
+  refusing; a changed key reads as a warning and is never written to `known_hosts`.
+- `oo7` is built with its `async-std` feature (zbus' async-io), because `ashpd`
+  in `kara-desktop` refuses `tokio` and `async-io` together.
+
+**Still missing** (so this is not «step 4 done»):
+
+- **Browsing a connected drive.** Clicking one emits `open_requested(kara+…://drive/)`
+  and `App::navigate` answers with a notice: tabs, history and listings hold
+  `PathBuf`s. Needs Location-aware tabs (`present.rs`, then the bridge), then
+  `drives::registry().resolver()` into `spawn_with` (item 6) and the lost-drive
+  reporting of item 5 on listing/job errors.
+- Path fields (`key_file`, `service_account_file`, `known_hosts`) are plain text
+  boxes: a file chooser needs `QtQuick.Dialogs`, a new package for the install
+  line, README and AppImage.
+- Not run against a real sshd, MinIO/AWS, GCS or a live keyring (S3 against AWS
+  failed on the sandbox's network, as expected; that exercised the prompt and
+  failure paths).
+- `scripts/kara-e2e` not extended or run (another owner).
+
 ## Step 5, SFTP adapter: done (`kara-remote/src/sftp/`, feature `sftp`)
 
 Module docs (`src/sftp/mod.rs`) list the parameters, the auth order, the host-key

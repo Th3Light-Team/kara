@@ -17,6 +17,8 @@ kara-desktop.workspace = true
 kara-fs.workspace = true
 kara-index.workspace = true
 kara-ops.workspace = true
+kara-remote = { workspace = true, features = ["sftp", "s3", "gcs", "keyring"] }
+kara-vfs.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"

@@ -2,8 +2,11 @@
 
 mod args;
 mod bridge;
+mod drives;
 mod prefs;
 mod present;
+mod remote_present;
+mod remote_store;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
 

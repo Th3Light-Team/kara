@@ -197,6 +197,66 @@ impl DriveRegistry {
         self.lock().listeners.push(Arc::new(listener));
     }
 
+    /// The schemes that have a factory, i.e. the protocols compiled in.
+    #[must_use]
+    pub fn schemes(&self) -> Vec<String> {
+        self.lock().factories.keys().cloned().collect()
+    }
+
+    /// Replaces the config of an existing drive (same identity: label, group
+    /// and parameters change). Its session, if any, is dropped, because it was
+    /// opened with the old parameters; the drive is left `Disconnected`.
+    pub fn update(&self, config: DriveConfig) -> Result<(), RegistryError> {
+        let id = config.id.clone();
+        {
+            let mut inner = self.lock();
+            let Some(entry) = inner.drives.get_mut(&id) else {
+                return Err(RegistryError::Unknown);
+            };
+            if entry.state == ConnectionState::Connecting {
+                return Err(RegistryError::Busy);
+            }
+            entry.config = config;
+        }
+        self.set_state(&id, ConnectionState::Disconnected, None);
+        Ok(())
+    }
+
+    /// The secret kept for `config`'s drive, else for its group. Blocking if the
+    /// store is the keyring: worker thread. An unreadable store is «none».
+    #[must_use]
+    pub fn stored_secret(&self, config: &DriveConfig) -> Option<Secret> {
+        self.secrets
+            .get(&SecretKey::Drive(config.id.clone()))
+            .ok()
+            .flatten()
+            .or_else(|| {
+                let group = config.group.clone()?;
+                self.secrets.get(&SecretKey::Group(group)).ok().flatten()
+            })
+    }
+
+    /// Opens a drive that is **not** registered, to check that its parameters
+    /// and `secret` work, and drops the session. Blocking: worker thread.
+    /// Host-key questions go to `prompts`; a missing or rejected secret is
+    /// reported as such, not asked for again (the form has a box for it).
+    pub fn test_connection(
+        &self,
+        config: &DriveConfig,
+        secret: Option<&Secret>,
+        prompts: &dyn PromptHandler,
+        cancel: &Cancel,
+    ) -> Result<(), ConnectError> {
+        let factory = self.lock().factories.get(config.id.scheme()).cloned();
+        let Some(factory) = factory else {
+            return Err(ConnectError::Other(format!(
+                "este equipo no tiene el protocolo {}",
+                config.id.scheme()
+            )));
+        };
+        factory.connect(config, secret, prompts, cancel).map(drop)
+    }
+
     /// Adds a drive, disconnected. Persisting its config is the caller's job
     /// (`config::store`).
     pub fn add(&self, config: DriveConfig) -> Result<(), RegistryError> {
