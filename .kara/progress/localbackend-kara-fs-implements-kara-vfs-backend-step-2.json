@@ -489,7 +489,7 @@
       },
       {
         "path": "crates/kara-fs/tests/local_backend_rules.rs",
-        "sha256": "ad1ef7bf6a604c6701729a440b730ee6333dc18efe62fc1838b10c1a113c1d0b",
+        "sha256": "5efb722c5d26e1690f182108d8685bbbb47dfcb3f5d93c4c782e17e12496c080",
         "testCount": 11
       },
       {

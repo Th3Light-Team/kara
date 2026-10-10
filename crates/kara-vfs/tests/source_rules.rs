@@ -196,11 +196,17 @@ fn cb_48_self_dev_dependency_enables_the_suite_for_plain_cargo_test() {
 }
 
 #[test]
-fn cb_48_no_other_crate_depends_on_kara_vfs_yet() {
+fn cb_48_only_the_backend_crates_depend_on_kara_vfs() {
+    // Step 1 allowed nobody; kara-fs (LocalBackend), kara-ops, kara-remote
+    // and kara-ui (drives panel) are the intended consumers since steps 2-6.
+    const ALLOWED: [&str; 4] = ["kara-fs", "kara-ops", "kara-remote", "kara-ui"];
     let crates = Path::new(CRATE).parent().expect("crates dir");
     for entry in fs::read_dir(crates).expect("read crates") {
         let dir = entry.expect("entry").path();
-        if dir.file_name().is_some_and(|n| n == "kara-vfs") {
+        if dir
+            .file_name()
+            .is_some_and(|n| n == "kara-vfs" || ALLOWED.iter().any(|a| n == *a))
+        {
             continue;
         }
         let toml = dir.join("Cargo.toml");

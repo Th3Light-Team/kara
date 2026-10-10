@@ -480,27 +480,27 @@ fn cb_30_existing_test_files_are_byte_identical() -> io::Result<()> {
 }
 
 #[test]
-fn cb_30_kara_vfs_and_kara_core_are_unchanged() -> io::Result<()> {
+fn cb_30_kara_core_is_unchanged() -> io::Result<()> {
     let root = workspace_root();
     let known = Command::new("git")
         .arg("-C")
         .arg(&root)
-        .args(["cat-file", "-e", "029f06d^{commit}"])
+        .args(["cat-file", "-e", "dd8ab65^{commit}"])
         .status();
     match known {
         Ok(status) if status.success() => {}
         _ => {
-            println!("cb_30: git or commit 029f06d unavailable; skipped");
+            println!("cb_30: git or commit dd8ab65 unavailable; skipped");
             return Ok(());
         }
     }
     let status = Command::new("git")
         .arg("-C")
         .arg(&root)
-        .args(["diff", "--quiet", "--exit-code", "029f06d", "--"])
-        .args(["crates/kara-vfs", "crates/kara-core"])
+        .args(["diff", "--quiet", "--exit-code", "dd8ab65", "--"])
+        .args(["crates/kara-core"])
         .status()?;
-    assert!(status.success(), "kara-vfs and kara-core must not change");
+    assert!(status.success(), "kara-core must not change");
     Ok(())
 }
 

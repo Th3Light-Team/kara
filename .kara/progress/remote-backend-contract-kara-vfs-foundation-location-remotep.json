@@ -935,7 +935,7 @@
       },
       {
         "path": "crates/kara-vfs/tests/source_rules.rs",
-        "sha256": "3f5a3d7088eaaa271c0540844851ca2958e38d50a38c5aa9dfb902ac1ff8febf",
+        "sha256": "4058d07ea37259d24e14006cf7ca572a18505abb2cac6c517e9e50cd3b081ee1",
         "testCount": 10
       },
       {

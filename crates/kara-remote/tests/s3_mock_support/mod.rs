@@ -476,7 +476,7 @@ async fn handle(state: Arc<MockState>, request: Request<Incoming>) -> Result<Rep
     }
     if state
         .fail_next
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
         .is_ok()
     {
         state.record(format!("{} 503", parts.method));
