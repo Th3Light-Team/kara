@@ -14,6 +14,7 @@ use kara_vfs::{DriveId, DriveIdError};
 const PREFIX: &str = "drive:";
 const PARAM: &str = "param.";
 const LABEL: &str = "label";
+const GROUP: &str = "group";
 
 /// Parameter keys that must be stored as secrets, not as settings.
 const SECRET_WORDS: [&str; 6] = ["password", "passwd", "passphrase", "secret", "token", "apikey"];
@@ -25,6 +26,8 @@ pub enum ConfigError {
     Id(#[from] DriveIdError),
     #[error("the label is empty or has a line break")]
     BadLabel,
+    #[error("the group name is empty, too long, or has ':' or a line break")]
+    BadGroup,
     #[error("parameter {key:?} looks like a secret; store it with the SecretStore")]
     LooksLikeSecret { key: String },
     #[error("parameter key {key:?} is empty, has '=' or whitespace")]
@@ -39,6 +42,9 @@ pub struct DriveConfig {
     pub id: DriveId,
     /// What the panel shows. Renaming it does not change the drive's identity.
     pub label: String,
+    /// A fleet this drive belongs to. Drives of one group can share a secret
+    /// and are listed together.
+    pub group: Option<String>,
     pub params: BTreeMap<String, String>,
 }
 
@@ -73,8 +79,19 @@ impl DriveConfig {
         Ok(DriveConfig {
             id,
             label,
+            group: None,
             params: map,
         })
+    }
+
+    /// Puts the drive in a group. A group name is a short single-line label.
+    pub fn with_group(mut self, group: &str) -> Result<DriveConfig, ConfigError> {
+        let group = group.trim();
+        if group.is_empty() || group.len() > 64 || group.contains(['\n', '\r', ':']) {
+            return Err(ConfigError::BadGroup);
+        }
+        self.group = Some(group.to_owned());
+        Ok(self)
     }
 
     /// A parameter by key.
@@ -93,6 +110,9 @@ pub fn store(settings: &mut Settings, config: &DriveConfig) {
     let section = section_name(&config.id);
     settings.remove_section(&section);
     settings.set(&section, LABEL, config.label.clone());
+    if let Some(group) = &config.group {
+        settings.set(&section, GROUP, group.clone());
+    }
     for (key, value) in &config.params {
         settings.set(&section, &format!("{PARAM}{key}"), value.clone());
     }
@@ -122,7 +142,13 @@ pub fn load_all(settings: &Settings) -> (Vec<DriveConfig>, Vec<String>) {
             key.strip_prefix(PARAM)
                 .map(|stripped| (stripped.to_owned(), value.clone()))
         });
-        match DriveConfig::new(scheme, name, &label, params) {
+        let built = DriveConfig::new(scheme, name, &label, params).and_then(|config| {
+            match values.get(GROUP) {
+                Some(group) => config.with_group(group),
+                None => Ok(config),
+            }
+        });
+        match built {
             Ok(config) => drives.push(config),
             Err(error) => problems.push(format!("[{section}]: {error}")),
         }

@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use kara_vfs::{Backend, BackendError, BackendErrorKind, Cancel, DriveId};
 
 use crate::config::DriveConfig;
-use crate::secrets::{Secret, SecretStore};
+use crate::secrets::{Secret, SecretKey, SecretStore};
 
 /// Same shape as `kara_ops::BackendResolver`, so the two are interchangeable
 /// without this crate depending on `kara-ops`.
@@ -57,11 +57,21 @@ pub enum Prompt {
     },
 }
 
+/// Where the user wants a password kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remember {
+    No,
+    /// For this drive only.
+    ForDrive,
+    /// For every drive of the same group (falls back to the drive when it has none).
+    ForGroup,
+}
+
 /// The user's reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptAnswer {
-    /// A password, and whether to keep it in the secret store.
-    Secret { secret: Secret, remember: bool },
+    /// A password, and where to keep it, if anywhere.
+    Secret { secret: Secret, remember: Remember },
     /// Accept the host key, and whether to remember it.
     Trust { remember: bool },
     Refuse,
@@ -232,13 +242,43 @@ impl DriveRegistry {
             return Err(RegistryError::Unknown);
         };
         // Best effort: a keyring that is gone must not keep the drive in the list.
-        let _ = self.secrets.delete(id);
+        // A group's shared secret stays: other drives may still use it.
+        let _ = self.secrets.delete(&SecretKey::Drive(id.clone()));
         Ok(())
     }
 
     /// Stores a secret for a drive, e.g. when the user fills the "add drive" form.
     pub fn remember_secret(&self, id: &DriveId, secret: &Secret) -> Result<(), crate::SecretError> {
-        self.secrets.set(id, secret)
+        self.secrets.set(&SecretKey::Drive(id.clone()), secret)
+    }
+
+    /// Stores the secret shared by a group.
+    pub fn remember_group_secret(
+        &self,
+        group: &str,
+        secret: &Secret,
+    ) -> Result<(), crate::SecretError> {
+        self.secrets.set(&SecretKey::Group(group.to_owned()), secret)
+    }
+
+    /// Forgets a group's shared secret.
+    pub fn forget_group_secret(&self, group: &str) -> Result<(), crate::SecretError> {
+        self.secrets.delete(&SecretKey::Group(group.to_owned()))
+    }
+
+    /// Drives by group, in id order; ungrouped drives are not listed.
+    #[must_use]
+    pub fn groups(&self) -> BTreeMap<String, Vec<DriveId>> {
+        let mut groups: BTreeMap<String, Vec<DriveId>> = BTreeMap::new();
+        for entry in self.lock().drives.values() {
+            if let Some(group) = &entry.config.group {
+                groups
+                    .entry(group.clone())
+                    .or_default()
+                    .push(entry.config.id.clone());
+            }
+        }
+        groups
     }
 
     #[must_use]
@@ -323,17 +363,35 @@ impl DriveRegistry {
         self.set_state(id, ConnectionState::Connecting, None);
 
         // A missing or unreadable keyring is not fatal: the secret is asked for.
-        let mut secret = self.secrets.get(id).ok().flatten();
-        let mut remember = false;
+        // The drive's own secret wins over its group's.
+        let mut secret = self
+            .secrets
+            .get(&SecretKey::Drive(id.clone()))
+            .ok()
+            .flatten()
+            .or_else(|| {
+                let group = config.group.clone()?;
+                self.secrets.get(&SecretKey::Group(group)).ok().flatten()
+            });
+        let mut remember = Remember::No;
         for attempt in 0..SECRET_ATTEMPTS {
             if cancel.is_cancelled() {
                 return Err(self.fail(id, ConnectError::Cancelled));
             }
             match factory.connect(&config, secret.as_ref(), prompts, cancel) {
                 Ok(backend) => {
-                    if remember && let Some(secret) = &secret {
+                    if let Some(secret) = &secret {
                         // Only a secret that worked is worth keeping.
-                        let _ = self.secrets.set(id, secret);
+                        let key = match (remember, &config.group) {
+                            (Remember::No, _) => None,
+                            (Remember::ForGroup, Some(group)) => Some(SecretKey::Group(group.clone())),
+                            (Remember::ForGroup | Remember::ForDrive, _) => {
+                                Some(SecretKey::Drive(id.clone()))
+                            }
+                        };
+                        if let Some(key) = key {
+                            let _ = self.secrets.set(&key, secret);
+                        }
                     }
                     self.set_state(id, ConnectionState::Ready, Some(backend));
                     return Ok(());

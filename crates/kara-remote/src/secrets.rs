@@ -1,4 +1,4 @@
-//! Where a drive's password or passphrase lives.
+//! Where a drive's (or a group's) password or passphrase lives.
 //!
 //! In production that is the system keyring (Secret Service), behind
 //! [`SecretStore`]. If no keyring is available the drive still connects: the
@@ -44,14 +44,33 @@ pub enum SecretError {
     Denied(String),
 }
 
-/// A place to keep one secret per drive.
+/// What a secret belongs to: one drive, or a whole group of them (a fleet that
+/// shares one password or key passphrase).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SecretKey {
+    Drive(DriveId),
+    Group(String),
+}
+
+impl SecretKey {
+    /// Stable text form, used for keyring attributes: `sftp://nas` or `group:fleet`.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            SecretKey::Drive(id) => format!("{}://{}", id.scheme(), id.name()),
+            SecretKey::Group(name) => format!("group:{name}"),
+        }
+    }
+}
+
+/// A place to keep secrets, one per [`SecretKey`].
 pub trait SecretStore: Send + Sync {
-    /// `Ok(None)` when nothing is stored for the drive.
-    fn get(&self, id: &DriveId) -> Result<Option<Secret>, SecretError>;
-    /// Stores or replaces the drive's secret.
-    fn set(&self, id: &DriveId, secret: &Secret) -> Result<(), SecretError>;
+    /// `Ok(None)` when nothing is stored for the key.
+    fn get(&self, key: &SecretKey) -> Result<Option<Secret>, SecretError>;
+    /// Stores or replaces the secret.
+    fn set(&self, key: &SecretKey, secret: &Secret) -> Result<(), SecretError>;
     /// Removes it. Removing what is not there is not an error.
-    fn delete(&self, id: &DriveId) -> Result<(), SecretError>;
+    fn delete(&self, key: &SecretKey) -> Result<(), SecretError>;
     /// `false` when secrets only last for this run (nothing is saved to disk).
     fn is_persistent(&self) -> bool;
 }
@@ -60,7 +79,7 @@ pub trait SecretStore: Send + Sync {
 /// is no keyring, and the store used by tests.
 #[derive(Debug, Default)]
 pub struct MemorySecretStore {
-    secrets: Mutex<HashMap<DriveId, Secret>>,
+    secrets: Mutex<HashMap<SecretKey, Secret>>,
 }
 
 impl MemorySecretStore {
@@ -69,7 +88,7 @@ impl MemorySecretStore {
         MemorySecretStore::default()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<DriveId, Secret>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<SecretKey, Secret>> {
         match self.secrets.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -78,17 +97,17 @@ impl MemorySecretStore {
 }
 
 impl SecretStore for MemorySecretStore {
-    fn get(&self, id: &DriveId) -> Result<Option<Secret>, SecretError> {
-        Ok(self.lock().get(id).cloned())
+    fn get(&self, key: &SecretKey) -> Result<Option<Secret>, SecretError> {
+        Ok(self.lock().get(key).cloned())
     }
 
-    fn set(&self, id: &DriveId, secret: &Secret) -> Result<(), SecretError> {
-        self.lock().insert(id.clone(), secret.clone());
+    fn set(&self, key: &SecretKey, secret: &Secret) -> Result<(), SecretError> {
+        self.lock().insert(key.clone(), secret.clone());
         Ok(())
     }
 
-    fn delete(&self, id: &DriveId) -> Result<(), SecretError> {
-        self.lock().remove(id);
+    fn delete(&self, key: &SecretKey) -> Result<(), SecretError> {
+        self.lock().remove(key);
         Ok(())
     }
 

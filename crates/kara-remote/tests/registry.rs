@@ -10,7 +10,7 @@ use kara_remote::memory::MemoryFactory;
 use kara_remote::{
     BackendFactory, ConnectError, ConnectOrRegistryError, ConnectionState, DriveConfig,
     DriveRegistry, MemorySecretStore, Prompt, PromptAnswer, PromptHandler, RefuseAll,
-    RegistryError, Secret, SecretStore,
+    RegistryError, Remember, Secret, SecretKey, SecretStore,
 };
 use kara_vfs::{Backend, BackendError, BackendErrorKind, Cancel, DriveId};
 
@@ -39,12 +39,12 @@ fn registry() -> (Arc<DriveRegistry>, Arc<MemoryFactory>, Arc<MemorySecretStore>
 /// Answers with a fixed list of secrets and counts the questions.
 struct Scripted {
     secrets: Mutex<Vec<&'static str>>,
-    remember: bool,
+    remember: Remember,
     asked: AtomicUsize,
 }
 
 impl Scripted {
-    fn new(secrets: &[&'static str], remember: bool) -> Scripted {
+    fn new(secrets: &[&'static str], remember: Remember) -> Scripted {
         Scripted {
             secrets: Mutex::new(secrets.iter().rev().copied().collect()),
             remember,
@@ -123,19 +123,19 @@ fn data_survives_a_reconnect() {
 fn a_secret_is_asked_for_and_remembered_after_it_worked() {
     let (registry, _, secrets) = registry();
     registry.add(drive("vault", &[("auth", "required")])).expect("add");
-    let handler = Scripted::new(&[MemoryFactory::ACCEPTED], true);
+    let handler = Scripted::new(&[MemoryFactory::ACCEPTED], Remember::ForDrive);
 
     registry.connect(&id("vault"), &handler, &Cancel::new()).expect("connect");
 
     assert_eq!(handler.asked.load(Ordering::SeqCst), 1);
     assert_eq!(
-        secrets.get(&id("vault")).expect("get").map(|s| s.expose().to_owned()),
+        secrets.get(&SecretKey::Drive(id("vault"))).expect("get").map(|s| s.expose().to_owned()),
         Some(MemoryFactory::ACCEPTED.to_owned())
     );
 
     // The next connection uses the stored secret and does not ask.
     registry.disconnect(&id("vault")).expect("disconnect");
-    let silent = Scripted::new(&[], false);
+    let silent = Scripted::new(&[], Remember::No);
     registry.connect(&id("vault"), &silent, &Cancel::new()).expect("reconnect");
     assert_eq!(silent.asked.load(Ordering::SeqCst), 0);
 }
@@ -144,14 +144,14 @@ fn a_secret_is_asked_for_and_remembered_after_it_worked() {
 fn a_wrong_secret_is_not_remembered() {
     let (registry, _, secrets) = registry();
     registry.add(drive("vault", &[("auth", "required")])).expect("add");
-    let handler = Scripted::new(&["wrong", "also wrong", "still wrong"], true);
+    let handler = Scripted::new(&["wrong", "also wrong", "still wrong"], Remember::ForDrive);
 
     let error = registry
         .connect(&id("vault"), &handler, &Cancel::new())
         .expect_err("must fail");
 
     assert_eq!(error, ConnectOrRegistryError::Connect(ConnectError::AuthFailed));
-    assert!(secrets.get(&id("vault")).expect("get").is_none(), "nothing wrong may be kept");
+    assert!(secrets.get(&SecretKey::Drive(id("vault"))).expect("get").is_none(), "nothing wrong may be kept");
     assert!(matches!(registry.state(&id("vault")), Some(ConnectionState::Failed { .. })));
     assert!(registry.backend(&id("vault")).is_none());
 }
@@ -160,9 +160,9 @@ fn a_wrong_secret_is_not_remembered() {
 fn a_secret_is_not_kept_unless_the_user_asked() {
     let (registry, _, secrets) = registry();
     registry.add(drive("vault", &[("auth", "required")])).expect("add");
-    let handler = Scripted::new(&[MemoryFactory::ACCEPTED], false);
+    let handler = Scripted::new(&[MemoryFactory::ACCEPTED], Remember::No);
     registry.connect(&id("vault"), &handler, &Cancel::new()).expect("connect");
-    assert!(secrets.get(&id("vault")).expect("get").is_none());
+    assert!(secrets.get(&SecretKey::Drive(id("vault"))).expect("get").is_none());
 }
 
 #[test]
@@ -244,7 +244,7 @@ fn removing_a_drive_deletes_its_secret() {
     registry.add(drive("a", &[])).expect("add");
     registry.remember_secret(&id("a"), &Secret::new("pw")).expect("remember");
     registry.remove(&id("a")).expect("remove");
-    assert!(secrets.get(&id("a")).expect("get").is_none());
+    assert!(secrets.get(&SecretKey::Drive(id("a"))).expect("get").is_none());
     assert!(registry.config(&id("a")).is_none());
     assert_eq!(registry.remove(&id("a")), Err(RegistryError::Unknown));
 }
@@ -318,6 +318,6 @@ fn a_second_connect_while_connecting_is_refused() {
 fn secrets_never_show_in_debug_output() {
     let secret = Secret::new("hunter2");
     assert!(!format!("{secret:?}").contains("hunter2"));
-    let prompt = PromptAnswer::Secret { secret, remember: true };
+    let prompt = PromptAnswer::Secret { secret, remember: Remember::ForDrive };
     assert!(!format!("{prompt:?}").contains("hunter2"));
 }

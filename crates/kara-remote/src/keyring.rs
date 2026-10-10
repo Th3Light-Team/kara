@@ -9,10 +9,9 @@
 //! keyring, which CI and the cloud container do not have. It is checked by
 //! `docs/remote-drives-handoff.md`, step «keyring smoke test».
 
-use kara_vfs::DriveId;
 use oo7::{Keyring, Secret as KeyringSecret};
 
-use crate::secrets::{Secret, SecretError, SecretStore};
+use crate::secrets::{Secret, SecretError, SecretKey, SecretStore};
 
 const APPLICATION: &str = "kara";
 
@@ -33,10 +32,10 @@ impl KeyringSecretStore {
     }
 }
 
-fn attributes(id: &DriveId) -> [(&'static str, String); 2] {
+fn attributes(key: &SecretKey) -> [(&'static str, String); 2] {
     [
         ("application", APPLICATION.to_owned()),
-        ("kara.drive", format!("{}://{}", id.scheme(), id.name())),
+        ("kara.drive", key.label()),
     ]
 }
 
@@ -45,11 +44,11 @@ fn unavailable(error: &oo7::Error) -> SecretError {
 }
 
 impl SecretStore for KeyringSecretStore {
-    fn get(&self, id: &DriveId) -> Result<Option<Secret>, SecretError> {
+    fn get(&self, key: &SecretKey) -> Result<Option<Secret>, SecretError> {
         self.runtime.block_on(async {
             let keyring = Keyring::new().await.map_err(|e| unavailable(&e))?;
             let items = keyring
-                .search_items(&attributes(id))
+                .search_items(&attributes(key))
                 .await
                 .map_err(|e| unavailable(&e))?;
             let Some(item) = items.first() else {
@@ -62,14 +61,14 @@ impl SecretStore for KeyringSecretStore {
         })
     }
 
-    fn set(&self, id: &DriveId, secret: &Secret) -> Result<(), SecretError> {
+    fn set(&self, key: &SecretKey, secret: &Secret) -> Result<(), SecretError> {
         self.runtime.block_on(async {
             let keyring = Keyring::new().await.map_err(|e| unavailable(&e))?;
-            let label = format!("Kara drive {}://{}", id.scheme(), id.name());
+            let label = format!("Kara {}", key.label());
             keyring
                 .create_item(
                     &label,
-                    &attributes(id),
+                    &attributes(key),
                     KeyringSecret::text(secret.expose()),
                     true,
                 )
@@ -78,11 +77,11 @@ impl SecretStore for KeyringSecretStore {
         })
     }
 
-    fn delete(&self, id: &DriveId) -> Result<(), SecretError> {
+    fn delete(&self, key: &SecretKey) -> Result<(), SecretError> {
         self.runtime.block_on(async {
             let keyring = Keyring::new().await.map_err(|e| unavailable(&e))?;
             keyring
-                .delete(&attributes(id))
+                .delete(&attributes(key))
                 .await
                 .map_err(|e| unavailable(&e))
         })

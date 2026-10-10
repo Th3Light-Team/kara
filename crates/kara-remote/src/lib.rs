@@ -5,6 +5,7 @@
 //!
 //! - [`config`]: the non-secret description of a drive and how it is stored in
 //!   `settings.conf`;
+//! - [`import`]: many drives at once, from a CSV list or an OpenSSH config;
 //! - [`secrets`]: where passwords and passphrases live (the system keyring in
 //!   production, never the settings file);
 //! - [`registry`]: the set of configured drives, their connection state, and the
@@ -14,6 +15,7 @@
 //! scheme. Adding one touches no UI code.
 
 pub mod config;
+pub mod import;
 pub mod registry;
 pub mod secrets;
 
@@ -25,6 +27,6 @@ pub mod memory;
 pub use config::{ConfigError, DriveConfig};
 pub use registry::{
     BackendFactory, ConnectError, ConnectOrRegistryError, ConnectionState, DriveRegistry, Prompt,
-    PromptAnswer, PromptHandler, RefuseAll, RegistryError, Resolver,
+    PromptAnswer, PromptHandler, RefuseAll, RegistryError, Remember, Resolver,
 };
-pub use secrets::{MemorySecretStore, Secret, SecretError, SecretStore};
+pub use secrets::{MemorySecretStore, Secret, SecretError, SecretKey, SecretStore};
