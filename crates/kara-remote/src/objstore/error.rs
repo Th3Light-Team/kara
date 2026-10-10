@@ -57,7 +57,7 @@ impl From<object_store::Error> for Fail {
 }
 
 /// The whole chain of causes of `error`, as text, for classification.
-fn chain_text(error: &(dyn StdError + 'static)) -> String {
+pub(crate) fn chain_text(error: &(dyn StdError + 'static)) -> String {
     let mut text = error.to_string();
     let mut cause = error.source();
     while let Some(inner) = cause {
@@ -120,6 +120,11 @@ pub(crate) fn says_no_space(text: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+/// Whether the text says the service answered 401 or 403.
+pub(crate) fn says_denied(text: &str) -> bool {
+    text.contains("status code: 401") || text.contains("status code: 403")
+}
+
 /// Whether the text says the service answered 5xx (after the client's retries).
 fn says_server_error(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
@@ -140,9 +145,13 @@ pub(crate) fn kind_of(error: &object_store::Error) -> BackendErrorKind {
         }
         E::NotSupported { .. } | E::NotImplemented { .. } => BackendErrorKind::Unsupported,
         other => {
+            // Some requests (listing, bulk delete) wrap every HTTP failure in
+            // `Generic`: the status is only in the text.
             let text = chain_text(other);
             if says_no_space(&text) {
                 BackendErrorKind::NoSpace
+            } else if says_denied(&text) {
+                BackendErrorKind::PermissionDenied
             } else if http_unreachable(other) || says_server_error(&text) {
                 BackendErrorKind::Unavailable
             } else {
@@ -153,6 +162,14 @@ pub(crate) fn kind_of(error: &object_store::Error) -> BackendErrorKind {
 }
 
 impl Fail {
+    /// The text of the failure and all its causes.
+    pub(crate) fn full_text(&self) -> String {
+        match self {
+            Fail::Store(error) => chain_text(error),
+            other => other.to_string(),
+        }
+    }
+
     /// The kind this failure maps to.
     pub(crate) fn kind(&self) -> BackendErrorKind {
         match self {

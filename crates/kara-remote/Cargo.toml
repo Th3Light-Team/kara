@@ -82,3 +82,10 @@ futures = "0.3"
 # The fault-injecting ObjectStore in tests/objstore_support implements an async trait.
 async-trait = "0.1"
 bytes = "1"
+# The hermetic S3 server (tests/s3_mock_support) that the real AWS client talks to:
+# HTTP/1.1 with hyper, SigV4 checked with HMAC-SHA256.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+sha2 = "0.11"
+percent-encoding = "2.3"

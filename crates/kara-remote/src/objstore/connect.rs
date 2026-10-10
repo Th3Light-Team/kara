@@ -169,24 +169,39 @@ pub(crate) fn bucket(config: &DriveConfig) -> Result<String, ConnectError> {
 }
 
 /// Turns a failed first request into the reason the connection failed.
+///
+/// S3 answers 403 both for a wrong key (`SignatureDoesNotMatch`,
+/// `InvalidAccessKeyId`) and for a right key without permission
+/// (`AccessDenied`): only the first is worth asking for the secret again.
 pub(crate) fn connect_error(fail: &Fail) -> ConnectError {
     let text = fail.to_string();
+    let lower = fail.full_text().to_ascii_lowercase();
+    let auth_failed = [
+        "signaturedoesnotmatch",
+        "invalidaccesskeyid",
+        "invalidtoken",
+        "expiredtoken",
+        "invalid_grant",
+        "status code: 401",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
     match fail {
         Fail::Cancelled => return ConnectError::Cancelled,
         Fail::TimedOut => return ConnectError::Unreachable(text),
         Fail::Store(object_store::Error::Unauthenticated { .. }) => return ConnectError::AuthFailed,
-        Fail::Store(object_store::Error::PermissionDenied { .. }) => {
-            // 403 is both «wrong key» and «right key, no permission».
-            let lower = text.to_ascii_lowercase();
-            return if lower.contains("accessdenied") && !lower.contains("signature") {
-                ConnectError::Other(String::from(
-                    "the credentials were accepted but may not list this bucket or prefix",
-                ))
-            } else {
-                ConnectError::AuthFailed
-            };
+        _ if auth_failed => return ConnectError::AuthFailed,
+        _ if lower.contains("accessdenied") => {
+            return ConnectError::Other(String::from(
+                "the credentials were accepted but may not list this bucket or prefix",
+            ));
         }
+        Fail::Store(object_store::Error::PermissionDenied { .. }) => return ConnectError::AuthFailed,
+        _ if lower.contains("status code: 403") => return ConnectError::AuthFailed,
         Fail::Store(object_store::Error::NotFound { .. }) => {
+            return ConnectError::Other(String::from("the bucket does not exist"));
+        }
+        _ if lower.contains("nosuchbucket") => {
             return ConnectError::Other(String::from("the bucket does not exist"));
         }
         _ => {}
