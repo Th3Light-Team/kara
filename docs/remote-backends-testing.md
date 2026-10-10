@@ -217,3 +217,81 @@ keyring; compiled and linted only, see `remote-drives-handoff.md`).
 stores on the group, removing a drive keeps the group's secret, wildcard/negated hosts
 skipped, `ProxyJump` reported, duplicates and bad ports reported, CSV header skipped,
 group name validation and persistence.
+
+## SFTP adapter (step 5)
+
+All hermetic: `cargo test -p kara-remote` (the self dev-dependency enables
+`sftp`). The server is `tests/support/mod.rs`: `russh`'s server with a
+`russh-sftp` handler over a tempdir on `127.0.0.1:<ephemeral>`, answering like
+OpenSSH's `sftp-server` (its `errno` table, `readdir` pages of 100 with `.`/`..`
+and `lstat` attributes, plain `rename` by link + unlink, optional
+`posix-rename`/`fsync`/`hardlink` extensions) with fault injection: delay per
+request, stall, «No space left on device» past an offset, `PERMISSION_DENIED`
+under a prefix, dropping every connection after N bytes written/read, short
+reads, a frozen transport, and a lenient `rename` that replaces.
+
+| File | Tests | What |
+|---|---|---|
+| `sftp_conformance.rs` | 5 | `conformance::run` + `run_extra`: with and without posix-rename/fsync, strerror messages, under `root`; capabilities follow the probe |
+| `sftp_differential_local.rs` | 4 | the kara-fs generator against SftpBackend and LocalBackend (no links, links down, links anywhere without renames, no posix-rename); 40 seeds × 100 ops each by default, **400 seeds passed once** |
+| `sftp_auth.rs` | 15 | password ok / wrong (`AuthFailed`) / missing (`AuthRequired`), key file, unknown key, encrypted key with/without/wrong passphrase, `~/` expansion, absent agent, agent key, agent limited to `key_file`, registry password prompt, unreachable, connect timeout, connect cancel, no secret in errors or `Debug` |
+| `sftp_agent_env.rs` | 1 | `$SSH_AUTH_SOCK` dangling and live (own file: changes the environment) |
+| `sftp_host_keys.rs` | 10 | unknown → prompt → remembered (0600 file, 0700 folder) → silent; append keeps lines and modes; refusal writes nothing; trust once; changed key refused, file untouched (bytes and mtime) even on «trust and remember»; hashed entries; port-22 entry vs `[host]:port`; `@revoked`; prompts through the registry; parser patterns |
+| `sftp_failures.rs` | 16 | drop mid-write (no final name), abort/drop remove the temporary, drop mid-read → `Unavailable` naming the file, stall → timeout in < 2.5 s, every call `Unavailable` at once after loss, keepalive, full disk → `NoSpace`, denied → `PermissionDenied` without server paths, errors never name the temporary, read-only not replaced, offset reads, short reads, `remove_tree` and links, cancel of list / `remove_tree`, links listed like LocalBackend |
+| `sftp_cancel_in_flight.rs` | 1 | a cancel during one slow `readdir` page |
+| `sftp_lenient_rename.rs` | 3 | a server whose plain rename replaces: `rename` and `finish(replace=false)` still refuse; conformance |
+| `sftp_with_ops.rs` | 6 | `report_failure` → `Lost` → reconnect → `Ready`; kara-ops copy folder up and down, move up, cancel an upload (no file, no temporary), connection lost mid-move (`MediaGone`, source kept), group secret |
+| `sftp_source_rules.rs` | 4 | no `unwrap`/`expect`/panicking macros, no printing/logging in `src/sftp`; `Secret::expose` only in `connect.rs` (twice) |
+| `sftp_real_server.rs` | 1 (ignored) | conformance against a real sshd: `KARA_TEST_SFTP="host:port,user,keyfile"` |
+
+The differential test found one bug before the mutation pass: without
+posix-rename, replacing a file whose path went through the link being replaced
+(`/a/a` with `/a -> .`) removed the link and then could not find the temporary.
+`begin_write` now resolves the target directory once (`realpath`).
+
+### Mutation pass
+
+Same method as above, over `crates/kara-remote/src/sftp/` (harness: apply one
+edit, run the named test files, `git checkout` + `touch`). 32 mutations: 30
+caught at once, 1 survived and is caught now, 1 equivalent.
+
+| # | Invariant | Mutation | Caught by |
+|---|---|---|---|
+| S01 | `replace=false` never overwrites | `io.rs` no-replace commit uses posix-rename, no existence check | `finish_without_replace_refuses_a_target_that_appeared_meanwhile`, conformance `replace_false_race_at_finish` (4 suites) |
+| S02 | `abort` removes the temporary | the `remove` of the temporary skipped | `abort_and_drop_remove_the_temporary_on_the_server`, `a_full_disk_…`, conformance |
+| S03 | `Drop` removes the temporary | `Drop` does nothing | `abort_and_drop_…`, conformance `drop_leaves_nothing` |
+| S04 | `finish` renames only after every write was acknowledged | in-flight writes dropped instead of awaited | `a_full_disk_is_no_space_and_leaves_nothing_behind`, `errors_never_name_the_temporary_or_the_server_path` |
+| S05 | `finish` sends the buffered tail | tail never sent | conformance (content) |
+| S06 | `error.path` is the caller's path | a write failure names `/` | `a_connection_dropped_mid_write_…`, `a_full_disk_…`, `errors_never_name_…` |
+| S07 | a changed host key is never trusted silently | `Changed` counts as trusted | `a_changed_key_is_refused_by_default_…`, `a_hashed_entry_…` |
+| S08 | `known_hosts` is never rewritten for a changed key | append on «trust and remember» of a changed key | `a_changed_key_is_refused_by_default_and_the_file_is_untouched` |
+| S09 | a refusal writes nothing | append on `Refuse` | `refusing_an_unknown_key_…`, `a_changed_key_…` |
+| S10 | reads start at the offset | reader starts at 0 | `offset_reads_start_exactly_there`, conformance `read_offsets` |
+| S11 | a short read is asked again from where it ended | offset not reset after a short read | `a_short_read_from_the_server_does_not_lose_or_repeat_bytes` |
+| S12 | `remove_tree` never follows links | child type from `stat` (follows) | `remove_tree_removes_links_and_never_what_they_point_to` |
+| S13 | cancel stops a listing during a page | `readdir` waited with a fresh token | **survived** (the per-page check still cancelled) → `sftp_cancel_in_flight.rs` |
+| S14 | cancel stops `remove_tree` per entry | per-entry check removed | `cancel_stops_remove_tree_midway` |
+| S15 | cancel stops a connect | the connect never watches the token | `cancel_stops_a_connect_promptly` |
+| S16 | a lost session is `Unavailable` | `Lost` → `Other` | 6 tests (`…mid_read…`, `…mid_write…`, `a_lost_drive_is_reported_…`, `…media_gone…`, keepalive) |
+| S17 | capabilities never change after connect | `atomic_rename` follows the connection | `after_the_connection_is_gone_every_call_is_unavailable_at_once` |
+| S18 | keepalive closes a silent session | no keepalive | `keepalive_notices_a_silent_server_without_any_call` |
+| S19 | the per-request timeout answers | request timeout 600 s (only the outer 3 s net left) | `a_stalled_server_times_out_instead_of_hanging` |
+| S20 | no secret in errors | a rejected password is echoed in `ConnectError::Other` | `no_secret_shows_in_errors_or_debug_output`, `the_secret_is_exposed_only_where_…` (+2) |
+| S21 | `create_dir` onto something is `AlreadyExists` | the look after `FAILURE` removed | conformance `create_dir_existing` |
+| S22 | `rename` never overwrites | the `lstat(to)` check removed | `rename_refuses_an_existing_target_even_if_the_server_would_replace_it` (OpenSSH's rename refuses by itself) |
+| S23 | no directory into its own subtree | check → `false` | differential (3 tests). Conformance alone does not catch it: rename(2) refuses with `EINVAL`, which maps to the same `Other` naming `to` |
+| S24 | `open_read` past the end fails at open | size check disabled | conformance `read_offsets` |
+| S25 | a half-written file is never under its final name | temporary name = final name | conformance `invisible_before_finish` |
+| S26 | a directory is never written over | `is_dir` check removed | conformance `write_onto_directory` |
+| S27 | `FAILURE` with disk-full text is `NoSpace` | text match disabled | `a_full_disk_is_no_space_and_leaves_nothing_behind` |
+| S28 | «trust once» is not written down | append whatever `remember` says | `trust_once_is_kept_for_the_run_but_not_written` |
+| S29 | a dead connection answers at once | `is_closed` short-circuit removed | **equivalent**: a request on a closed channel fails at once anyway («session closed») |
+| S30 | the write directory is resolved once | `realpath` result ignored | differential, without posix-rename |
+| S31 | `list` of a file is `Other` | the follow-up `stat` ignored | conformance `list_file_is_error` |
+| S32 | with `key_file` only that agent identity is offered | filter disabled | `with_a_key_file_the_agent_only_offers_that_key` |
+
+Not tested here: a real OpenSSH server (and its `realpath`, which may differ on
+missing final components), latency and throughput over a real link, servers
+speaking SFTP v4+ (status codes above 8, e.g. `FILE_ALREADY_EXISTS`, which
+`russh-sftp` cannot decode), keyboard-interactive auth (not implemented), and
+non-UTF-8 names (`russh-sftp` decodes them lossily).
