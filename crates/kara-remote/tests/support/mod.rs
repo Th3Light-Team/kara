@@ -122,6 +122,9 @@ pub struct ServerOptions {
     pub fsync: bool,
     /// `FAILURE` messages carry `strerror` text instead of OpenSSH's «Failure».
     pub strerror_messages: bool,
+    /// Plain `SSH_FXP_RENAME` is rename(2) and replaces an existing file, as
+    /// some non-OpenSSH servers do.
+    pub rename_overwrites: bool,
 }
 
 impl Default for ServerOptions {
@@ -134,6 +137,7 @@ impl Default for ServerOptions {
             posix_rename: true,
             fsync: true,
             strerror_messages: false,
+            rename_overwrites: false,
         }
     }
 }
@@ -844,7 +848,11 @@ impl russh_sftp::server::Handler for SftpHandler {
             renames.push((self.normal(&oldpath), self.normal(&newpath)));
         }
         let (old, new) = (self.local(&oldpath), self.local(&newpath));
-        self.rename_like_openssh(&old, &new).map_err(|e| self.status(&e))?;
+        if self.options.rename_overwrites {
+            fs::rename(&old, &new).map_err(|e| self.status(&e))?;
+        } else {
+            self.rename_like_openssh(&old, &new).map_err(|e| self.status(&e))?;
+        }
         Ok(ok(id))
     }
 

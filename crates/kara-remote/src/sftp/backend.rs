@@ -266,13 +266,13 @@ impl SftpBackend {
         }
     }
 
+    /// Creates the hidden temporary in the server directory `dir_sp`.
     fn create_temp(
         &self,
         target: &RemotePath,
+        dir_sp: &str,
         name: &str,
     ) -> Result<(String, String), BackendError> {
-        let dir = target.parent().unwrap_or_else(RemotePath::root);
-        let dir_sp = self.sp(&dir);
         let mut last = None;
         for _ in 0..TEMP_ATTEMPTS {
             let temp = temp_name(name);
@@ -444,12 +444,25 @@ impl Backend for SftpBackend {
             Err(fail) if fail.kind() == BackendErrorKind::NotFound => {}
             Err(fail) => return Err(self.create_error(fail, path)),
         }
-        let (temp, handle) = self.create_temp(path, name)?;
+        // The directory is resolved once, here, as LocalBackend opens it once:
+        // the file lands where the path led at begin_write, even if a link on
+        // the way is replaced meanwhile (by this very write, too).
+        let parent = path.parent().unwrap_or_else(RemotePath::root);
+        let dir_sp = self
+            .session
+            .realpath(&self.sp(&parent))
+            .map_err(|fail| self.create_error(fail, path))?;
+        let destination = if dir_sp == "/" {
+            format!("/{name}")
+        } else {
+            format!("{dir_sp}/{name}")
+        };
+        let (temp, handle) = self.create_temp(path, &dir_sp, name)?;
         Ok(Box::new(SftpWriteSession::new(
             Arc::clone(&self.session),
             path.clone(),
             temp,
-            self.sp(path),
+            destination,
             handle,
             replace,
         )))

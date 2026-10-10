@@ -125,7 +125,8 @@ fn a_stalled_server_times_out_instead_of_hanging() -> io::Result<()> {
     fixture.server.faults.stall.store(false, Ordering::SeqCst);
     assert_eq!(error.kind, BackendErrorKind::Unavailable);
     assert_eq!(error.path, Some(path));
-    assert!(took < Duration::from_secs(4), "took {took:?}");
+    // The per-request timeout (1 s) answers, not the outer safety net (3 s).
+    assert!(took < Duration::from_millis(2500), "took {took:?}");
     assert!(took >= Duration::from_millis(900), "answered before the timeout: {took:?}");
     Ok(())
 }
