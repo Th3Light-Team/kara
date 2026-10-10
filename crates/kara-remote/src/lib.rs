@@ -12,7 +12,8 @@
 //!   resolver `kara-ops` uses to turn a drive id into a live backend.
 //!
 //! A protocol (SFTP, S3) is a [`registry::BackendFactory`] registered under its
-//! scheme. Adding one touches no UI code. SFTP lives in `sftp` (feature `sftp`).
+//! scheme. Adding one touches no UI code. SFTP lives in `sftp` (feature `sftp`);
+//! S3 and Google Cloud Storage in `objstore` (features `s3`, `gcs`).
 
 pub mod config;
 pub mod import;
@@ -23,6 +24,8 @@ pub mod secrets;
 pub mod keyring;
 #[cfg(feature = "memory")]
 pub mod memory;
+#[cfg(feature = "objectstore")]
+pub mod objstore;
 #[cfg(feature = "sftp")]
 pub mod sftp;
 
