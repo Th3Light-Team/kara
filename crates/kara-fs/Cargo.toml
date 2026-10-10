@@ -11,6 +11,7 @@ repository.workspace = true
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 kara-core.workspace = true
+kara-vfs.workspace = true
 md-5 = "0.11.0"
 percent-encoding = "2.3.2"
 png = "0.18.1"
@@ -26,6 +27,7 @@ collapsible_if = "allow"
 cloned_ref_to_slice_refs = "allow"
 
 [dev-dependencies]
+kara-vfs = { workspace = true, features = ["conformance", "memory"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 png = "0.18.1"
 tempfile = "3.27.0"
