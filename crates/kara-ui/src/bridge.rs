@@ -675,6 +675,36 @@ fn read_folder(path: &Path) -> Result<Loaded, String> {
     })
 }
 
+/// Remote items put on the clipboard inside Kara.
+#[derive(Clone)]
+struct RemoteClip {
+    paths: Vec<PathBuf>,
+    cut: bool,
+    /// The desktop clipboard's file list at that moment; a different one
+    /// means something else was copied since.
+    snapshot: String,
+}
+
+/// Finds the backends of the drives in the registry.
+fn drive_resolver() -> kara_ops::BackendResolver {
+    crate::drives::registry().resolver()
+}
+
+/// A copy, move or delete between `sources` and `destination`, local or
+/// remote (remote items are `kara+…` addresses in the `PathBuf`s).
+fn location_request(
+    op: kara_ops::runner::Op,
+    sources: &[PathBuf],
+    destination: &Path,
+) -> kara_ops::LocationRequest {
+    kara_ops::LocationRequest {
+        op,
+        sources: sources.iter().map(|path| kara_ops::parse_display_path(path)).collect(),
+        dest_dir: kara_ops::parse_display_path(destination),
+        confirmed_permanent: op == kara_ops::runner::Op::Delete,
+    }
+}
+
 /// `name` inside `folder`, local or remote.
 fn child_path(folder: &Path, name: &str) -> PathBuf {
     crate::remote_nav::child(folder, name).unwrap_or_else(|| folder.join(name))
@@ -879,6 +909,8 @@ pub struct AppRust {
     /// Si el portapapeles hay que vaciarlo cuando el trabajo acabe: un corte es
     /// de un solo uso.
     paste_clears_clipboard: bool,
+    /// Remote items copied or cut in Kara (the desktop clipboard cannot hold them).
+    remote_clip: Option<RemoteClip>,
     view_mode: i32,
     icon_size: i32,
     can_zoom_out: bool,
@@ -1078,6 +1110,7 @@ impl Default for AppRust {
             paste_clock: Instant::now(),
             paste_destination: PathBuf::new(),
             paste_clears_clipboard: false,
+            remote_clip: None,
             // Del fichero de ajustes, no de la constante: el modo que el
             // usuario dejó puesto tiene que estar aplicado ya en el primer
             // fotograma. `render` lo restaura al navegar, pero al arrancar
@@ -2912,9 +2945,32 @@ impl qobject::App {
     /// Ninguna operación puede fallar en silencio: es una regla del proyecto, y
     /// una carpeta que no se crea sin decir por qué es indistinguible de un
     /// clic que no llegó.
-    /// File actions on a remote folder are not wired yet: say so instead of
+    /// Runs a blocking rename / new-folder on a worker, records its undo
+    /// action and reloads the folder, or reports `failure` with the reason.
+    fn run_location_op(
+        mut self: Pin<&mut Self>,
+        work: impl FnOnce(
+                &kara_ops::BackendResolver,
+            ) -> Result<(kara_vfs::Location, Action), kara_ops::LocationOpError>
+            + Send
+            + 'static,
+        failure: &'static str,
+    ) {
+        self.as_mut().clear_error();
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let result = work(&drive_resolver());
+            let _ = thread.queue(move |mut app| match result {
+                Ok((_, action)) => app.as_mut().record(action),
+                Err(error) => app.as_mut().report(&format!("{failure}: {error}")),
+            });
+        });
+    }
+
+    /// File actions that still need a local folder: say so instead of
     /// letting a `kara+…` address be taken for a local path.
     fn remote_blocked(mut self: Pin<&mut Self>) -> bool {
+        // Properties and the terminal need a local folder.
         let current = PathBuf::from(self.path().to_string());
         if !crate::remote_nav::is_remote(&current) {
             return false;
@@ -2944,7 +3000,7 @@ impl qobject::App {
     fn undo(mut self: Pin<&mut Self>) {
         // Un deshacer que falla no pierde el registro: `UndoStack` devuelve la
         // acción a la pila, así que aquí basta con contarlo y no refrescar.
-        if let Err(error) = self.as_mut().rust_mut().get_mut().undo.undo() {
+        if let Err(error) = self.as_mut().rust_mut().get_mut().undo.undo_with(&drive_resolver()) {
             self.as_mut().report(&format!("No se pudo deshacer: {error}"));
             return;
         }
@@ -2955,7 +3011,7 @@ impl qobject::App {
     }
 
     fn redo(mut self: Pin<&mut Self>) {
-        if let Err(error) = self.as_mut().rust_mut().get_mut().undo.redo() {
+        if let Err(error) = self.as_mut().rust_mut().get_mut().undo.redo_with(&drive_resolver()) {
             self.as_mut().report(&format!("No se pudo rehacer: {error}"));
             return;
         }
@@ -2966,11 +3022,17 @@ impl qobject::App {
     }
 
     fn create_folder(mut self: Pin<&mut Self>, name: &QString) -> QString {
-        if self.as_mut().remote_blocked() {
-            return QString::default();
-        }
         let parent = PathBuf::from(self.path().to_string());
         let name = name.to_string();
+        if crate::remote_nav::is_remote(&parent) {
+            // A network round trip: on a worker. The new name is not known
+            // here, so the inline editor does not open.
+            let location = kara_ops::parse_display_path(&parent);
+            self.as_mut().run_location_op(move |resolver| {
+                kara_ops::create_dir_at(&location, &name, resolver)
+            }, "No se pudo crear la carpeta");
+            return QString::default();
+        }
 
         // `KeepBoth`: crear «Nueva carpeta» cuando ya hay una da «Nueva carpeta
         // (2)», como el Explorador. Fallar obligaría al usuario a inventar un
@@ -3003,7 +3065,7 @@ impl qobject::App {
             .selected()
             .iter()
             .filter_map(|index| state.view().visible.get(*index))
-            .map(|entry| current.join(&entry.name))
+            .map(|entry| child_path(&current, &entry.name.to_string_lossy()))
             .collect()
     }
 
@@ -3012,6 +3074,16 @@ impl qobject::App {
         if paths.is_empty() {
             return;
         }
+        let current = PathBuf::from(self.path().to_string());
+        if crate::remote_nav::is_remote(&current) {
+            let cut = action == kara_fs::clipboard::ClipboardAction::Cut;
+            let snapshot = clipboard_uri_list();
+            self.as_mut().rust_mut().get_mut().remote_clip =
+                Some(RemoteClip { paths, cut, snapshot });
+            self.as_mut().clear_error();
+            return;
+        }
+        self.as_mut().rust_mut().get_mut().remote_clip = None;
 
         let state = match action {
             kara_fs::clipboard::ClipboardAction::Cut => {
@@ -3031,25 +3103,16 @@ impl qobject::App {
     }
 
     fn copy_selection(mut self: Pin<&mut Self>) {
-        if self.as_mut().remote_blocked() {
-            return;
-        }
         self.as_mut()
             .put_on_clipboard(kara_fs::clipboard::ClipboardAction::Copy);
     }
 
     fn cut_selection(mut self: Pin<&mut Self>) {
-        if self.as_mut().remote_blocked() {
-            return;
-        }
         self.as_mut()
             .put_on_clipboard(kara_fs::clipboard::ClipboardAction::Cut);
     }
 
     fn paste(mut self: Pin<&mut Self>) {
-        if self.as_mut().remote_blocked() {
-            return;
-        }
         // Un trabajo a la vez: pegar mientras otro corre mezclaría dos
         // diálogos sobre las mismas propiedades.
         if self.rust().paste_job.is_some() {
@@ -3068,8 +3131,23 @@ impl qobject::App {
             gnome_copied_files: (!gnome.is_empty()).then_some(gnome.as_bytes()),
             kde_cut_selection: Some(kde.as_bytes()),
         };
-        let Some(state) = kara_fs::clipboard::parse(formats) else {
-            return;
+        // Remote items cannot ride the desktop clipboard (no `file://` for
+        // them): Kara keeps them itself, valid while the desktop clipboard is
+        // still what it was when they were copied.
+        let internal = self
+            .rust()
+            .remote_clip
+            .clone()
+            .filter(|clip| clip.snapshot == uri_list);
+        let state = match internal {
+            Some(clip) if clip.cut => kara_fs::clipboard::ClipboardState::cut(clip.paths),
+            Some(clip) => kara_fs::clipboard::ClipboardState::copy(clip.paths),
+            None => {
+                let Some(state) = kara_fs::clipboard::parse(formats) else {
+                    return;
+                };
+                state
+            }
         };
 
         let destination = PathBuf::from(self.path().to_string());
@@ -3078,24 +3156,27 @@ impl qobject::App {
         } else {
             kara_ops::runner::Op::Copy
         };
-        let request = kara_ops::runner::Request {
-            op,
-            sources: state.paths.clone(),
-            dest_dir: destination,
-        };
+        let request = location_request(op, &state.paths, &destination);
         let clears = state.after_paste().is_none();
         self.start_job(request, clears);
     }
 
     /// Arranca un trabajo de copiar, mover o eliminar en su hilo.
-    fn start_job(mut self: Pin<&mut Self>, request: kara_ops::runner::Request, clears: bool) {
+    fn start_job(mut self: Pin<&mut Self>, request: kara_ops::LocationRequest, clears: bool) {
         let op = request.op;
-        let destination = request.dest_dir.clone();
+        let destination = kara_ops::display_path(&request.dest_dir);
         let thread = self.qt_thread();
-        let handle = kara_ops::runner::spawn(request, move |event| {
+        let spawned = kara_ops::runner::spawn_with(request, drive_resolver(), move |event| {
             // Si el objeto ya no está, la ventana se cerró y nadie espera nada.
             let _ = thread.queue(move |app| app.on_paste_event(event));
         });
+        let handle = match spawned {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.as_mut().report(&format!("No se pudo empezar: {error}"));
+                return;
+            }
+        };
 
         self.as_mut().clear_error();
         let title = format!("{}…", op.gerund());
@@ -3274,9 +3355,6 @@ impl qobject::App {
     }
 
     fn request_permanent_delete(mut self: Pin<&mut Self>) {
-        if self.as_mut().remote_blocked() {
-            return;
-        }
         if *self.in_trash() {
             self.as_mut()
                 .report("Dentro de la papelera, lo definitivo es «Vaciar la papelera».");
@@ -3294,13 +3372,15 @@ impl qobject::App {
 
         // La pregunta dice cuántos y, si es uno, cuál: es lo que impide un
         // borrado masivo por un Shift+Supr con la selección equivocada.
+        let remote = crate::remote_nav::is_remote(&PathBuf::from(self.path().to_string()));
+        let note = if remote { "\nLa unidad remota no tiene papelera." } else { "" };
         let text = match paths.as_slice() {
             [one] => format!(
-                "¿Eliminar permanentemente «{}»?\nEsta acción no se puede deshacer.",
+                "¿Eliminar permanentemente «{}»?\nEsta acción no se puede deshacer.{note}",
                 one.file_name().map_or_else(|| one.display().to_string(), |n| n.to_string_lossy().into_owned())
             ),
             many => format!(
-                "¿Eliminar permanentemente estos {} elementos?\nEsta acción no se puede deshacer.",
+                "¿Eliminar permanentemente estos {} elementos?\nEsta acción no se puede deshacer.{note}",
                 many.len()
             ),
         };
@@ -3315,11 +3395,8 @@ impl qobject::App {
         if paths.is_empty() {
             return;
         }
-        let request = kara_ops::runner::Request {
-            op: kara_ops::runner::Op::Delete,
-            sources: paths,
-            dest_dir: PathBuf::from(self.path().to_string()),
-        };
+        let destination = PathBuf::from(self.path().to_string());
+        let request = location_request(kara_ops::runner::Op::Delete, &paths, &destination);
         self.start_job(request, false);
     }
 
@@ -3822,10 +3899,12 @@ impl qobject::App {
     }
 
     fn trash_selected(mut self: Pin<&mut Self>) {
-        if self.as_mut().remote_blocked() {
+        let current = PathBuf::from(self.path().to_string());
+        if crate::remote_nav::is_remote(&current) {
+            // A remote drive has no trash: deleting is permanent, so it asks.
+            self.as_mut().request_permanent_delete();
             return;
         }
-        let current = PathBuf::from(self.path().to_string());
         let victims: Vec<PathBuf> = {
             let state = self.rust();
             state
@@ -3885,14 +3964,18 @@ impl qobject::App {
     }
 
     fn rename_entry(mut self: Pin<&mut Self>, from: &QString, to: &QString) {
-        if self.as_mut().remote_blocked() {
-            return;
-        }
         let parent = PathBuf::from(self.path().to_string());
-        let source = parent.join(from.to_string());
+        let source = child_path(&parent, &from.to_string());
         let target = to.to_string();
 
         if target.is_empty() || target == from.to_string() {
+            return;
+        }
+        if crate::remote_nav::is_remote(&parent) {
+            let location = kara_ops::parse_display_path(&source);
+            self.as_mut().run_location_op(move |resolver| {
+                kara_ops::rename_at(&location, &target, resolver)
+            }, "No se pudo renombrar");
             return;
         }
 
@@ -4206,6 +4289,11 @@ impl qobject::App {
     /// ya demostró que la carpeta responde, y quien llama necesita ver el
     /// resultado ya (el editor de renombrado busca la entrada recién creada).
     fn render_fresh(mut self: Pin<&mut Self>, target: &Path) -> bool {
+        // A remote folder is never read on the UI thread.
+        if crate::remote_nav::is_remote(target) && !*self.in_trash() {
+            self.as_mut().request_listing(target.to_path_buf(), Commit::Reload);
+            return false;
+        }
         if !*self.in_trash() {
             let Ok(loaded) = read_folder(target) else {
                 return false;
@@ -4358,6 +4446,9 @@ impl qobject::App {
     /// `TrashPolicy::default()` deja el desfase horario a cero y estampa el
     /// `.trashinfo` en UTC, que no falla en ninguna parte y corre la fecha.
     fn trash(mut self: Pin<&mut Self>, name: &QString) {
+        if self.as_mut().remote_blocked() {
+            return;
+        }
         let current = PathBuf::from(self.path().to_string());
         let victim = current.join(name.to_string());
         match kara_fs::trash::trash_one(&victim, &kara_ops::trash_policy()) {
