@@ -1,0 +1,29 @@
+[package]
+name = "kara-remote"
+description = "Remote drives for Kara: configuration, secret storage, connection state and the registry that serves backends to kara-ops. Protocol adapters (SFTP, S3) plug in as factories."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kara-fs.workspace = true
+kara-vfs.workspace = true
+oo7 = { version = "0.6.0", optional = true }
+# Drives a private current-thread runtime for the async keyring client.
+tokio = { version = "1", default-features = false, features = ["rt"], optional = true }
+thiserror = "2.0.20"
+
+[features]
+default = []
+# An in-memory drive kind ("mem"), for tests and demos.
+memory = ["kara-vfs/memory"]
+# System keyring (Secret Service, or the sandbox portal file) through oo7.
+keyring = ["dep:oo7", "dep:tokio"]
+
+[dev-dependencies]
+kara-remote = { path = ".", features = ["memory"] }
+kara-ops.workspace = true
+kara-vfs = { workspace = true, features = ["memory", "conformance"] }
+tempfile = "3.27.0"
