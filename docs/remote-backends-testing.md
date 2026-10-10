@@ -209,3 +209,11 @@ drops the backend of a non-`Ready` drive).
 
 Not testable here: `KeyringSecretStore` (needs a session bus and an unlocked
 keyring; compiled and linted only, see `remote-drives-handoff.md`).
+
+### Groups and import (11 more mutations)
+
+10 caught, 1 equivalent (a `Match` block cannot leak into the next drive because
+`finish` already resets the block). Covered: own secret beats group secret, `ForGroup`
+stores on the group, removing a drive keeps the group's secret, wildcard/negated hosts
+skipped, `ProxyJump` reported, duplicates and bad ports reported, CSV header skipped,
+group name validation and persistence.

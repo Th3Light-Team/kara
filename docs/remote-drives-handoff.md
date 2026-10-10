@@ -13,7 +13,7 @@ Job API for the UI: `remote-ops-integration.md`.
 | 1 | `kara-vfs` | `Location`, `RemotePath`, `DriveId`, `Backend`, `WriteSession`, errors, `Capabilities`, `MemoryBackend`, conformance suite |
 | 2 | `kara-fs` | `LocalBackend` (fd-based delete, temp-file + atomic rename, parent fsync) |
 | 3 | `kara-ops` | `LocationRequest`, `spawn_with`, streaming copy/move with size check, remote delete (confirmed), undo rules |
-| 4 | `kara-remote` | `DriveConfig` <-> `settings.conf`, `SecretStore` (+ `oo7` keyring), `DriveRegistry`, `BackendFactory`, prompts |
+| 4 | `kara-remote` | `DriveConfig` <-> `settings.conf`, `SecretStore` (+ `oo7` keyring), groups with shared secrets, CSV / `ssh_config` import, `DriveRegistry`, `BackendFactory`, prompts |
 
 ### `kara-remote` in one page
 
@@ -29,12 +29,73 @@ Job API for the UI: `remote-ops-integration.md`.
   (blocking, worker thread) · `disconnect` · `report_failure(id, &BackendError)`
   (an `Unavailable` marks the drive `Lost`) · `state` · `subscribe` ·
   `resolver()` (same type as `kara_ops::BackendResolver`; resolves only while `Ready`).
+- Groups: `DriveConfig::with_group`; a group can share one secret (`Remember::ForGroup`,
+  `remember_group_secret`); a drive's own secret wins over its group's; removing a
+  drive leaves the group's secret for the others; `registry.groups()` lists members.
+- Bulk add: `import::from_csv(text, scheme, default_group)` (`name,host[,user[,port[,key_file[,label[,group]]]]]`)
+  and `import::from_ssh_config(text, scheme, group)` (concrete `Host` entries; wildcards,
+  `Match`, `Include` skipped; `ProxyJump`/`ProxyCommand` hosts reported, not imported).
+  Both return `ImportReport { drives, problems }`: a bad line never hides the good ones.
 - States: `Disconnected → Connecting → Ready | Failed{reason}`, `Ready → Lost{reason}`.
 - Prompts (`Prompt`): `Password`, `TrustHostKey`, `HostKeyChanged`. The registry
   asks for the password itself (up to 3 attempts; the secret is stored only after
   a connection with it worked and only if the user asked). Host-key prompts are
   asked by the factory through the same handler. The backend never draws a dialog.
 - `--features memory` adds drive kind `mem` (`MemoryFactory`) for tests and demos.
+
+## Use case: a Proxmox fleet of LXC containers
+
+Goal: give an IP and credentials (password or key) and browse the container; do it
+for dozens of containers without a form each. Two ways in, both over SFTP:
+
+- **Per container**: `sftp` drive with `host`, `user`, `port`, `key_file` or a
+  password. Needs `sshd` with the SFTP subsystem inside the container
+  (`openssh-server`, on Debian/Ubuntu `openssh-sftp-server`) and, for root with a
+  password, `PermitRootLogin yes`; not verified against Proxmox's own templates.
+- **Through the node**: one `sftp` drive to the Proxmox host as root; running
+  containers show up under `/var/lib/lxc/<vmid>/rootfs`. Unprivileged containers show
+  shifted uids (100000+); ZFS/LVM rootfs must be mounted. No change to the containers.
+
+Built for it: groups with one shared secret, CSV and `ssh_config` import, lazy
+connection (`add` never connects; `connect` is per drive, on demand).
+
+Not built, with the reason:
+
+| Missing | Why / what it needs |
+|---|---|
+| Discovery through the Proxmox API (list containers and their IPs with an API token) | Needs an HTTPS/JSON client; none is in the dependency set yet (`ureq` or `reqwest` would be the first). Produces `DriveConfig`s; nothing else changes. |
+| «Connect the whole group» with a concurrency limit | Trivial on top of `connect` (worker pool, N at a time); wait for the UI to know what it wants to show while 50 drives connect. |
+| Bulk trust of host keys | Deliberately absent. Trusting 50 unknown keys in one click defeats the check. Proposal: one prompt per drive, plus an explicit «trust all keys in this import» that lists the fingerprints and is off by default. Decide with SFTP (step 5). |
+| Per-group parameters (same user/key for every member) | The CSV/ssh_config columns cover it today; a group-level default param set would be a small addition to `DriveConfig`. |
+| Incus/LXD file API adapter (no `sshd` needed) | A second `BackendFactory` (scheme `incus`); see below. |
+
+### Incus / LXD adapter (optional, after SFTP)
+
+REST file API over the unix socket or HTTPS with a client certificate:
+`GET /1.0/instances/<name>/files?path=` (list a directory, read a file),
+`POST` with `X-LXD-type: file|directory` and mode/uid/gid headers (write, mkdir),
+`DELETE`. Capabilities: no atomic rename (copy + delete), no server-side copy,
+POSIX permissions and symlinks yes. It would need the owner decision on preserving
+mode/uid/gid (open decision 4 below) to be useful, since the API takes them on write.
+
+## Stack and environment limits met so far
+
+- **No Qt** in the cloud container: nothing under `kara-ui` builds, so the panel,
+  the dialogs and the bridge are written from the specs in this file and
+  `remote-ops-integration.md`, untested.
+- **No `ssh`/`sshd` binaries** and an empty apt index: the SFTP adapter cannot be
+  conformance-tested against OpenSSH here. Plan: `russh` also ships a server; an
+  in-process `russh` + `russh-sftp` server on `127.0.0.1` over a tempdir gives a
+  hermetic test (auth, host keys, the conformance suite), with a real `sshd`
+  container as the second, ignored-by-default check.
+- **No session bus / keyring**: `KeyringSecretStore` is compiled and linted only.
+- **`oo7` is heavy**: with it the lockfile grows by ~750 lines (zbus, ashpd, crypto).
+  It is behind `--features keyring`, but Cargo.lock lists it either way.
+- **Async crates under a blocking trait**: `oo7`, and later `russh-sftp` and
+  `object_store`, are async. Each adapter owns a private current-thread runtime and
+  blocks on it; nothing async leaks into `kara-vfs`, `kara-ops` or the UI.
+- **Root and no tmpfs** in the container make 19 older `kara-fs` tests fail
+  (`known-test-failures.md`).
 
 ## Left: step 4, UI side (needs Qt)
 
