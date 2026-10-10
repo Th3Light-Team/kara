@@ -11,6 +11,10 @@
 
 pub mod trash;
 
+pub mod backend;
+
+pub use backend::{LocalBackend, LocalPathError};
+
 pub mod clipboard;
 
 pub mod listing;
@@ -18,8 +22,6 @@ pub mod listing;
 pub mod icons;
 
 pub mod mime;
-
-pub mod open;
 
 pub mod places;
 

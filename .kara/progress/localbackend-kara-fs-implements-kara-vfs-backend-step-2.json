@@ -1,0 +1,521 @@
+{
+  "conveniencia": "LocalBackend: kara-fs implements kara_vfs::Backend (step 2)",
+  "crate": "kara-fs",
+  "slug": "localbackend-kara-fs-implements-kara-vfs-backend-step-2",
+  "estado": "pruebas_listas",
+  "contrato": {
+    "resumen": "Step 2 of docs/remote-backends.md: kara-fs gains LocalBackend, the existing local filesystem code behind kara_vfs::Backend, and it passes the generic conformance suite. It reuses describe (listing), rename_noreplace (trash) and delete_permanently (trash) instead of re-implementing them; writes go to a hidden same-directory temp file that is fsynced and renamed (no-replace via renameat2). It adds the lexical mapping between local paths and RemotePath that step 3 needs for Location::Local. No existing public function, test or crate other than kara-fs changes.",
+    "fuente": {
+      "documento": "docs/remote-backends.md",
+      "seccion": "Order of work, step 2 (l. 170): «`LocalBackend` in `kara-fs`, passing the suite. Existing tests untouched.» — plus «Where it goes» (l. 25: «Gains `LocalBackend`: the existing code behind the trait. Public functions stay.»), `Backend` (l. 48-83), Errors (l. 85-92), Capabilities (l. 94-108), Transfers (l. 112-121), Conformance suite (l. 150-165)",
+      "encontradaConTituloExacto": false,
+      "notaBusqueda": "No heading has the exact title; it is Order of work item 2. ground/spec/ has no convenience of its own for a backend layer; the behaviour is grounded in 05-operaciones (progreso/cancelar, conflictos, errores, eliminación permanente), 00-filosofia and in the step-1 contract (.kara/progress/remote-backend-contract-kara-vfs-foundation-location-remotep.json), whose edge cases LocalBackend must match because the suite and kara-ops treat all backends alike.",
+      "contratoPrevio": "remote-backend-contract-kara-vfs-foundation-location-remotep (kara-vfs implemented at 029f06d)"
+    },
+    "decisionesDeArquitecto": [
+      {
+        "id": "dec_01",
+        "tema": "Trash on a trait that has no trash method",
+        "conflicto": "The table's `trash` flag drives Supr (l. 101), but the trait defines no trash operation; step-1 left it to step 2.",
+        "decision": "capabilities().trash = true and NO trait method is added (kara-vfs is not modified). For a Local location kara-ops routes Delete to kara_fs::trash::trash_one(backend.to_local(p)). remove/remove_tree are the permanent primitives only. Declaring false would make the UI offer permanent delete for local files."
+      },
+      {
+        "id": "dec_02",
+        "tema": "Non-UTF-8 local names",
+        "conflicto": "RemotePath is UTF-8 only (l. 40); Linux names are bytes.",
+        "decision": "list shows them (raw name, lossy display) plus a per-entry Other/InvalidData error; they cannot be addressed through the trait, and the lossy display never aliases them (cb_06). Local->local operations keep the PathBuf route (l. 114), so the UI loses nothing."
+      },
+      {
+        "id": "dec_03",
+        "tema": "A backend root",
+        "conflicto": "Location::Local carries an absolute PathBuf; the suite needs an empty scratch it can own.",
+        "decision": "LocalBackend has a root: system() = \"/\" for production, with_root(dir) for tests and future sandboxed uses. Mapping is lexical (no canonicalize). The root is a prefix, not a sandbox: user symlinks inside it are followed for reads like any OS call; destructive calls never follow the last component."
+      },
+      {
+        "id": "dec_04",
+        "tema": "ENOTDIR",
+        "conflicto": "from_io maps NotADirectory to Other; step-1 cb_19 says a path under a file is NotFound for lookups.",
+        "decision": "Lookups (stat, list, open_read, remove, remove_tree, rename-from) answer NotFound for a path under a non-directory; list of the non-directory itself is Other(NotADirectory); creations (create_dir, begin_write, rename-to) under a file are Other(NotADirectory, requested path), as MemoryBackend's check_parent."
+      },
+      {
+        "id": "dec_05",
+        "tema": "Special files",
+        "conflicto": "Not in the doc; opening a FIFO blocks forever and /dev/zero never ends.",
+        "decision": "open_read refuses non-regular files with Unsupported after an O_NONBLOCK open + fstat (cb_12), grounded in «no colgar la operación indefinidamente»."
+      },
+      {
+        "id": "dec_06",
+        "tema": "Cross-device rename and copy_within",
+        "conflicto": "A rename inside \"/\" may cross mounts; copy_within could use copy_file_range.",
+        "decision": "EXDEV is an error (cb_22), never a silent copy; server_side_copy = false and copy_within is Unsupported. Copies and cross-volume moves stay in kara_fs::transfer / kara-ops, which own progress and the source-preserving invariant."
+      },
+      {
+        "id": "dec_07",
+        "tema": "Durability and metadata of written files",
+        "conflicto": "Doc only says SFTP preserves mtime «when the server allows it» (l. 141).",
+        "decision": "finish fsyncs the data before the rename (a crash must not leave an empty file under the final name). Mode is the default creation mode; mode/owner/xattrs/mtime of a replaced or source file are not carried (no trait operation for them; kara-ops may set them later)."
+      }
+    ],
+    "conveniencasAbsorbidas": [
+      {
+        "nombre": "Conformance of LocalBackend in CI (remote-backends.md l. 162)",
+        "porQueInseparable": "Step 2 is defined as «passing the suite».",
+        "alcanceAbsorbido": "cb_01: four runs (tempdir root and system root; tmpfs and disk)."
+      },
+      {
+        "nombre": "Location::Local <-> RemotePath mapping",
+        "porQueInseparable": "Without to_remote/to_local nothing above kara-fs can call the backend for a Location::Local; step 3 would redesign the backend's root.",
+        "alcanceAbsorbido": "to_local, to_remote, LocalPathError (cb_03..cb_05).",
+        "alcanceNOAbsorbido": "Location in kara-ops/tabs/history/FileEntry::location (step 3)."
+      },
+      {
+        "nombre": "Trash capability for local volumes (Capabilities `trash`, l. 101)",
+        "porQueInseparable": "The flag is part of the trait implementation and decides whether Supr trashes or deletes.",
+        "alcanceAbsorbido": "trash = true and its routing rule (dec_01).",
+        "alcanceNOAbsorbido": "The routing code in kara-ops (step 3)."
+      },
+      {
+        "nombre": "Eliminación permanente cancelable (05-operaciones l. 247-263) as remove_tree",
+        "porQueInseparable": "remove_tree on a local tree is exactly delete_permanently; a second implementation would diverge on its refusals.",
+        "alcanceAbsorbido": "Delegation, cancel adapter, error mapping (cb_24, cb_25).",
+        "alcanceNOAbsorbido": "Confirmation dialog and progress UI."
+      }
+    ],
+    "conveniencasNOAbsorbidas": [
+      "Transfer routing in kara-ops (l. 112-121) and the switch of Queue/Request to Location — step 3.",
+      "Undo of backend operations — kara-ops.",
+      "A trash method on the trait for remote drives that do have one — not in the doc.",
+      "watch: the flag is true, but no watch operation exists on the trait; inotify consumption stays a separate missing item (CLAUDE.md «Still missing»).",
+      "Preserving mode/mtime/xattrs on write — dec_07.",
+      "DriveRegistry, SFTP, S3 — steps 4-6."
+    ],
+    "capas": {
+      "crate": "kara-fs",
+      "modulosNuevos": [
+        "src/backend.rs (or src/backend/mod.rs + submodules): LocalBackend, LocalPathError, LocalWriteSession, LocalReader"
+      ],
+      "modulosTocados": [
+        "src/lib.rs: `pub mod backend;` + `pub use backend::{LocalBackend, LocalPathError};`",
+        "src/listing.rs: describe stays pub; bare_entry may become pub(crate) for reuse",
+        "src/trash/mod.rs: rename_noreplace may become pub(crate) (or move to an internal module) — no behaviour change"
+      ],
+      "dependencias": "kara-fs -> kara-vfs -> kara-core. kara-vfs must not depend on kara-fs (it does not today). Allowed new deps: kara-vfs only; rustix (already present) for renameat_with, O_NONBLOCK open, mknodat in tests.",
+      "prohibido": [
+        "Modifying anything in crates/kara-vfs, crates/kara-core or any existing file in crates/kara-fs/tests/",
+        "unwrap/expect/panic!/unreachable!/todo!/unimplemented! anywhere in kara-fs/src (cb_27 of trash_home.rs scans every line)",
+        "Mutex/RwLock in the backend module (cb_29)",
+        "A second recursive delete or a second stat-to-FileEntry conversion (reuse delete_permanently and describe)",
+        "Copy fallbacks in rename/copy_within (dec_06)",
+        "async, a runtime, or spawning threads inside the backend"
+      ]
+    },
+    "apiPublica": {
+      "nota": "Normative. Everything new lives in kara-fs, module `backend` (src/backend.rs or src/backend/), re-exported at the crate root as kara_fs::{LocalBackend, LocalPathError}. kara_vfs::Listing is NOT re-exported at the root (kara_fs::Listing already exists).",
+      "items": [
+        {
+          "id": "api_01",
+          "grupo": "LocalBackend",
+          "firmas": [
+            "#[derive(Debug, Clone)] pub struct LocalBackend { /* private: root: PathBuf */ }",
+            "impl LocalBackend { pub const CAPABILITIES: kara_vfs::Capabilities; }  // values in cb_02",
+            "impl LocalBackend { #[must_use] pub fn system() -> LocalBackend; }",
+            "impl LocalBackend { pub fn with_root(root: &std::path::Path) -> Result<LocalBackend, kara_vfs::BackendError>; }",
+            "impl LocalBackend { #[must_use] pub fn root(&self) -> &std::path::Path; }",
+            "impl LocalBackend { #[must_use] pub fn to_local(&self, path: &kara_vfs::RemotePath) -> std::path::PathBuf; }",
+            "impl LocalBackend { pub fn to_remote(&self, local: &std::path::Path) -> Result<kara_vfs::RemotePath, LocalPathError>; }",
+            "impl kara_vfs::Backend for LocalBackend { /* all 10 methods of the trait, signatures as in kara-vfs/src/backend.rs */ }"
+          ]
+        },
+        {
+          "id": "api_02",
+          "grupo": "LocalPathError",
+          "firmas": [
+            "#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] pub enum LocalPathError { #[error(\"local path is not absolute\")] NotAbsolute, #[error(\"local path is outside the backend root\")] OutsideRoot, #[error(transparent)] Path(#[from] kara_vfs::RemotePathError) }"
+          ]
+        },
+        {
+          "id": "api_03",
+          "grupo": "Private session types (not public API, named so tests can reason about them)",
+          "firmas": [
+            "struct LocalWriteSession { target: RemotePath, final_path: PathBuf, temp_path: PathBuf, file: Option<File>, replace: bool, poisoned: Option<BackendErrorKind> }  // impl Write + WriteSession + Drop",
+            "struct LocalReader { file: File, path: RemotePath }  // impl Read; errors via BackendError::from_io"
+          ]
+        },
+        {
+          "id": "api_04",
+          "grupo": "Manifests",
+          "firmas": [
+            "crates/kara-fs/Cargo.toml [dependencies]: add `kara-vfs.workspace = true` (no features). Nothing else added.",
+            "crates/kara-fs/Cargo.toml [dev-dependencies]: add `kara-vfs = { workspace = true, features = [\"conformance\"] }`.",
+            "Root Cargo.toml: unchanged (kara-vfs is already a member and a workspace dependency)."
+          ]
+        }
+      ]
+    },
+    "mapeoDeErrores": {
+      "regla": "Every io::Error goes through kara_vfs::BackendError::from_io(e, Some(path)) — the shared table (EIO/ENXIO/ENODEV/ENOMEDIUM/ESTALE -> Unavailable, ENOSPC/EDQUOT -> NoSpace, EACCES/EPERM/EROFS -> PermissionDenied, ENOENT -> NotFound, EEXIST -> AlreadyExists, rest -> Other with the io source kept). Explicit overrides only where this contract says so:",
+      "overrides": [
+        "ENOTDIR on a lookup -> NotFound (dec_04)",
+        "EISDIR / target became a directory at finish -> AlreadyExists (cb_16)",
+        "EXDEV in rename -> Other, path = from (cb_22)",
+        "RefusedSpecialPath from delete_permanently -> Other(InvalidInput) (cb_24, cb_25)",
+        "Non-regular file in open_read -> Unsupported (cb_12)",
+        "Root refusals -> Other(InvalidInput) without a syscall (cb_21, cb_23, cb_24)"
+      ]
+    },
+    "casosBorde": [
+      {
+        "id": "cb_01",
+        "titulo": "LocalBackend runs the generic conformance suite and passes it",
+        "cita": "«`MemoryBackend` and `LocalBackend` run it in CI.» (remote-backends.md l. 162) · «`LocalBackend` in `kara-fs`, passing the suite. Existing tests untouched.» (l. 170)",
+        "comportamiento": "kara_vfs::conformance::run passes on a LocalBackend in two places: rooted at a fresh tempdir with scratch = RemotePath::root(), and on LocalBackend::system() with scratch = to_remote(<fresh tempdir>). Run once on tmpfs (/tmp) and once on CARGO_TARGET_TMPDIR (a disk filesystem), so the renameat2 path and its fallback are both met where the kernel offers them.",
+        "verificable": "For each of the 4 runs: report.is_success(); report.cases ids == CASE_IDS in order (39); exactly two Skipped: copy_within {because: \"server_side_copy=false\"} and implicit_directories {because: \"real_directories=true\"}; the other 37 are Passed; afterwards the scratch dir is empty (std::fs::read_dir yields 0 entries)."
+      },
+      {
+        "id": "cb_02",
+        "titulo": "Capabilities are a constant that matches a local POSIX volume",
+        "cita": "«Adapters declare what they lack; the UI reads the flags […] It never branches on the protocol.» (l. 96-97) · «Supr warns and offers permanent delete» when trash = no (l. 101) · CLAUDE.md: «Eliminar va **siempre** a la papelera FreeDesktop.»",
+        "comportamiento": "capabilities() == LocalBackend::CAPABILITIES == {trash: true, atomic_rename: true, server_side_copy: false, real_directories: true, posix_permissions: true, symlinks: true, watch: true, undo_rename: true, undo_move: true}, identical on every call and for every root. trash = false would make the UI offer permanent delete for local files, which the project forbids. A volume that lacks a feature (vfat: no symlinks) does not change the flags; the failure surfaces as an error of the operation.",
+        "verificable": "assert_eq!(LocalBackend::system().capabilities(), expected); assert_eq!(LocalBackend::with_root(tmp)?.capabilities(), expected); two calls compare equal."
+      },
+      {
+        "id": "cb_03",
+        "titulo": "Root mapping: system() and with_root()",
+        "cita": "«`Location::Local(PathBuf)`» (l. 35) · «`Location` […] Replaces `Path`/`PathBuf` in `kara-ops`» (l. 42)",
+        "comportamiento": "system() is rooted at \"/\", does no I/O and cannot fail. with_root(root) checks once, at construction: relative path -> Err(Other, path None, source io InvalidInput); missing -> Err(NotFound, path Some(RemotePath::root())); exists but not a directory -> Err(Other, path Some(root), source io NotADirectory); a symlink to a directory is accepted and stored as given (not canonicalised). root() returns the path exactly as given.",
+        "verificable": "with_root(\"rel\") -> Other/None; with_root(tmp/\"missing\") -> NotFound/Some(\"/\"); with_root(tmp/\"file\") -> Other with io source kind NotADirectory; with_root(symlink-to-dir) Ok and .root() == the link path; system().root() == Path::new(\"/\")."
+      },
+      {
+        "id": "cb_04",
+        "titulo": "to_local is lexical, total and never leaves the root",
+        "cita": "«`RemotePath`: normalised, `/`-separated, no `.`/`..`, UTF-8. Not a `PathBuf`» (l. 40)",
+        "comportamiento": "to_local(p) = root joined with p's segments, byte for byte, no I/O. to_local(RemotePath::root()) == root. Because RemotePath has no '.'/'..', the result always starts_with(root).",
+        "verificable": "with_root(\"/x/y\") (constructed over a tempdir): to_local(\"/a b/c#%?.txt\") == root.join(\"a b\").join(\"c#%?.txt\"); system().to_local(\"/etc/hosts\") == \"/etc/hosts\"; for 20 sample paths to_local(p).starts_with(root)."
+      },
+      {
+        "id": "cb_05",
+        "titulo": "to_remote: the way back, with typed refusals",
+        "cita": "«QML receives a `Location` as a string URI […] produced and parsed in Rust only.» (l. 45) · RemotePath «UTF-8» (l. 40)",
+        "comportamiento": "to_remote(local) is lexical (no I/O, no canonicalize), built from Path::components after strip_prefix(root): relative -> Err(LocalPathError::NotAbsolute); not root nor under root by whole components -> Err(OutsideRoot) (\"/ab\" is outside root \"/a\"); a '..' component -> Err(Path(RemotePathError::DotSegment{..})); interior '.' components are dropped by std::path and accepted; non-UTF-8 bytes -> Err(Path(NotUtf8)); NUL -> Err(Path(ContainsNul)); root itself -> Ok(RemotePath::root()); a trailing '/' is accepted.",
+        "verificable": "with root R: to_remote(R) == root; to_remote(R/\"a/b\") == \"/a/b\"; to_remote(R/\"a/./b\") == \"/a/b\"; to_remote(R/\"a/../b\") == Err(Path(DotSegment{..})); to_remote(\"/ab\") with R=\"/a\" == Err(OutsideRoot); to_remote(\"a/b\") == Err(NotAbsolute); to_remote(OsStr::from_bytes(b\"/\\xff\")) on system() == Err(Path(NotUtf8)); round trip to_local(to_remote(p)?) == p for 10 normalised UTF-8 paths under R."
+      },
+      {
+        "id": "cb_06",
+        "titulo": "Non-UTF-8 names are listed, flagged, and never confused with their lossy display",
+        "cita": "listing.rs: «Una entrada que falla no aborta el listado» · «`RemotePath`: […] UTF-8» (l. 40) · step-1 risk: «RemotePath is UTF-8 only, so the trait cannot name non-UTF-8 local files; step 2 must decide»",
+        "comportamiento": "list includes an entry whose name is not UTF-8 with name = the raw OsString and display = its lossy form (as kara_fs::listing::describe does), AND pushes one per-entry error for it: kind Other, path Some(dir), io source kind InvalidData. It cannot be addressed through the trait: a RemotePath built from the lossy display names the literal U+FFFD bytes, a different file. remove_tree of a directory containing such names removes them (it walks local paths).",
+        "verificable": "dir with file b\"\\xff\" (content \"raw\"): list(dir) -> 1 entry with name.as_bytes() == b\"\\xff\" and display == \"\\u{FFFD}\", errors.len() == 1 with kind Other, path == Some(dir), source io kind InvalidData; stat(dir/\"\\u{FFFD}\") -> NotFound; remove(dir/\"\\u{FFFD}\") -> NotFound and the raw file still has content \"raw\"; remove_tree(dir) Ok and the local dir is gone."
+      },
+      {
+        "id": "cb_07",
+        "titulo": "list: entry contract, shared with kara_fs::listing::describe",
+        "cita": "listing.rs: «Dos `stat` por entrada» / «El tamaño de un directorio es `None`, no cero» · step-1 cb_18 «hidden ('.'-prefixed) included with is_hidden = true»",
+        "comportamiento": "Each entry is exactly what kara_fs::listing::describe returns for the local path (same function, not a copy): no '.'/'..'; unsorted; dot-files present with is_hidden = true; '.hidden' files are NOT applied (that is the UI's filter); dirs size None; files Some(len); symlink entries is_symlink = true, kind through the target, broken -> kind File + symlink_broken = true; type_label None; location = Some(local parent) as describe sets it. A per-entry stat failure keeps the entry (bare: name only) and adds a per-entry error naming the entry's RemotePath (mapped with BackendError::from_io).",
+        "verificable": "dir with .dot, f (5 bytes), sub/, link->f, broken->nowhere and a .hidden file naming f: list returns 6 entries (incl .hidden) — .dot is_hidden, f size Some(5) and is_hidden false, sub size None kind Directory, link is_symlink kind File not broken, broken is_symlink symlink_broken kind File; each listed entry equals describe(local path) field by field (name, display, kind, is_symlink, symlink_broken, is_hidden, size, modified, created, accessed, location)."
+      },
+      {
+        "id": "cb_08",
+        "titulo": "list: the three kinds of failure at directory level",
+        "cita": "step-1 cb_18: «Missing -> NotFound. A file -> Err(Other, source io NotADirectory)» · cb_19: «stat of a path whose parent is a file is NotFound (ENOTDIR maps to NotFound for stat)»",
+        "comportamiento": "list(missing) -> NotFound(path = arg). list(a regular file) -> Other(path = arg, io source NotADirectory). list(path under a file, e.g. /file/x) -> NotFound(path = arg), because it does not exist — the ENOTDIR is disambiguated by stat-ing the path itself. list(a FIFO) -> Other (NotADirectory) without blocking. list(root) of an empty root -> Ok(empty). If the root directory itself was removed after with_root, list(root) -> NotFound(root).",
+        "verificable": "each case asserts kind and error.path == Some(arg); the FIFO case completes within 2 s (run on a thread, join with timeout via channel recv_timeout); with_root(tmp/\"r\") then remove r locally -> list(root) NotFound with path Some(\"/\")."
+      },
+      {
+        "id": "cb_09",
+        "titulo": "list is cancellable and never returns a partial Ok",
+        "cita": "«cancel mid-list and mid-transfer» (l. 159) · step-1 cb_20 «Returning Ok with the entries read so far when list is cancelled» listed as a wrong implementation",
+        "comportamiento": "cancel is checked before opening the directory and before each entry. Already cancelled -> Err(Cancelled, path = arg) and no entry is described. Cancelled midway -> Err(Cancelled, path = arg). Never Ok with fewer entries than the directory holds.",
+        "verificable": "pre-cancelled token on a 3-entry dir -> Cancelled with path == dir. Race test: dir with 20 000 files; thread A lists, thread B cancels right after start; result is either Ok with entries.len() == 20 000 or Err(Cancelled) — asserted over 5 runs; never Ok with < 20 000."
+      },
+      {
+        "id": "cb_10",
+        "titulo": "stat: agrees with list, root, paths under a file",
+        "cita": "step-1 cb_19: «stat(root) is Ok, kind Directory, name \"/\"»",
+        "comportamiento": "stat(p) == the list entry of p (same describe). stat(root) -> Ok, kind Directory, name \"/\", display \"/\", is_hidden false, location None — for system() and for with_root(tmp) alike (the drive root is not named after the local folder). stat(missing) -> NotFound(arg). stat(/file/x) -> NotFound(arg) (ENOTDIR -> NotFound). stat of a symlink loop -> Ok, is_symlink, symlink_broken, kind File.",
+        "verificable": "with_root(tmp/\".hiddenroot\"): stat(\"/\") has name \"/\", is_hidden false, kind Directory; stat(\"/f/x\") with f a file -> NotFound path \"/f/x\"; a link `loop -> loop` -> Ok with symlink_broken true."
+      },
+      {
+        "id": "cb_11",
+        "titulo": "open_read: offsets, past the end, directories",
+        "cita": "step-1 cb_21: «from > len -> Err(Other, source InvalidInput) at open time, not a short read; directory -> Err(Other, source IsADirectory) […] from = u64::MAX -> Err, not panic»",
+        "comportamiento": "Opens, then fstat()s the same descriptor (no stat-then-open race). from == 0 reads all; 0 < from < len reads the tail (seek, not read-and-discard); from == len -> reader at EOF; from > len (incl. u64::MAX) -> Err(Other, InvalidInput) at open; a directory -> Err(Other, IsADirectory) at open; missing -> NotFound; /file/x -> NotFound. Follows symlinks (reads the target).",
+        "verificable": "10-byte file: from 0/4/10 -> 10/6/0 bytes; from 11 and u64::MAX -> Err at open_read with kind Other, path arg, io source kind InvalidInput; dir -> Err at open_read (not at read) kind Other source IsADirectory; link->file reads the file's bytes."
+      },
+      {
+        "id": "cb_12",
+        "titulo": "open_read never blocks on special files",
+        "cita": "05-operaciones «Manejo de errores»: «un medio extraíble que se desconecta a mitad debe detectarse y avisar, no colgar la operación indefinidamente» · CLAUDE.md «Nada debe bloquear la UI»",
+        "comportamiento": "The file is opened with O_NONBLOCK and checked with fstat before any byte is read: anything that is not a regular file (FIFO, socket, char or block device), directly or through a symlink, -> Err(Unsupported, path = arg). A FIFO without a writer does not hang the call; /dev/zero is not an endless source.",
+        "verificable": "mkfifo (rustix::fs::mknodat, FileType::Fifo) in tmp: open_read(fifo, 0) returns Err(Unsupported) within 2 s (thread + recv_timeout); system().open_read(\"/dev/zero\", 0) -> Err(Unsupported); a symlink to the FIFO -> Err(Unsupported)."
+      },
+      {
+        "id": "cb_13",
+        "titulo": "Reader errors keep kind and path through io::Error",
+        "cita": "«`Unavailable` (connection lost) […] → `MediaGone`, so no infinite retry loop» (l. 89-90)",
+        "comportamiento": "Every io::Error the returned reader yields is io::Error::from(BackendError::from_io(e, Some(arg))), so BackendError::from_io on the caller side recovers the original kind and path (EIO/ENXIO/ENODEV/ENOMEDIUM -> Unavailable via the shared table). Dropping a reader midway changes nothing on disk.",
+        "verificable": "Source scan: the backend module builds reader/session io errors only through BackendError (grep shows `BackendError::from_io` in the Read and Write impls). Behavioural: read half of a 10 000-byte file, drop the reader; stat size and content unchanged."
+      },
+      {
+        "id": "cb_14",
+        "titulo": "begin_write writes a temporary sibling, never the final name",
+        "cita": "«Writes go to a temp name then rename.» (l. 140) · «**A half-written destination is never visible under its final name.**» (l. 82-83) · 05-operaciones: «Al cancelar, la operación se detiene de forma segura (sin dejar el archivo en curso a medio escribir)»",
+        "comportamiento": "begin_write creates the temporary file immediately (O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC, mode 0o666 before umask) in the SAME directory as the target, so the commit is a same-device rename. Its name starts with '.', ends with \".kara-part\", is unique per session (pid + process-wide counter, retry on EEXIST) and is at most 255 bytes: the target-name part is truncated on a char boundary. While the session is open, stat(target) is NotFound (new file) or the old content (replace=true), and the only extra entry in the directory is the hidden temp.",
+        "verificable": "during an open session on new target \"n\": stat(\"n\") NotFound; list(dir) has exactly one extra entry, is_hidden == true, display starts_with('.') and ends_with(\".kara-part\"), name.len() <= 255; two concurrent sessions on the same target have two different temp names; a 255-byte ASCII target name and a 254-byte name of \"é\" x127 both begin, write, finish and read back."
+      },
+      {
+        "id": "cb_15",
+        "titulo": "begin_write refusals, in order",
+        "cita": "05-operaciones «Resolución de conflictos»: «no sobrescribir una carpeta con un archivo sin aviso explícito» · step-1 cb_29 «create_dir, begin_write and rename into a missing parent -> NotFound (path = the requested path)»",
+        "comportamiento": "Checked with lstat before creating the temp (nothing is created when refused): target is a directory (or root) -> AlreadyExists, for replace false AND true; replace=false and anything exists at target (file, symlink, broken symlink, FIFO) -> AlreadyExists; parent missing -> NotFound(path = target); parent is a file -> Other(NotADirectory, path = target); parent not writable -> PermissionDenied(path = target). All errors name the target RemotePath, never the temp name or the local absolute path.",
+        "verificable": "each case: kind, error.path == Some(target), and the parent's local read_dir is identical before and after (no stray .kara-part). Permission case: dir chmod 0o555; if a probe file can still be created (running as root) the test prints a notice and returns Ok without asserting."
+      },
+      {
+        "id": "cb_16",
+        "titulo": "finish: fsync, then atomic no-replace or replace rename",
+        "cita": "«`finish` […] // commit: rename temp» (l. 75) · step-1 cb_23 «If the target appears while the session is open, finish fails with AlreadyExists, commits nothing, and the other writer's content stays.»",
+        "comportamiento": "finish flushes and fsyncs the temp file (File::sync_all or sync_data) BEFORE renaming. replace=false: renameat2(RENAME_NOREPLACE), with kara-fs' existing fallback (ENOSYS/EINVAL/EOPNOTSUPP -> lstat check + rename) reused, not rewritten; EEXIST -> AlreadyExists(target), the temp is removed, the winner's content stays. replace=true: plain rename(2) (atomic replace); if the target became a directory meanwhile -> AlreadyExists(target), temp removed, directory untouched. Any finish failure removes the temp; if that cleanup also fails the original error is returned (its kind is what kara-ops acts on).",
+        "verificable": "race: s1=begin(t,false) write \"first\"; s2=begin(t,false) write \"second\"; s2.finish Ok; s1.finish -> AlreadyExists path t; content(t) == \"second\"; list(dir) names == {\"t\"} (no .kara-part left). Target replaced by a directory between begin(replace=true) and finish -> AlreadyExists, dir still a dir with its child, no temp left. Source scan: `sync_all(` or `sync_data(` appears in the backend module."
+      },
+      {
+        "id": "cb_17",
+        "titulo": "replace = true: atomic swap, link-level semantics",
+        "cita": "step-1 cb_24 «Until finish, the old content is what stat/open_read see. After finish, the new content. […] never old bytes followed by new bytes.» · step-1 cb_39 «Symlinks are never followed by destructive operations»",
+        "comportamiento": "Before finish the old content and size show; after finish the new. A reader opened before finish reads the complete old content even after finish (inode semantics). A symlink target is replaced as a link: the link becomes a regular file, the file it pointed to is untouched. A hard-linked target is detached: the other name keeps the old content. The new file gets the default creation mode (0o666 & !umask); the old file's mode, owner and xattrs are NOT carried over (the trait has no permissions operation).",
+        "verificable": "old \"old content\" -> during session stat size 11 and content old; r=open_read before finish; finish; content \"NEW\", size 3; r reads \"old content\" to the end. link l -> f(\"keep\"): replace l -> l is a regular file (lstat not symlink) with new bytes, f still \"keep\". hard link h of t: replace t -> h still old content. Mode of a replaced 0o700 file == mode of a file created by std::fs::File::create in the same dir."
+      },
+      {
+        "id": "cb_18",
+        "titulo": "abort and drop leave nothing; a failed write poisons the session",
+        "cita": "«Dropping a session without `finish` aborts it.» (l. 81-82) · «aborted or dropped `WriteSession` leaves nothing visible» (l. 157) · step-1 dec_02 (abort returns Result) and cb_26 «A failed write poisons the session»",
+        "comportamiento": "abort() unlinks the temp and returns Err only if the unlink fails for a reason other than ENOENT (a temp already gone is success). Drop without finish/abort unlinks best-effort. After either, the directory listing equals the one before begin_write and a replace=true target keeps its old content. After any failed write, every later write and finish return Err with the first error's kind, nothing is committed, and the temp is removed by finish/abort/drop.",
+        "verificable": "abort and drop: names(dir) before == after, old target content unchanged; delete the .kara-part locally then abort() -> Ok. Poison: a write error cannot be provoked portably, so poisoning is checked with KARA_TEST_FULL_FS=<dir on a full filesystem> when set (write fails NoSpace, later write and finish fail NoSpace, target absent, no .kara-part); without the variable the test prints that it was skipped and returns Ok."
+      },
+      {
+        "id": "cb_19",
+        "titulo": "Write errors keep kind and path through io::Error",
+        "cita": "05-operaciones: «si el destino se queda sin espacio, el diálogo debe pausar y ofrecer reintentar/omitir/cancelar en vez de fallar en silencio»",
+        "comportamiento": "Every io::Error from Write::write/flush is io::Error::from(BackendError::from_io(e, Some(target))): ENOSPC/EDQUOT -> NoSpace, EIO family -> Unavailable, naming the TARGET path (never the temp). finish returns the BackendError directly.",
+        "verificable": "with KARA_TEST_FULL_FS: BackendError::from_io(write_err, None).kind == NoSpace and .path == Some(target). Always: source scan as in cb_13."
+      },
+      {
+        "id": "cb_20",
+        "titulo": "create_dir: one level, never on top of anything",
+        "cita": "step-1 cb_32/«create_dir returning Ok on an existing directory: undo would later delete a folder Kara did not create»",
+        "comportamiento": "mkdir(2) of exactly one level (mode 0o777 before umask). Existing file, directory, symlink or root -> AlreadyExists(arg), nothing changes. Missing parent -> NotFound(arg) and the parent is not created. Parent is a file -> Other(NotADirectory, arg).",
+        "verificable": "create_dir(\"/a/b\") with /a missing -> NotFound path \"/a/b\" and /a still missing; create_dir(root) -> AlreadyExists path \"/\"; create_dir onto a broken symlink -> AlreadyExists and the link is still there."
+      },
+      {
+        "id": "cb_21",
+        "titulo": "rename: never overwrites, checks in the MemoryBackend order",
+        "cita": "step-1 cb_33 «If `to` exists […] -> AlreadyExists with path == to; both untouched. LocalBackend (step 2) will need renameat2(NOREPLACE), as kara-fs trash already does.» · cb_34 · cb_35 · 05-operaciones «no reemplazar automáticamente»",
+        "comportamiento": "Order: from == root or to == root -> Other(InvalidInput, path = the root argument); from missing (lstat) -> NotFound(from); from == to -> Ok, no syscall that changes anything; to.starts_with(from) -> Other(InvalidInput, to); to exists (lstat: file, dir, symlink, broken symlink) -> AlreadyExists(to); to's parent missing -> NotFound(to); to's parent a file -> Other(NotADirectory, to). The rename itself is renameat2(RENAME_NOREPLACE) with the same fallback as cb_16; EEXIST at that point -> AlreadyExists(to). A symlink is renamed as a link.",
+        "verificable": "each branch asserts kind, path, and that both local paths are byte-identical before/after; rename(\"/x\",\"/x\") on an existing file -> Ok and content unchanged; rename onto a broken symlink -> AlreadyExists and the link is still a link; rename(link, l2) -> l2 is a symlink with the same read_link target."
+      },
+      {
+        "id": "cb_22",
+        "titulo": "rename across filesystems fails instead of copying",
+        "cita": "«Local → local: unchanged (`rename(2)`, existing code).» (l. 114) · «A move across backends is copy, verify size, then delete.» (l. 119) — the copying belongs to kara-ops, with progress",
+        "comportamiento": "EXDEV is returned as Err(Other, path = from, io source kind CrossesDevices). LocalBackend never falls back to copy + delete: that is a transfer with progress and the source-preserving invariant, owned by kara-ops/kara_fs::transfer.",
+        "verificable": "system(): from = file under CARGO_TARGET_TMPDIR, to = path under /tmp; if both are on the same device the test prints a notice and returns Ok; otherwise -> Other with source kind CrossesDevices, from still has its content, to does not exist."
+      },
+      {
+        "id": "cb_23",
+        "titulo": "remove: file, link or empty directory only",
+        "cita": "step-1 cb row: «Non-empty dir -> Err(Other, source DirectoryNotEmpty), nothing removed. Missing -> NotFound. Root -> Err(Other, InvalidInput). A symlink is removed as a link (target untouched).»",
+        "comportamiento": "Decided by lstat: directory -> rmdir; anything else (incl. a symlink to a directory) -> unlink. Non-empty dir -> Other(DirectoryNotEmpty, arg); missing or under a file -> NotFound(arg); root -> Other(InvalidInput) without a syscall. Permanent: this is the primitive behind a confirmed delete or the delete-after-verified-copy, never what Supr calls on a local file (trash = true routes that to kara_fs::trash).",
+        "verificable": "link-to-dir removed -> the target dir and its child remain; remove(\"/d\") non-empty -> Other with DirectoryNotEmpty and the child readable; remove(root) on with_root(tmp) -> Other InvalidInput and tmp untouched."
+      },
+      {
+        "id": "cb_24",
+        "titulo": "remove_tree: kara_fs::trash::delete_permanently underneath",
+        "cita": "05-operaciones «Eliminación permanente»: «carpetas grandes deben mostrar diálogo de progreso y poder cancelarse» · step-1 cb_38 «remove_tree(root) -> Err(Other, InvalidInput) and removes nothing […] checks cancel before every entry; on Cancelled or on a failure returns Err […] what was already removed stays removed»",
+        "comportamiento": "Order: cancelled -> Err(Cancelled, arg) before anything, also for a single file; arg == root -> Other(InvalidInput); then delegates to kara_fs::trash::delete_permanently(to_local(arg), observer) whose on_bytes answers Flow::Cancel once the token is cancelled — no second recursive delete is written. Mapping: TrashError::NotFound/PermissionDenied/Io -> BackendError::from_io(source, path) with path = to_remote(failing local path) when representable, else arg; RefusedSpecialPath (a mount point, '/') -> Other(InvalidInput, arg); Cancelled -> Cancelled(arg); any other variant -> Other(arg). Symlinks are unlinked, never followed. A single file is removed. Missing -> NotFound(arg).",
+        "verificable": "tree with link -> outside dir: remove_tree Ok, outside dir and its file intact; pre-cancelled on a single file -> Cancelled and the file remains; race: 5 000-file tree, cancel from another thread -> either Ok with root gone, or Cancelled with path == arg (never Ok with root present); a child dir chmod 0o555 holding a file (non-root only, probe as cb_15) -> Err PermissionDenied whose path is that file's RemotePath."
+      },
+      {
+        "id": "cb_25",
+        "titulo": "remove_tree refuses mount points",
+        "cita": "trash/mod.rs delete_permanently: «Only `/` and mount points are refused» · 00-filosofia «Reversibilidad por defecto»",
+        "comportamiento": "A mount point argument is refused before anything is removed: Other(InvalidInput, arg). Inherited from delete_permanently, not reimplemented.",
+        "verificable": "system().remove_tree(\"/proc\") -> Other InvalidInput (if /proc is not a separate mount the test prints a notice and returns Ok). No test ever calls remove_tree on \"/\" or on a real data mount."
+      },
+      {
+        "id": "cb_26",
+        "titulo": "copy_within is declared absent and touches nothing",
+        "cita": "«/// Only called if `capabilities().server_side_copy`.» (l. 70) · «Local → local: unchanged» (l. 114)",
+        "comportamiento": "server_side_copy = false, and copy_within returns Err(Unsupported, path = from) at once, for any arguments, without any syscall.",
+        "verificable": "copy_within(existing, new) -> Unsupported path from, and `new` does not exist; copy_within(missing, x) -> Unsupported (not NotFound)."
+      },
+      {
+        "id": "cb_27",
+        "titulo": "Every error names the RemotePath argument, never the local path",
+        "cita": "05-operaciones «Manejo de errores»: «el diálogo debe nombrar el archivo y el motivo» · step-1 cb_12 «Every Err from a Backend method that takes a path has path == Some(..)»",
+        "comportamiento": "Path rule as step-1 cb_12: the argument for list/stat/open_read/begin_write/create_dir/remove/remove_tree; rename: from when from is missing or the error is not about to (EXDEV, EACCES on from), to when to exists or to's parent is missing/not a directory; remove_tree failing on a descendant: the descendant; Cancelled: the argument. Never the temp name, never None.",
+        "verificable": "table-driven test over every method and failure of cb_08..cb_26: error.path == Some(expected) and error.to_string() does not contain \".kara-part\"."
+      },
+      {
+        "id": "cb_28",
+        "titulo": "Special and unusual names survive byte for byte",
+        "cita": "«names with spaces, unicode and `#`/`%`/`?`» (l. 154) · step-1 cb_03 «NFC and NFD forms of the same text are different»",
+        "comportamiento": "Space, #, %, ?, [, ], \\\\, :, *, newline, leading '-', NFC vs NFD: each is an ordinary name byte, mapped to the same local bytes. NFC \"é\" and NFD \"e\\u{301}\" are two files.",
+        "verificable": "write each of [\"a b\",\"#\",\"100%\",\"why?\",\"[x]\",\"a\\\\b\",\"c:d\",\"*\",\"l\\nb\",\"-rf\"]: local read_dir shows exactly those bytes, content reads back; NFC and NFD files coexist and list has 2 entries."
+      },
+      {
+        "id": "cb_29",
+        "titulo": "Thread safety without locks",
+        "cita": "«Blocking, `Send + Sync`.» (l. 50) · CLAUDE.md «El listado de un directorio nunca bloquea la UI, ni con 100 k entradas ni con un volumen de red colgado»",
+        "comportamiento": "LocalBackend is Send + Sync + Clone and holds no Mutex/RwLock: a call stuck on a hung volume blocks only its own worker thread, never a call on another path. Calls may block in syscalls (the trait is blocking by design; callers run them on workers).",
+        "verificable": "compile-time: fn assert<T: Send + Sync + Clone + 'static>() {} assert::<LocalBackend>(); Arc<dyn Backend> from LocalBackend. Source scan: no `Mutex` or `RwLock` in the backend module. 4 threads x 200 iterations of list + begin_write/finish in the same dir complete without error or deadlock (join within 30 s)."
+      },
+      {
+        "id": "cb_30",
+        "titulo": "Nothing existing changes",
+        "cita": "«Public functions stay.» (l. 25) · «Existing tests untouched.» (l. 170) · CLAUDE.md «`crates/kara-fs/tests/*` are hash-checked»",
+        "comportamiento": "kara-fs keeps every existing public item with the same signature and behaviour (list_directory, describe, transfer::*, trash::*). Shared helpers (describe/bare_entry, rename_noreplace) may become pub(crate) or move to an internal module, without behaviour change. kara-vfs is not modified. No existing test file changes.",
+        "verificable": "sha256 of every file in contrato.sha256TestsExistentes is unchanged; `git diff --exit-code 029f06d -- crates/kara-vfs crates/kara-core` exits 0; cargo test -p kara-fs runs the existing tests green."
+      }
+    ],
+    "criteriosDeAceptacion": [
+      {
+        "id": "ac_01",
+        "criterio": "`cargo test --ignore-rust-version -p kara-fs` passes with 0 failed and 0 ignored (the container's rustc is 1.97, the workspace pins 1.98). Workspace `cargo test --ignore-rust-version` is green."
+      },
+      {
+        "id": "ac_02",
+        "criterio": "`cargo clippy --ignore-rust-version --all-targets -- -D warnings` exits 0 for the whole workspace, with no new `allow` at crate or module level."
+      },
+      {
+        "id": "ac_03",
+        "criterio": "trash_home.rs `cb_27_el_codigo_de_kara_fs_no_usa_unwrap_expect_ni_panicos` passes with the new module in src/."
+      },
+      {
+        "id": "ac_04",
+        "criterio": "cb_01 holds: 4 conformance runs, each is_success(), 37 Passed + exactly the 2 named Skipped."
+      },
+      {
+        "id": "ac_05",
+        "criterio": "A compile-only test coerces each api_01/api_02 function to a fn pointer of the exact stated type, builds Arc<dyn kara_vfs::Backend> from LocalBackend, and asserts LocalBackend: Send + Sync + Clone + 'static."
+      },
+      {
+        "id": "ac_06",
+        "criterio": "Each of cb_01..cb_30 has at least one test whose name contains its id, in NEW files under crates/kara-fs/tests/ (suggested: local_backend_conformance.rs, local_backend_paths.rs, local_backend_read.rs, local_backend_write.rs, local_backend_mutations.rs, local_backend_rules.rs); every test that expects a refused mutation also compares the local directory state before/after."
+      },
+      {
+        "id": "ac_07",
+        "criterio": "sha256 of every file listed in sha256TestsExistentes is unchanged, and `git diff --exit-code 029f06d -- crates/kara-vfs crates/kara-core` exits 0."
+      },
+      {
+        "id": "ac_08",
+        "criterio": "`cargo tree -p kara-fs -e normal --depth 1` lists kara-vfs and no other new crate; `cargo tree -p kara-vfs -e normal` does not contain kara-fs."
+      },
+      {
+        "id": "ac_09",
+        "criterio": "No test writes outside its own tempdir (tempfile::tempdir or tempdir_in(CARGO_TARGET_TMPDIR)), none trashes anything, none calls remove/remove_tree on a system() path other than inside its tempdir or the cb_25 \"/proc\" refusal."
+      },
+      {
+        "id": "ac_10",
+        "criterio": "Tests that need a non-root user (permissions), two devices (cb_22) or a full filesystem (cb_18/cb_19 with KARA_TEST_FULL_FS) detect the missing precondition, print one line saying so, and return Ok: they are never #[ignore] and never fail for the environment."
+      }
+    ],
+    "riesgosDeImplementacionPlausiblePeroIncorrecta": [
+      "Writing straight to the final name and deleting it on abort: the half-written file is visible in between (cb_14).",
+      "Temp file in /tmp or another directory: the commit rename crosses devices and fails, or copies (cb_14).",
+      "Checking existence with stat then plain rename for replace=false, instead of renameat2(NOREPLACE): a racing writer is overwritten (cb_16, cb_21).",
+      "rename(x, x) answered AlreadyExists because NOREPLACE sees x existing (cb_21).",
+      "No fsync before the commit rename: after a crash the final name holds an empty file (cb_16).",
+      "Using stat (follows links) instead of lstat for existence: a broken symlink at the target is treated as free and overwritten (cb_15, cb_21).",
+      "remove on a symlink to a directory calling remove_dir_all on the target (cb_23); remove_tree written again with fs::remove_dir_all instead of delete_permanently, losing the mount-point refusal and cancellation (cb_24, cb_25).",
+      "Checking cancel only inside the recursion: a pre-cancelled remove_tree on a single file deletes it (cb_24).",
+      "Building a RemotePath from FileEntry::display: a non-UTF-8 name aliases another file (cb_06).",
+      "Letting ENOTDIR fall through from_io as Other for stat/open_read under a file (cb_10, dec_04).",
+      "open_read on a FIFO blocking the worker forever; checking the kind with stat before open (race) instead of fstat after an O_NONBLOCK open (cb_12).",
+      "Seeking past EOF and returning an empty reader for from > len (Linux allows the seek) (cb_11).",
+      "Errors naming the temp name or the absolute local path instead of the RemotePath argument (cb_27).",
+      "stat(root) of with_root(tmp) returning the tempdir's basename (cb_10).",
+      "Falling back to copy+delete on EXDEV inside rename (cb_22).",
+      "Declaring trash = false because the trait has no trash method: the UI would offer permanent delete for every local file (cb_02, dec_01)."
+    ],
+    "sha256TestsExistentes": {
+      "crates/kara-fs/tests/clipboard.rs": "abe463cb46db7d11f7f6f991efff126f38661e64ef1940bbbdefc698af4451fd",
+      "crates/kara-fs/tests/icon_theme_choice.rs": "d35b9b55a4af74cd8da3b3968340b68ccd3ab6ab393e06dc0dc46c2b489639f1",
+      "crates/kara-fs/tests/icons.rs": "9c26e0925f296d453ca00a3de5531803cc8c0e55878d08a4208296930e2a2237",
+      "crates/kara-fs/tests/listing.rs": "92854f7b080d59e45ad38a3e72e4fd442dae6fea008f0a5857780c8e2fbcdfc3",
+      "crates/kara-fs/tests/mime.rs": "dd2b1b40f73fe73862bc1ba173bcc9b61babad9e44e2b3e337a92db443f95f3d",
+      "crates/kara-fs/tests/mime_generic_icons.rs": "56c8570a9e5a0b643a53220cc74873bcb20a7349aaa338224d249e77ff69a280",
+      "crates/kara-fs/tests/places.rs": "27052857628329aa5c333dabd9c28f0e5e915f446f174f596a6ff84386cc9a0b",
+      "crates/kara-fs/tests/settings.rs": "f53c0d55961a93e8dca8e57e6503bb9f9252cfe806175ae21a6aada1c13ca21b",
+      "crates/kara-fs/tests/thumbnail_failure_path.rs": "90b8240165405447a5c3c2b1ba243657d3736a737a3924d8c02eb5a5db1601c6",
+      "crates/kara-fs/tests/thumbnails.rs": "8313b6fea219dfd0619c457f8c3de3dc48a4d89fc288b87eefdc69bd69334e4c",
+      "crates/kara-fs/tests/transfer.rs": "45247e768e2965474b6e48e5cd004baf3cb79abfc7c15ec6dd762e436a56d58f",
+      "crates/kara-fs/tests/trash_home.rs": "84c74b72611764256b6405ba1e4e79d056f95c4e28216d41711a9b7f19520757",
+      "crates/kara-fs/tests/trash_info.rs": "7bb18ea3152cb070b4beaa21c20788accf75c8efc63cb150eab590af8634a9b2",
+      "crates/kara-fs/tests/trash_listing.rs": "466c7b265226b612c946f88dbae7f7b2f5150b8f40c0a07faebde4f450e2bbd1",
+      "crates/kara-fs/tests/trash_supervisor.rs": "2820c8334e43e0909f98e851575f557faba72c80c9c38d58e102646b2860daad",
+      "crates/kara-fs/tests/trash_volume.rs": "675c87e3e1ecae04116914dda4aceb040ce01cddf8d374f8f37becc7a757a84c",
+      "crates/kara-fs/tests/common/mod.rs": "abf3c34115f7b496213db00ba4af8fbd583c3e55ddfb23d8ef6b0159d70d16d7"
+    },
+    "entornoDePruebas": [
+      "rustc 1.97 in the container vs rust-version 1.98: use --ignore-rust-version",
+      "the container runs as root: permission-denied tests degrade to a printed notice (ac_10)",
+      "/tmp is tmpfs; CARGO_TARGET_TMPDIR is on the disk filesystem"
+    ]
+  },
+  "pruebas": {
+    "testFiles": [
+      {
+        "path": "crates/kara-fs/tests/local_backend_conformance.rs",
+        "sha256": "fdab075941d75d7b258d4b9564ef817b67f45d323bfe7a38a3ad7e7a1da2dddb",
+        "testCount": 4
+      },
+      {
+        "path": "crates/kara-fs/tests/local_backend_paths.rs",
+        "sha256": "340b0e760783f14c8b592f4eba167e7de2a135262e1f40b6fc2e224a6b5d9250",
+        "testCount": 21
+      },
+      {
+        "path": "crates/kara-fs/tests/local_backend_read.rs",
+        "sha256": "e9f6fec83299956aa25525f2a8edfd123604deae6f4539bf480a1d3a36a8d9bd",
+        "testCount": 25
+      },
+      {
+        "path": "crates/kara-fs/tests/local_backend_write.rs",
+        "sha256": "8dc711d6f1fed11c2088e950a39e736739e85533a3441d6a4d0bc272bd84316d",
+        "testCount": 24
+      },
+      {
+        "path": "crates/kara-fs/tests/local_backend_mutations.rs",
+        "sha256": "d24597c5a817824d8162153354d12f689b255335d783296252db2749816d9348",
+        "testCount": 26
+      },
+      {
+        "path": "crates/kara-fs/tests/local_backend_rules.rs",
+        "sha256": "5efb722c5d26e1690f182108d8685bbbb47dfcb3f5d93c4c782e17e12496c080",
+        "testCount": 11
+      },
+      {
+        "path": "crates/kara-fs/tests/local_backend_support/mod.rs",
+        "sha256": "bc107fb49b79ff754f999144bfeca53edf9429b47aadaf9930ff9d235cd99570",
+        "testCount": 0
+      }
+    ],
+    "stubFiles": [
+      "crates/kara-fs/src/backend.rs",
+      "crates/kara-fs/src/lib.rs",
+      "crates/kara-fs/Cargo.toml"
+    ]
+  },
+  "intentos": 0,
+  "historial": [
+    {
+      "fecha": "2026-10-09T21:04:56+00:00",
+      "estado": "contrato_listo",
+      "nota": "Contract fixed. Source: docs/remote-backends.md Order of work step 2 (no exact-title heading). kara-vfs implemented (029f06d); kara-fs has no backend yet. 7 decisions, 30 edge cases, 10 acceptance criteria; reuses describe, rename_noreplace and delete_permanently."
+    },
+    {
+      "fecha": "2026-10-09T21:19:45+00:00",
+      "estado": "pruebas_listas",
+      "nota": "Stubs (todo!) en src/backend.rs + re-export en lib.rs + kara-vfs en Cargo.toml. 111 pruebas en 6 ficheros nuevos + helper local_backend_support/mod.rs. Validadas contra un prototipo desechable (no commiteado): 111/111 en verde. Baseline con stubs: falla (97 todo!). Fallos previos de entorno, ajenos al contrato (root, /tmp en ext4): listing an_unreadable_directory, trash_listing x2, trash_volume x9, trash_home x7 (+cb_27 por los todo! del stub, se cura al implementar). Nota: no ejecutar cargo fmt -p kara-fs, reformatea tests hash-checked."
+    }
+  ],
+  "actualizado": "2026-10-09T21:19:45+00:00"
+}

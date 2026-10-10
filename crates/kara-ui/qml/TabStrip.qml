@@ -30,6 +30,14 @@ Rectangle {
         }
     }
 
+    // The tabs sit right under the title bar and share its colour, so their
+    // empty stretch is title bar too, as in Windows 11, where the tabs *are*
+    // the title bar.
+    WindowDrag {
+        anchors.fill: parent
+        window: strip.Window.window as Window
+    }
+
     Row {
         anchors.left: parent.left
         anchors.leftMargin: 8

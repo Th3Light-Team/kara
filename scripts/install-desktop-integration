@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+#
+# Registers Kara with the desktop for the current user — no root needed:
+#
+#   - ~/.local/share/applications/kara.desktop, so menus, «Open with» and
+#     `xdg-mime` know Kara;
+#   - ~/.local/share/icons/hicolor/scalable/apps/kara.svg, its icon;
+#   - ~/.local/share/dbus-1/services/org.freedesktop.FileManager1.service, so
+#     the session bus starts Kara for «Show in folder» when no file manager
+#     is running. The session bus reads this directory before the system one,
+#     where Nautilus installs the same name.
+#
+# With --default it also makes Kara the default application for folders,
+# which is what tells Kara itself to answer FileManager1.
+#
+# Usage: scripts/install-desktop-integration [--default] [path/to/kara-ui-or-AppImage]
+# The program defaults to target/release/kara-ui of this tree.
+set -euo pipefail
+
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+make_default=no
+program=""
+for arg in "$@"; do
+    case "$arg" in
+        --default) make_default=yes ;;
+        -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+        *) program=$arg ;;
+    esac
+done
+program=${program:-$here/target/release/kara-ui}
+if [ ! -x "$program" ]; then
+    echo "install-desktop-integration: $program is not an executable; build it or pass its path" >&2
+    exit 1
+fi
+program=$(readlink -f "$program")
+
+data=${XDG_DATA_HOME:-$HOME/.local/share}
+mkdir -p "$data/applications" "$data/icons/hicolor/scalable/apps" "$data/dbus-1/services"
+
+# The packaged files, with the real path of the program instead of a name
+# looked up in $PATH, which a per-user install is usually not in. Inside a
+# quoted Exec argument `"`, `` ` `` and `$` take a backslash, and a backslash
+# takes two (one for the string, one for the quoting).
+quoted=${program//\\/\\\\\\\\}
+quoted=${quoted//\"/\\\"}
+quoted=${quoted//\`/\\\`}
+quoted=${quoted//\$/\\\$}
+replace_exec() {
+    local from=$1 to=$2 line
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [[ $line == "Exec=$from"* ]]; then
+            printf 'Exec=%s%s\n' "$to" "${line#"Exec=$from"}"
+        else
+            printf '%s\n' "$line"
+        fi
+    done
+}
+replace_exec kara-ui "\"$quoted\"" < "$here/packaging/kara.desktop" > "$data/applications/kara.desktop"
+# dbus-daemon splits its Exec line the way a shell would: single quotes.
+shell_quoted="'${program//\'/\'\\\'\'}'"
+replace_exec /usr/bin/kara-ui "$shell_quoted" < "$here/packaging/org.freedesktop.FileManager1.service" \
+    > "$data/dbus-1/services/org.freedesktop.FileManager1.service"
+cp "$here/packaging/kara.svg" "$data/icons/hicolor/scalable/apps/kara.svg"
+
+command -v update-desktop-database >/dev/null && update-desktop-database "$data/applications" || true
+command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t "$data/icons/hicolor" || true
+
+if [ "$make_default" = yes ]; then
+    xdg-mime default kara.desktop inode/directory
+    echo "install-desktop-integration: Kara is now the default for folders ($(xdg-mime query default inode/directory))"
+fi
+
+echo "install-desktop-integration: installed for $program"
+if command -v gdbus >/dev/null; then
+    owner=$(gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+        --method org.freedesktop.DBus.GetNameOwner org.freedesktop.FileManager1 2>/dev/null || true)
+    if [ -n "$owner" ]; then
+        echo "note: another program holds org.freedesktop.FileManager1 right now (on GNOME, Nautilus running"
+        echo "      as a background service). Kara takes the name over once it exits: 'nautilus -q'."
+    fi
+fi

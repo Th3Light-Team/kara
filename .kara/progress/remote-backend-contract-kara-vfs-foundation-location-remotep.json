@@ -1,0 +1,988 @@
+{
+  "conveniencia": "Remote backend contract: kara-vfs foundation (Location, RemotePath, Backend trait, WriteSession, BackendError, Capabilities, MemoryBackend, conformance suite)",
+  "crate": "kara-vfs",
+  "slug": "remote-backend-contract-kara-vfs-foundation-location-remotep",
+  "estado": "pruebas_listas",
+  "contrato": {
+    "resumen": "New crate kara-vfs: the protocol-free foundation every remote drive plugs into. It fixes the vocabulary (RemotePath, DriveId, Location with a lossless string URI), the blocking Backend trait with a commit/abort WriteSession that never exposes a half-written file under its final name, a closed BackendError kind set that always names the path, the Capabilities flags the UI reads instead of branching on protocol, an in-memory backend with an SFTP-like and an S3-like profile plus fault injection, and a generic conformance suite that returns a report (never panics) and refuses to run on a non-empty scratch directory. No protocol code, no change to any existing crate except the workspace manifest.",
+    "fuente": {
+      "documento": "docs/remote-backends.md",
+      "seccion": "Order of work, step 1: «`kara-vfs`: `Location`, `RemotePath`, errors, trait, `MemoryBackend`, conformance suite.» — plus the sections `Location`, `Backend`, `Errors`, `Capabilities`, `Transfers`, `Conformance suite`",
+      "lineas": "16-121, 150-177",
+      "encontradaConTituloExacto": false,
+      "notaBusqueda": "The doc has no heading with the exact title; the title is the literal content of Order of work step 1 (l. 169), so the contract covers every section that step names. ground/spec/ has no remote-backend convenience of its own: the behaviour it grounds is scattered (network paths, disconnected media, safe cancel, never auto-replace). Those quotes are cited per edge case.",
+      "secundariasEnSpec": [
+        "ground/spec/05-operaciones.md — ## Diálogo de progreso de copia/movimiento (l. 9-25): «Al cancelar, la operación se detiene de forma segura (sin dejar el archivo en curso a medio escribir)»",
+        "ground/spec/05-operaciones.md — ## Pausar y reanudar operación (l. 27-37): «sin corromper el archivo en curso» / «revalidar que origen y destino siguen existiendo»",
+        "ground/spec/05-operaciones.md — ## Resolución de conflictos (l. 145-155): «no reemplazar automáticamente» / «mover a la misma carpeta (origen == destino) no es conflicto sino no-op» / «no sobrescribir una carpeta con un archivo sin aviso explícito»",
+        "ground/spec/05-operaciones.md — ## Manejo de errores con reintentar / omitir / cancelar (l. 205-215): «nombrar el archivo y el motivo» / «un medio extraíble que se desconecta a mitad debe detectarse y avisar, no colgar la operación indefinidamente»",
+        "ground/spec/05-operaciones.md — ## Eliminación permanente (l. 247-263): «carpetas grandes deben mostrar diálogo de progreso y poder cancelarse»",
+        "ground/spec/01-navegacion.md — Barra de direcciones / Editar ruta (l. 17, 41): «rutas de red y ubicaciones especiales […] deben representarse como segmentos coherentes» / «rutas de red (… smb:// / sftp:// en Linux)»",
+        "ground/spec/06-contexto-power.md — Deshacer (l. 57): «algunas operaciones sobre volúmenes remotos o de solo lectura no se pueden deshacer y la acción se deshabilita»",
+        "ground/spec/00-filosofia.md — «Reversibilidad por defecto» (l. 12)"
+      ]
+    },
+    "decisionesDeArquitecto": [
+      {
+        "id": "dec_01",
+        "tema": "Where MemoryBackend lives",
+        "conflicto": "docs/remote-backends.md l. 26 puts `MemoryBackend (tests)` in kara-remote; l. 169 (Order of work step 1) and this task's title put it in kara-vfs.",
+        "decision": "kara-vfs, module `memory`, behind cargo feature `memory`. kara-remote is NOT created in this step. Reason: the conformance suite must be proven against a backend in the same step, and a kara-vfs -> kara-remote dev-dependency would be a cycle once kara-remote depends on kara-vfs."
+      },
+      {
+        "id": "dec_02",
+        "tema": "WriteSession::abort returns Result",
+        "conflicto": "The doc signature is `fn abort(self: Box<Self>);` (l. 76). CLAUDE.md: «Cada syscall devuelve `Result` y cada error se propaga o se reporta». A failed SFTP temp-file cleanup would otherwise be swallowed.",
+        "decision": "`fn abort(self: Box<Self>) -> Result<(), BackendError>`. Dropping without finish/abort still aborts best-effort (Drop cannot return an error); that path is documented as the only place a cleanup failure is not reported."
+      },
+      {
+        "id": "dec_03",
+        "tema": "URI scheme without a registry",
+        "conflicto": "Location::Remote { drive, path } (l. 34-37) carries no protocol, but the URI form is `kara+sftp://drive-id/…` (l. 45) and must be produced and parsed in Rust with no registry (the registry is step 4).",
+        "decision": "DriveId carries its scheme: `DriveId { scheme, name }` (both validated). The `Location` enum keeps exactly the two variants of the doc. A drive never changes kind, so the scheme is part of its identity."
+      },
+      {
+        "id": "dec_04",
+        "tema": "Cancel token",
+        "conflicto": "kara-index already has `Cancel(Arc<AtomicBool>)`, but the doc's layering (l. 19) puts kara-index ABOVE kara-vfs, so kara-vfs cannot import it.",
+        "decision": "kara-vfs defines `Cancel` with the same semantics (Clone shares state, cancel() idempotent, Relaxed ordering is enough). kara-index is NOT touched in this step; unifying the two is step 3's job."
+      },
+      {
+        "id": "dec_05",
+        "tema": "Error kinds outside the doc's nine",
+        "conflicto": "The doc's kind list (l. 87-89) has no NotEmpty / NotADirectory / InvalidInput.",
+        "decision": "The nine kinds stay closed and exhaustive (no #[non_exhaustive]: adding a kind must force kara-ops to update its mapping). Conditions without a kind of their own are `Other` with an `std::io::Error` source of the precise `io::ErrorKind` (DirectoryNotEmpty, NotADirectory, IsADirectory, InvalidInput), so kara-ops can still tell them apart by downcast."
+      },
+      {
+        "id": "dec_06",
+        "tema": "Features and plain `cargo test`",
+        "conflicto": "The doc puts the suite behind feature `conformance` (l. 24); CLAUDE.md's verification command is plain `cargo test`, which would silently skip feature-gated tests.",
+        "decision": "Features `memory` and `conformance`, neither in `default`. kara-vfs lists itself as a dev-dependency with both features (`kara-vfs = { path = \".\", features = [\"memory\", \"conformance\"] }`), so `cargo test -p kara-vfs` and workspace `cargo test` run the suite without flags."
+      }
+    ],
+    "conveniencasAbsorbidas": [
+      {
+        "nombre": "Location as a string URI (docs/remote-backends.md, `Location`, l. 45)",
+        "porQueInseparable": "Location is in step 1, and «QML receives a `Location` as a string URI […] produced and parsed in Rust only». A Location without its URI round trip would be redesigned when tabs, history and bookmarks switch to it in step 3.",
+        "alcanceAbsorbido": "Location::to_uri / Location::from_uri, lossless round trip, local URIs byte-identical to kara_fs::uri::file_uri.",
+        "alcanceNOAbsorbido": "Parsing what a user TYPES in Ctrl+L (`sftp://host/path`, `~`, `$HOME`, UNC): needs the drive registry (step 4) and is UI input, not the canonical URI."
+      },
+      {
+        "nombre": "Error kind set and io::Error bridging (docs/remote-backends.md, `Errors`, l. 85-92)",
+        "porQueInseparable": "open_read returns a `Read` and WriteSession is a `Write`: their errors travel as io::Error. If the kind does not survive that trip, a disconnect mid-transfer becomes `Other`, and kara-ops would retry it forever instead of mapping it to MediaGone — exactly what l. 90 forbids.",
+        "alcanceAbsorbido": "BackendError, BackendErrorKind, From<BackendError> for io::Error, BackendError::from_io with a fixed mapping table.",
+        "alcanceNOAbsorbido": "The BackendErrorKind -> kara_ops::FailureKind mapping (Unavailable -> MediaGone, AuthRequired -> needs_user_action_first): kara-ops, step 3. Note: FailureKind has no AuthRequired variant today."
+      },
+      {
+        "nombre": "Capabilities flags (docs/remote-backends.md, `Capabilities`, l. 94-108)",
+        "porQueInseparable": "The conformance suite must «only exercise declared capabilities» (l. 160), and the S3 profile (no real directories, no atomic rename) changes what list/create_dir/rename/begin_write mean. The flags are part of the trait's semantics, not decoration.",
+        "alcanceAbsorbido": "The struct with all nine flags of the table, and the behavioural meaning of real_directories, atomic_rename, server_side_copy and symlinks in the trait.",
+        "alcanceNOAbsorbido": "The UI effects column (warnings, hidden permissions tab, disabled undo with reason): kara-ui/kara-ops."
+      },
+      {
+        "nombre": "Safe cancel / pause without a half-written file (05-operaciones l. 9-37)",
+        "porQueInseparable": "«sin dejar el archivo en curso a medio escribir» and «sin corromper el archivo en curso» are only possible if the write primitive has a commit step; that is WriteSession, and open_read(from) is what makes resume possible.",
+        "alcanceAbsorbido": "WriteSession invisibility before finish, abort/drop leave nothing, open_read offsets.",
+        "alcanceNOAbsorbido": "The transfer loop, chunking, pause, speed/ETA and verify-size-then-delete for cross-backend moves: kara-ops, step 3."
+      },
+      {
+        "nombre": "Never replace automatically / file-vs-folder conflict (05-operaciones l. 145-155)",
+        "porQueInseparable": "The conflict dialog can only ask if the primitive refuses to overwrite. A `rename` that silently replaces (POSIX rename(2)) or a write that replaces a directory would make the dialog decorative.",
+        "alcanceAbsorbido": "begin_write(replace=false) and rename refuse with AlreadyExists; a directory is never replaced by a file; from == to is a no-op.",
+        "alcanceNOAbsorbido": "The dialog, Keep both naming, Apply to all, Merge folders."
+      },
+      {
+        "nombre": "Disconnected medium is detected, not hung on (05-operaciones l. 213)",
+        "porQueInseparable": "Unavailable is the only signal kara-ops gets that retrying cannot help; it must be produced on every operation, including an already open reader or write session.",
+        "alcanceAbsorbido": "Unavailable kind, errno mapping (ENODEV, ENXIO, EIO, ENOMEDIUM, ESTALE, network errnos), MemoryBackend::disconnect affecting open streams.",
+        "alcanceNOAbsorbido": "Timeouts/keepalive of a real connection: SFTP adapter, step 5."
+      }
+    ],
+    "conveniencasNOAbsorbidas": [
+      "LocalBackend in kara-fs passing the suite — step 2. Risk recorded: RemotePath is UTF-8 only, so the trait cannot name non-UTF-8 local files; step 2 must decide (local->local keeps the existing kara-fs route 1 per l. 114).",
+      "Location replacing Path/PathBuf in kara-ops, tabs, history and FileEntry::location — step 3. kara-core is NOT modified in this step; MemoryBackend fills FileEntry::location with None.",
+      "Transfer routing (l. 112-121), copy-verify-delete moves across backends — kara-ops, step 3.",
+      "DriveConfig, DriveRegistry, drive states, SecretStore/keyring, «Añadir unidad…» — step 4.",
+      "SFTP adapter (step 5), S3 adapter (step 6).",
+      "A trash operation on the trait: the `trash` flag exists, but the doc defines no trait method for it; LocalBackend (step 2) must add or route it. Not invented here.",
+      "posix_permissions, watch: flags only; no trait operations exist for chmod or watching.",
+      "Search and folder size over remote drives, remote thumbnails (Open questions, l. 189-194)."
+    ],
+    "capas": {
+      "crate": "kara-vfs (new, crates/kara-vfs)",
+      "modulos": [
+        "src/lib.rs — crate doc (English), re-exports of everything public below",
+        "src/path.rs — RemotePath, RemotePathError",
+        "src/location.rs — DriveId, DriveIdError, Location, LocationError, URI encode/decode",
+        "src/error.rs — BackendError, BackendErrorKind, io bridging",
+        "src/capabilities.rs — Capabilities",
+        "src/backend.rs — Backend, WriteSession, Listing, Cancel, TRANSFER_CHUNK",
+        "src/memory/ — MemoryBackend and its test controls (#[cfg(feature = \"memory\")])",
+        "src/conformance/ — run(), report types, CASE_IDS (#[cfg(feature = \"conformance\")])"
+      ],
+      "manifiestoWorkspace": "Root Cargo.toml: add \"crates/kara-vfs\" to members and `kara-vfs = { path = \"crates/kara-vfs\" }` to [workspace.dependencies]. Nothing else in the root manifest changes.",
+      "dependenciasPermitidas": [
+        "kara-core",
+        "thiserror",
+        "percent-encoding",
+        "std"
+      ],
+      "devDependenciasPermitidas": [
+        "kara-vfs (itself, features memory + conformance)",
+        "tempfile only if a test needs a real directory (none should)"
+      ],
+      "features": "[features] default = [] ; memory = [] ; conformance = []",
+      "prohibido": [
+        "Depending on kara-fs, kara-index, kara-ops or kara-ui (layering of l. 19: ui -> ops -> {fs, remote, index} -> vfs -> core).",
+        "Any protocol crate (russh, russh-sftp, object_store, oo7, tokio, async-trait): «No protocol code» (l. 24).",
+        "async fn or a runtime in the trait: «Blocking, `Send + Sync`» (l. 50).",
+        "unwrap / expect / panic! / unreachable! / todo! / unimplemented! / assert! / assert_eq! / debug_assert! anywhere in src/, cfg(test) modules and the conformance suite included («No `unwrap`/`expect`/`panic!` in `kara-vfs` […] same rule and same scan as `kara-fs`», l. 91-92). Slice indexing that can panic is also out: use .get(). Size/offset arithmetic uses checked_/saturating_.",
+        "Lock poisoning turning into a panic: MemoryBackend maps a poisoned Mutex to BackendError{kind: Other} or recovers with PoisonError::into_inner; never .lock().unwrap().",
+        "Writing to stdout/stderr.",
+        "Modifying any existing crate's sources, tests or manifests (kara-core, kara-fs, kara-index, kara-ops, kara-ui). crates/kara-fs/tests/* is hash-checked.",
+        "Spawning threads inside kara-vfs (MemoryBackend and the suite are synchronous)."
+      ]
+    },
+    "apiPublica": {
+      "nota": "Normative signatures. Names, parameter types and return types are part of the contract. Every public type derives Debug. Everything below is re-exported at the crate root (kara_vfs::RemotePath, kara_vfs::Backend, …) except the memory and conformance modules, reached as kara_vfs::memory::* and kara_vfs::conformance::*.",
+      "items": [
+        {
+          "id": "api_01",
+          "grupo": "RemotePath",
+          "firmas": [
+            "#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)] pub struct RemotePath(/* private: normalised String */);",
+            "impl RemotePath { pub fn root() -> RemotePath; pub fn parse(s: &str) -> Result<RemotePath, RemotePathError>; pub fn from_bytes(bytes: &[u8]) -> Result<RemotePath, RemotePathError>; pub fn as_str(&self) -> &str; pub fn is_root(&self) -> bool; pub fn parent(&self) -> Option<RemotePath>; pub fn file_name(&self) -> Option<&str>; pub fn join(&self, segment: &str) -> Result<RemotePath, RemotePathError>; pub fn segments(&self) -> impl Iterator<Item = &str>; pub fn starts_with(&self, base: &RemotePath) -> bool; }",
+            "impl std::fmt::Display for RemotePath  // writes as_str()",
+            "impl std::str::FromStr for RemotePath { type Err = RemotePathError; }  // same as parse",
+            "#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] pub enum RemotePathError { Empty, NotAbsolute { raw: String }, DotSegment { raw: String }, ContainsNul, NotUtf8, InvalidSegment { segment: String } }"
+          ],
+          "notas": "Canonical form: starts with '/', segments separated by exactly one '/', no trailing '/' except the root \"/\", no '.' or '..' segment, no NUL, valid UTF-8. parse() collapses repeated '/' and strips a trailing '/'; it REJECTS '.' and '..' instead of resolving them (S3 keys have no such semantics, l. 40-41). No Unicode normalisation. join() takes exactly one segment."
+        },
+        {
+          "id": "api_02",
+          "grupo": "DriveId",
+          "firmas": [
+            "#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)] pub struct DriveId { /* private: scheme: String, name: String */ }",
+            "impl DriveId { pub fn new(scheme: &str, name: &str) -> Result<DriveId, DriveIdError>; pub fn scheme(&self) -> &str; pub fn name(&self) -> &str; }",
+            "#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] pub enum DriveIdError { InvalidScheme { raw: String }, InvalidName { raw: String } }"
+          ],
+          "notas": "scheme: ASCII, matches ^[a-z][a-z0-9]{0,15}$ (\"sftp\", \"s3\", \"mem\"). name: ASCII, matches ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ (a DNS label), so it is a URI authority with no escaping. Equality includes the scheme."
+        },
+        {
+          "id": "api_03",
+          "grupo": "Location",
+          "firmas": [
+            "#[derive(Debug, Clone, PartialEq, Eq, Hash)] pub enum Location { Local(PathBuf), Remote { drive: DriveId, path: RemotePath } }",
+            "impl Location { pub fn to_uri(&self) -> Result<String, LocationError>; pub fn from_uri(uri: &str) -> Result<Location, LocationError>; pub fn is_local(&self) -> bool; pub fn drive(&self) -> Option<&DriveId>; pub fn same_remote_drive(&self, other: &Location) -> bool; pub fn parent(&self) -> Option<Location>; }",
+            "#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] pub enum LocationError { RelativeLocalPath, UnsupportedScheme { raw: String }, NonLocalFileHost { host: String }, QueryOrFragment, InvalidPercentEncoding, ContainsNul, Drive(#[from] DriveIdError), Path(#[from] RemotePathError) }"
+          ],
+          "notas": "Local URI: \"file://\" + percent-encoded raw bytes of the path (OsStrExt::as_bytes, never lossy), escape set = ASCII controls + space \" # % < > ? [ \\ ] ^ ` { | } + every byte >= 0x80, uppercase hex — the exact set of crates/kara-fs/src/uri.rs, duplicated (kara-vfs cannot depend on kara-fs). Remote URI: \"kara+\" + scheme + \"://\" + name + percent-encoded UTF-8 of path.as_str() with the same escape set. from_uri: lowercase schemes only; \"file\" requires an empty host; \"kara+<scheme>\" requires a valid DriveId; a missing path after the authority means root. same_remote_drive is true iff both are Remote with equal DriveId (Local vs Local is false: route 1 is decided elsewhere). parent(): Local uses Path::parent; Remote uses RemotePath::parent on the same drive; roots return None."
+        },
+        {
+          "id": "api_04",
+          "grupo": "Errors",
+          "firmas": [
+            "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)] pub enum BackendErrorKind { NotFound, AlreadyExists, PermissionDenied, NoSpace, Unavailable, AuthRequired, Unsupported, Cancelled, Other }",
+            "impl std::fmt::Display for BackendErrorKind  // short English phrase, e.g. \"not found\"",
+            "#[derive(Debug, thiserror::Error)] pub struct BackendError { pub kind: BackendErrorKind, pub path: Option<RemotePath>, #[source] pub source: Option<Box<dyn std::error::Error + Send + Sync + 'static>> }",
+            "impl BackendError { pub fn new(kind: BackendErrorKind, path: Option<RemotePath>) -> BackendError; pub fn with_source(self, source: impl Into<Box<dyn std::error::Error + Send + Sync + 'static>>) -> BackendError; pub fn kind(&self) -> BackendErrorKind; pub fn from_io(error: std::io::Error, path: Option<&RemotePath>) -> BackendError; }",
+            "impl From<BackendError> for std::io::Error",
+            "Display: \"{kind}: {path}\" when path is Some, \"{kind}\" otherwise"
+          ],
+          "notas": "BackendError is Send + Sync + 'static. from_io first tries io::Error::into_inner + downcast::<BackendError>() and returns the original unchanged (kind AND path); only otherwise it maps by io::ErrorKind / raw errno (table in cb_14) and keeps the io::Error as source. From<BackendError> for io::Error wraps the whole BackendError as the inner error with the io kind of cb_13."
+        },
+        {
+          "id": "api_05",
+          "grupo": "Capabilities",
+          "firmas": [
+            "#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)] pub struct Capabilities { pub trash: bool, pub atomic_rename: bool, pub server_side_copy: bool, pub real_directories: bool, pub posix_permissions: bool, pub symlinks: bool, pub watch: bool, pub undo_rename: bool, pub undo_move: bool }"
+          ],
+          "notas": "Default is all false (a backend declares what it HAS). Exactly the flags of the table at l. 99-108; undo_rename/undo_move are two fields."
+        },
+        {
+          "id": "api_06",
+          "grupo": "Cancel, Listing, chunk",
+          "firmas": [
+            "#[derive(Debug, Clone, Default)] pub struct Cancel(/* private Arc<AtomicBool> */);",
+            "impl Cancel { pub fn new() -> Cancel; pub fn cancel(&self); pub fn is_cancelled(&self) -> bool; }",
+            "#[derive(Debug, Default)] pub struct Listing { pub entries: Vec<kara_core::FileEntry>, pub errors: Vec<BackendError> }",
+            "pub const TRANSFER_CHUNK: usize = 1 << 20;"
+          ],
+          "notas": "Listing mirrors kara_fs::listing::Listing: entries unsorted, per-entry failures in `errors` without failing the whole listing. TRANSFER_CHUNK (1 MiB) is the chunk the suite uses for «file larger than one chunk» and the granularity kara-ops will use for cancel/pause."
+        },
+        {
+          "id": "api_07",
+          "grupo": "Backend trait",
+          "firmas": [
+            "pub trait Backend: Send + Sync {",
+            "    fn capabilities(&self) -> Capabilities;",
+            "    fn list(&self, dir: &RemotePath, cancel: &Cancel) -> Result<Listing, BackendError>;",
+            "    fn stat(&self, path: &RemotePath) -> Result<kara_core::FileEntry, BackendError>;",
+            "    fn open_read(&self, path: &RemotePath, from: u64) -> Result<Box<dyn std::io::Read + Send>, BackendError>;",
+            "    fn begin_write(&self, path: &RemotePath, size_hint: Option<u64>, replace: bool) -> Result<Box<dyn WriteSession>, BackendError>;",
+            "    fn create_dir(&self, path: &RemotePath) -> Result<(), BackendError>;",
+            "    fn rename(&self, from: &RemotePath, to: &RemotePath) -> Result<(), BackendError>;",
+            "    fn remove(&self, path: &RemotePath) -> Result<(), BackendError>;",
+            "    fn remove_tree(&self, path: &RemotePath, cancel: &Cancel) -> Result<(), BackendError>;",
+            "    fn copy_within(&self, from: &RemotePath, to: &RemotePath) -> Result<(), BackendError>;",
+            "}"
+          ],
+          "notas": "Object safe: Arc<dyn Backend> and Box<dyn Backend> compile and are Send + Sync. No default method bodies (every backend states every behaviour). Semantics per method are the edge cases cb_17..cb_42."
+        },
+        {
+          "id": "api_08",
+          "grupo": "WriteSession trait",
+          "firmas": [
+            "pub trait WriteSession: std::io::Write + Send {",
+            "    fn finish(self: Box<Self>) -> Result<(), BackendError>;",
+            "    fn abort(self: Box<Self>) -> Result<(), BackendError>;",
+            "}"
+          ],
+          "notas": "See dec_02 for abort's return type. Write::flush never commits. Drop without finish/abort aborts best-effort. After any Write::write/flush error, the session is poisoned: finish returns Err (same kind as the first error) and commits nothing."
+        },
+        {
+          "id": "api_09",
+          "grupo": "MemoryBackend (feature memory)",
+          "firmas": [
+            "pub struct MemoryBackend { /* private Mutex<State> */ }  // implements Backend; Debug",
+            "impl MemoryBackend { pub fn posix_like() -> MemoryBackend; pub fn object_store_like() -> MemoryBackend; pub fn with_capabilities(caps: Capabilities) -> MemoryBackend; pub fn inject(&self, fault: Fault) -> Result<(), BackendError>; pub fn clear_faults(&self) -> Result<(), BackendError>; pub fn set_capacity(&self, bytes: Option<u64>) -> Result<(), BackendError>; pub fn disconnect(&self) -> Result<(), BackendError>; pub fn reconnect(&self) -> Result<(), BackendError>; pub fn create_symlink(&self, link: &RemotePath, target: &str) -> Result<(), BackendError>; pub fn snapshot(&self) -> Result<MemorySnapshot, BackendError>; pub fn stats(&self) -> Result<MemoryStats, BackendError>; }",
+            "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)] pub enum Op { List, Stat, OpenRead, Read, BeginWrite, Write, Finish, CreateDir, Rename, Remove, RemoveTree, CopyWithin }",
+            "#[derive(Debug, Clone)] pub enum FaultEffect { Fail(BackendErrorKind), Cancel(Cancel) }",
+            "#[derive(Debug, Clone)] pub struct Fault { pub op: Op, pub path: Option<RemotePath>, pub after: u64, pub effect: FaultEffect, pub times: Option<u32> }",
+            "#[derive(Debug, Clone, PartialEq, Eq)] pub enum MemoryNode { File { content: Vec<u8> }, Dir, DirMarker, Symlink { target: String } }",
+            "#[derive(Debug, Clone, PartialEq, Eq)] pub struct MemorySnapshot { pub nodes: std::collections::BTreeMap<RemotePath, MemoryNode> }",
+            "#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)] pub struct MemoryStats { pub bytes_read: u64, pub bytes_written: u64, pub open_sessions: usize }"
+          ],
+          "notas": "posix_like() capabilities = SFTP column: {trash:false, atomic_rename:true, server_side_copy:false, real_directories:true, posix_permissions:true, symlinks:true, watch:false, undo_rename:true, undo_move:true}. object_store_like() = S3 column: {trash:false, atomic_rename:false, server_side_copy:true, real_directories:false, posix_permissions:false, symlinks:false, watch:false, undo_rename:false, undo_move:false}. with_capabilities makes the BEHAVIOUR follow real_directories, atomic_rename, server_side_copy and symlinks. Fault: `path: None` matches any path; `after` = entries yielded (List), bytes transferred (Read/Write), objects processed (Rename/RemoveTree), ignored otherwise; `times: None` fires until clear_faults. MemorySnapshot holds committed state only (MemoryNode excludes modified times so snapshots compare by value); `nodes` never contains the root. stats counts bytes moved through open_read readers and WriteSession::write, NOT by copy_within. create_symlink returns Unsupported when !capabilities().symlinks. A DirMarker is the object-store `key/` marker (l. 104)."
+        },
+        {
+          "id": "api_10",
+          "grupo": "Conformance suite (feature conformance)",
+          "firmas": [
+            "pub fn run(backend: &dyn Backend, scratch: &RemotePath) -> Result<ConformanceReport, ConformanceError>;",
+            "pub const CASE_IDS: &[&str];",
+            "#[derive(Debug, Clone, PartialEq, Eq)] pub struct ConformanceReport { pub cases: Vec<CaseResult> }",
+            "impl ConformanceReport { pub fn is_success(&self) -> bool; pub fn failures(&self) -> Vec<&CaseResult>; }",
+            "#[derive(Debug, Clone, PartialEq, Eq)] pub struct CaseResult { pub id: &'static str, pub outcome: CaseOutcome }",
+            "#[derive(Debug, Clone, PartialEq, Eq)] pub enum CaseOutcome { Passed, Failed { detail: String }, Skipped { because: &'static str } }",
+            "#[derive(Debug, thiserror::Error)] pub enum ConformanceError { ScratchUnreachable(#[source] BackendError), ScratchNotDirectory, ScratchNotEmpty { entries: usize } }"
+          ],
+          "notas": "One generic function, run against every backend (l. 152). It never panics: a backend that misbehaves yields CaseOutcome::Failed with a detail naming the path and what was expected vs observed. CASE_IDS is the normative list below (casosDeConformidad); report.cases has one entry per id, in CASE_IDS order. is_success() == no Failed (Skipped is allowed). `because` is the exact capability condition that caused the skip, e.g. \"server_side_copy=false\"."
+        }
+      ]
+    },
+    "casosDeConformidad": {
+      "nota": "Ids of conformance::CASE_IDS, in order. Each runs inside its own fresh subdirectory of `scratch` and removes it at the end (also on failure, best effort). `skipIf` is the ONLY reason a case may be Skipped. Symlink behaviour is not in the generic suite: the trait has no operation to create a link, so it cannot be set up generically; MemoryBackend covers it in cb_39.",
+      "casos": [
+        {
+          "id": "list_stat_roundtrip",
+          "verifica": "create a file and a dir; every entry of list(scratch/x) equals stat(x/name) on name, display, kind, is_symlink, is_hidden, size, modified",
+          "skipIf": null
+        },
+        {
+          "id": "special_names",
+          "verifica": "names \"a b.txt\", \"ünï cødé.txt\", \"#hash.txt\", \"100%.txt\", \"why?.txt\", \"[x].txt\" written, listed byte-identical, stat-able, readable, removable",
+          "skipIf": null
+        },
+        {
+          "id": "hidden_entries_listed",
+          "verifica": "\".dot\" appears in list with is_hidden == true (filtering is UI)",
+          "skipIf": null
+        },
+        {
+          "id": "empty_dir_lists_ok",
+          "verifica": "list of a just-created dir is Ok with 0 entries and 0 errors",
+          "skipIf": null
+        },
+        {
+          "id": "list_missing_not_found",
+          "verifica": "list of a missing path -> NotFound with path == that path",
+          "skipIf": null
+        },
+        {
+          "id": "list_file_is_error",
+          "verifica": "list of a file -> Err (kind Other), never Ok",
+          "skipIf": null
+        },
+        {
+          "id": "list_precancelled",
+          "verifica": "list with an already-cancelled Cancel -> Err(Cancelled), never a partial Ok",
+          "skipIf": null
+        },
+        {
+          "id": "write_read_back",
+          "verifica": "begin_write+write+finish then open_read(0) returns the exact bytes",
+          "skipIf": null
+        },
+        {
+          "id": "empty_file",
+          "verifica": "begin_write+finish with no write -> file exists, size Some(0), read returns 0 bytes",
+          "skipIf": null
+        },
+        {
+          "id": "multi_chunk_file",
+          "verifica": "2*TRANSFER_CHUNK+17 bytes of a non-repeating pattern, written in uneven pieces, read back byte-identical, stat size matches",
+          "skipIf": null
+        },
+        {
+          "id": "size_hint_is_only_a_hint",
+          "verifica": "size_hint Some(10) then 3 bytes, and size_hint Some(0) then 5 bytes: both finish Ok with the bytes actually written",
+          "skipIf": null
+        },
+        {
+          "id": "read_offsets",
+          "verifica": "open_read(from=0, mid, len) return len, len-mid, 0 bytes; from=len+1 -> Err",
+          "skipIf": null
+        },
+        {
+          "id": "read_missing_and_dir",
+          "verifica": "open_read of a missing path -> NotFound; of a directory -> Err (Other)",
+          "skipIf": null
+        },
+        {
+          "id": "read_drop_midway",
+          "verifica": "reading half and dropping the reader leaves the source intact (content and size)",
+          "skipIf": null
+        },
+        {
+          "id": "replace_false_existing",
+          "verifica": "begin_write(existing, replace=false) -> AlreadyExists immediately; existing content unchanged",
+          "skipIf": null
+        },
+        {
+          "id": "replace_false_race_at_finish",
+          "verifica": "begin_write(new, false), then another session creates the same name and finishes, then finish of the first -> AlreadyExists; the content is the second's",
+          "skipIf": null
+        },
+        {
+          "id": "replace_true",
+          "verifica": "begin_write(existing, true): before finish, stat/read show the OLD content; after finish, the new one",
+          "skipIf": null
+        },
+        {
+          "id": "invisible_before_finish",
+          "verifica": "while a session on a new name is open: stat(name) -> NotFound and list(parent) does not contain name",
+          "skipIf": null
+        },
+        {
+          "id": "abort_leaves_nothing",
+          "verifica": "write half, abort() Ok: list(parent) identical (as a set of names) to before begin_write; replace=true target keeps old content",
+          "skipIf": null
+        },
+        {
+          "id": "drop_leaves_nothing",
+          "verifica": "same as abort_leaves_nothing but the session is dropped without finish/abort",
+          "skipIf": null
+        },
+        {
+          "id": "write_onto_directory",
+          "verifica": "begin_write on an existing directory with replace=false AND replace=true -> AlreadyExists; the directory and its children intact",
+          "skipIf": null
+        },
+        {
+          "id": "concurrent_sessions_same_target",
+          "verifica": "two replace=true sessions on one name with different content, both finished: final content equals exactly one of the two, never a mix",
+          "skipIf": null
+        },
+        {
+          "id": "create_dir",
+          "verifica": "create_dir then stat -> Directory, list(parent) contains it, list(it) Ok empty",
+          "skipIf": null
+        },
+        {
+          "id": "create_dir_existing",
+          "verifica": "create_dir on an existing dir or file -> AlreadyExists; nothing changed",
+          "skipIf": null
+        },
+        {
+          "id": "missing_parent",
+          "verifica": "real_directories=true: create_dir and begin_write under a missing parent -> NotFound, nothing created. real_directories=false: begin_write under a missing prefix succeeds and the prefix lists as a Directory",
+          "skipIf": null
+        },
+        {
+          "id": "rename_file",
+          "verifica": "rename file -> old NotFound, new has same content",
+          "skipIf": null
+        },
+        {
+          "id": "rename_dir_subtree",
+          "verifica": "rename of a dir with 2 levels of children: every child readable under the new prefix, old prefix NotFound",
+          "skipIf": null
+        },
+        {
+          "id": "rename_never_overwrites",
+          "verifica": "rename onto an existing file -> AlreadyExists with path == to; both contents unchanged",
+          "skipIf": null
+        },
+        {
+          "id": "rename_same_is_noop",
+          "verifica": "rename(x, x) -> Ok, content unchanged",
+          "skipIf": null
+        },
+        {
+          "id": "rename_into_own_subtree",
+          "verifica": "rename(d, d/sub/d2) -> Err (Other), tree unchanged",
+          "skipIf": null
+        },
+        {
+          "id": "remove_file_and_empty_dir",
+          "verifica": "remove of a file and of an empty dir -> Ok, both NotFound afterwards",
+          "skipIf": null
+        },
+        {
+          "id": "remove_nonempty_dir",
+          "verifica": "remove of a non-empty dir -> Err (Other), nothing removed",
+          "skipIf": null
+        },
+        {
+          "id": "remove_missing",
+          "verifica": "remove of a missing path -> NotFound",
+          "skipIf": null
+        },
+        {
+          "id": "remove_tree",
+          "verifica": "remove_tree of a 3-level tree -> Ok and the root NotFound; remove_tree of a single file -> Ok",
+          "skipIf": null
+        },
+        {
+          "id": "remove_tree_precancelled",
+          "verifica": "remove_tree with a cancelled Cancel -> Err(Cancelled) and nothing removed",
+          "skipIf": null
+        },
+        {
+          "id": "error_names_path",
+          "verifica": "every Err produced by the cases above with a path argument has path == Some(the involved path) per cb_12",
+          "skipIf": null
+        },
+        {
+          "id": "capabilities_stable",
+          "verifica": "capabilities() called before and after all mutations returns equal values",
+          "skipIf": null
+        },
+        {
+          "id": "copy_within",
+          "verifica": "copy_within file -> both readable, identical; onto existing -> AlreadyExists, target unchanged; dir source -> Unsupported",
+          "skipIf": "server_side_copy == false -> Skipped{because:\"server_side_copy=false\"}"
+        },
+        {
+          "id": "implicit_directories",
+          "verifica": "real_directories=false: removing the last object under a prefix with no marker makes the prefix NotFound and absent from list(parent)",
+          "skipIf": "real_directories == true -> Skipped{because:\"real_directories=true\"}"
+        }
+      ]
+    },
+    "casosBorde": [
+      {
+        "id": "cb_01",
+        "titulo": "RemotePath canonical form",
+        "cita": "«`RemotePath`: normalised, `/`-separated, no `.`/`..`, UTF-8.» (remote-backends.md l. 40)",
+        "comportamiento": "parse collapses repeated '/' and strips one or more trailing '/'; root is exactly \"/\".",
+        "verificable": "parse(\"/a//b/\").as_str() == \"/a/b\"; parse(\"///\") == RemotePath::root(); parse(\"/\").is_root(); parse(\"/a/b\") == parse(\"/a//b//\")."
+      },
+      {
+        "id": "cb_02",
+        "titulo": "RemotePath rejections, each with its own variant",
+        "cita": "«no `.`/`..`, UTF-8. Not a `PathBuf`: S3 keys are not filesystem paths and must not inherit their semantics.» (l. 40-41)",
+        "comportamiento": "Rejected, not repaired: empty, relative, any '.' or '..' segment (not resolved), NUL, non-UTF-8 bytes.",
+        "verificable": "parse(\"\") == Err(Empty); parse(\"a/b\") == Err(NotAbsolute{..}); parse(\"/a/./b\") and parse(\"/a/../b\") and parse(\"/..\") == Err(DotSegment{..}); parse(\"/a\\0b\") == Err(ContainsNul); from_bytes(b\"/a/\\xff\") == Err(NotUtf8). \"/a/...\" and \"/.hidden\" and \"/a..b\" are VALID (only exact '.'/'..' segments are rejected)."
+      },
+      {
+        "id": "cb_03",
+        "titulo": "Unusual but legal characters are kept verbatim; no Unicode normalisation",
+        "cita": "«list / stat round trip, names with spaces, unicode and `#`/`%`/`?`» (l. 154)",
+        "comportamiento": "Space, '#', '%', '?', '[', ']', '\\\\', ':', '*', control characters other than NUL, and any Unicode are ordinary segment characters. NFC and NFD forms of the same text are different paths.",
+        "verificable": "parse(\"/a b/#%?\\\\x\").as_str() unchanged and segments() == [\"a b\", \"#%?\\\\x\"]; parse(\"/caf\\u{e9}\") != parse(\"/cafe\\u{301}\"). In MemoryBackend both can coexist in one directory and list returns 2 entries."
+      },
+      {
+        "id": "cb_04",
+        "titulo": "join, parent, file_name, starts_with are segment-aware",
+        "cita": "«`/`-separated» (l. 40) — a prefix test on raw strings would treat /ab as inside /a and rename_tree / remove_tree would touch a sibling",
+        "comportamiento": "join accepts exactly one non-empty segment without '/', NUL, '.' or '..'. starts_with compares whole segments. parent(root) is None; file_name(root) is None.",
+        "verificable": "root().join(\"a\") == parse(\"/a\"); join(\"a/b\"), join(\"\"), join(\".\"), join(\"..\") == Err(InvalidSegment{..}) (NUL -> ContainsNul); parse(\"/ab\").starts_with(&parse(\"/a\")) == false; parse(\"/a/b\").starts_with(&parse(\"/a\")) == true; every path starts_with root; parse(\"/a\").parent() == Some(root); parse(\"/a/b\").file_name() == Some(\"b\")."
+      },
+      {
+        "id": "cb_05",
+        "titulo": "DriveId validation",
+        "cita": "«`kara+sftp://drive-id/…`» (l. 45) — the id is the URI authority, so it must need no escaping",
+        "comportamiento": "scheme ^[a-z][a-z0-9]{0,15}$, name ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$. Anything else is rejected, never lower-cased or trimmed for the caller.",
+        "verificable": "new(\"sftp\",\"work-nas\") Ok; new(\"SFTP\",\"x\"), new(\"\",\"x\"), new(\"1s\",\"x\"), new(\"s-3\",\"x\") -> InvalidScheme; new(\"sftp\",\"\"), (\"sftp\",\"-x\"), (\"sftp\",\"x-\"), (\"sftp\",\"Work\"), (\"sftp\",\"a b\"), (\"sftp\",\"a.b\"), (\"sftp\", 64×\"a\") -> InvalidName; DriveId::new(\"sftp\",\"x\") != DriveId::new(\"s3\",\"x\")."
+      },
+      {
+        "id": "cb_06",
+        "titulo": "Local URIs are byte-identical to kara_fs::uri::file_uri",
+        "cita": "crates/kara-fs/src/uri.rs: «the thumbnail cache is keyed by the MD5 of this exact string […] Escape one byte differently from GLib or Qt and Kara silently stops seeing the thumbnails»",
+        "comportamiento": "Same escape set, uppercase hex, raw OsStr bytes.",
+        "verificable": "to_uri(Local(\"/tmp/a b#c%d?.txt\")) == \"file:///tmp/a%20b%23c%25d%3F.txt\"; Local(\"/tmp/caf\\u{e9}\") -> \"file:///tmp/caf%C3%A9\"; Local(OsStr::from_bytes(b\"/tmp/\\xff\")) -> \"file:///tmp/%FF\"; Local(\"/tmp/[x]{y}\") -> \"file:///tmp/%5Bx%5D%7By%7D\"; Local(\"/tmp/l\\nb\") -> \"file:///tmp/l%0Ab\"; Local(\"/a&b=c;d,e+f!g'h(i)*j~k_l-m.n:o@p$q\") is emitted unescaped after \"file://\". (The test pins these strings; kara-vfs must not depend on kara-fs.)"
+      },
+      {
+        "id": "cb_07",
+        "titulo": "URI round trip is lossless",
+        "cita": "«QML receives a `Location` as a string URI […] produced and parsed in Rust only. Breadcrumbs, Ctrl+L and bookmarks use it.» (l. 45-46)",
+        "comportamiento": "from_uri(to_uri(l)?) == l for every valid Location.",
+        "verificable": "Round trip holds for Local paths with spaces, '#', '%', '?', newline, non-UTF-8 byte 0xFF, and for Remote paths \"/\", \"/a b/#%?[]\", \"/ünï/cødé\", \"/a\\\\b\". to_uri(Remote{drive: sftp/work, path: \"/home/ana/a b.txt\"}) == \"kara+sftp://work/home/ana/a%20b.txt\"; to_uri(Remote{.., path: root}) == \"kara+sftp://work/\"."
+      },
+      {
+        "id": "cb_08",
+        "titulo": "Remote root accepted with or without trailing slash",
+        "cita": "«rutas de red y ubicaciones especiales […] también deben representarse como segmentos coherentes» (01-navegacion l. 17)",
+        "comportamiento": "\"kara+sftp://work\" and \"kara+sftp://work/\" both parse to the drive root; to_uri always emits the slash form.",
+        "verificable": "from_uri(\"kara+sftp://work\") == from_uri(\"kara+sftp://work/\") == Remote{drive: (sftp, work), path: root}."
+      },
+      {
+        "id": "cb_09",
+        "titulo": "from_uri rejects what Kara never produces",
+        "cita": "«produced and parsed in Rust only» (l. 45-46) — a URI that is not Kara's canonical form is not silently reinterpreted",
+        "comportamiento": "Strict parser, each failure typed.",
+        "verificable": "\"smb://h/x\", \"http://x\", \"sftp://h/x\" (no kara+), \"kara+://x/\", \"FILE:///x\" -> UnsupportedScheme; \"file://host/x\" -> NonLocalFileHost{host:\"host\"}; \"file:///a?b\", \"file:///a#b\", \"kara+sftp://w/a#b\" -> QueryOrFragment; \"file:///a%zz\", \"file:///a%4\" -> InvalidPercentEncoding; \"file:///a%00b\", \"kara+sftp://w/a%00\" -> ContainsNul; \"kara+sftp://w/%FF\" -> Path(NotUtf8); \"kara+sftp://w/a/../b\" -> Path(DotSegment{..}); \"kara+sftp://Bad_Name/\" -> Drive(InvalidName{..}); \"file:relative\" and \"file://\" -> RelativeLocalPath or UnsupportedScheme, never Ok. to_uri(Local(\"rel/x\")) and to_uri(Local(\"\")) -> Err(RelativeLocalPath)."
+      },
+      {
+        "id": "cb_10",
+        "titulo": "same_remote_drive and parent",
+        "cita": "«Same remote drive and `server_side_copy`: `copy_within`.» (l. 115)",
+        "comportamiento": "same_remote_drive is true only for two Remote locations whose DriveId (scheme AND name) is equal.",
+        "verificable": "Remote(sftp/work,/a) vs Remote(sftp/work,/b) -> true; vs Remote(s3/work,/a) -> false; vs Remote(sftp/home,/a) -> false; Local vs Local -> false; Local vs Remote -> false. Remote(sftp/work,/a).parent() == Some(Remote(sftp/work, root)); Remote root .parent() == None; Local(\"/\").parent() == None."
+      },
+      {
+        "id": "cb_11",
+        "titulo": "Errors are Send + Sync + 'static and keep their source",
+        "cita": "«`BackendError { kind, path, source }`» (l. 87); CLAUDE.md «cada error se propaga o se reporta»",
+        "comportamiento": "BackendError can cross the worker->UI boundary; std::error::Error::source() returns the wrapped error; Display contains the path.",
+        "verificable": "A compile-time check `fn f<T: Send + Sync + 'static + std::error::Error>() {}` accepts BackendError and ConformanceError; BackendError::new(NotFound, Some(p)).with_source(io::Error::from(io::ErrorKind::NotFound)).source().is_some(); format!(\"{e}\") contains p.as_str()."
+      },
+      {
+        "id": "cb_12",
+        "titulo": "Every error names the path it is about",
+        "cita": "«el diálogo debe nombrar el archivo y el motivo en lenguaje llano» (05-operaciones l. 213)",
+        "comportamiento": "Every Err from a Backend method that takes a path has path == Some(..): the argument for list/stat/open_read/begin_write/create_dir/remove/remove_tree; for rename: `from` when from is missing, `to` when to exists or to's parent is missing; for copy_within: same rule as rename; for remove_tree failing on a descendant: the descendant's path; for Cancelled: the argument path. path is None only for errors not about a path (none in this step: even Unavailable carries the argument path).",
+        "verificable": "Covered by conformance case error_names_path on both MemoryBackend profiles, plus a MemoryBackend test with Fault{op: RemoveTree, after: 2, ..} whose error path is a descendant, not the root."
+      },
+      {
+        "id": "cb_13",
+        "titulo": "BackendError survives an io::Error round trip; Cancelled is never Interrupted",
+        "cita": "«`kara-ops` maps it onto its existing `FailureKind` (`Unavailable` → `MediaGone`, so no infinite retry loop» (l. 89-90)",
+        "comportamiento": "From<BackendError> for io::Error uses io kinds: NotFound->NotFound, AlreadyExists->AlreadyExists, PermissionDenied->PermissionDenied, NoSpace->StorageFull, Unavailable->NotConnected, AuthRequired->PermissionDenied, Unsupported->Unsupported, Cancelled->Other, Other->Other, with the BackendError as inner error. from_io recovers the original kind and path exactly. Cancelled MUST NOT become io::ErrorKind::Interrupted: std::io::copy, read_exact and write_all retry Interrupted silently, turning a cancel into a loop.",
+        "verificable": "For each of the 9 kinds k: BackendError::from_io(io::Error::from(BackendError::new(k, Some(p))), None) has kind k and path Some(p). io::Error::from(BackendError::new(Cancelled, None)).kind() != Interrupted. A reader from MemoryBackend whose Read fault is FaultEffect::Fail(Unavailable) makes std::io::copy return an io::Error that from_io turns into kind Unavailable."
+      },
+      {
+        "id": "cb_14",
+        "titulo": "from_io mapping of foreign io::Errors",
+        "cita": "«`Unavailable` (connection lost)» (l. 88) · «un medio extraíble que se desconecta a mitad debe detectarse y avisar, no colgar la operación indefinidamente» (05-operaciones l. 213)",
+        "comportamiento": "Not wrapping a BackendError: NotFound->NotFound; AlreadyExists->AlreadyExists; PermissionDenied, ReadOnlyFilesystem->PermissionDenied; StorageFull, QuotaExceeded->NoSpace; ConnectionRefused, ConnectionReset, ConnectionAborted, NotConnected, BrokenPipe, TimedOut, HostUnreachable, NetworkUnreachable, NetworkDown, StaleNetworkFileHandle->Unavailable; raw errno EIO(5), ENXIO(6), ENODEV(19), ENOMEDIUM(123)->Unavailable (checked BEFORE the kind, since std maps some of them to Uncategorized); Unsupported->Unsupported; Interrupted and everything else->Other. The io::Error is kept as source.",
+        "verificable": "Table-driven test over every row above using io::Error::from(kind) and io::Error::from_raw_os_error(n); from_io(io::Error::from_raw_os_error(28 /*ENOSPC*/), Some(&p)).kind == NoSpace and .path == Some(p); from_io(io::Error::from(io::ErrorKind::Interrupted), None).kind == Other."
+      },
+      {
+        "id": "cb_15",
+        "titulo": "No panics in kara-vfs, same scan as kara-fs",
+        "cita": "«No `unwrap`/`expect`/`panic!` in `kara-vfs` or `kara-remote`, same rule and same scan as `kara-fs`.» (l. 91-92)",
+        "comportamiento": "src/ (all modules, cfg(test) included, memory and conformance included) contains none of the forbidden macros/methods outside comment lines.",
+        "verificable": "A test in crates/kara-vfs/tests/ reads every .rs under src/, skips lines whose trimmed start is \"//\", and finds no match of `\\.unwrap\\(|\\.expect\\(|panic!|unreachable!|todo!|unimplemented!|assert!|assert_eq!|assert_ne!|debug_assert`. Also `.unwrap_or`, `.unwrap_or_else`, `.unwrap_or_default` are allowed (they do not match `\\.unwrap\\(`)."
+      },
+      {
+        "id": "cb_16",
+        "titulo": "Cancel is shared and idempotent",
+        "cita": "«cancel mid-list and mid-transfer» (l. 159); kara-index walk.rs «La cancelación es cooperativa y se comprueba por entrada»",
+        "comportamiento": "Clones share one flag; cancel() twice is fine; there is no un-cancel.",
+        "verificable": "let a = Cancel::new(); let b = a.clone(); b.cancel(); b.cancel(); a.is_cancelled() == true; Cancel::default().is_cancelled() == false."
+      },
+      {
+        "id": "cb_17",
+        "titulo": "Backend is object safe, shareable, and its capabilities are constant",
+        "cita": "«Blocking, `Send + Sync`.» (l. 50) · «`DriveRegistry` maps `DriveId` to `Arc<dyn Backend>`» (l. 130)",
+        "comportamiento": "Arc<dyn Backend> is Send + Sync; capabilities() returns the same value for the lifetime of the backend, whatever operations or faults happen (disconnect included).",
+        "verificable": "let b: Arc<dyn Backend> = Arc::new(MemoryBackend::posix_like()); moved into std::thread::spawn and used there; capabilities() equal before/after disconnect(), reconnect() and a full conformance run."
+      },
+      {
+        "id": "cb_18",
+        "titulo": "list: entry contract",
+        "cita": "«list / stat round trip» (l. 154) · kara-fs listing.rs: «Entradas leídas, en el orden que dio el sistema de ficheros: sin ordenar. Ordenarlas es cosa de `kara_core::sort`»",
+        "comportamiento": "No '.'/'..' entries; unsorted (callers must not rely on order); hidden ('.'-prefixed) included with is_hidden = true; name is the single segment as OsString and display == name; files: size Some(len); directories: size None; symlink entries: is_symlink true, kind resolved through the target, symlink_broken when the target is missing (broken -> kind File), size/times from the link itself; created/accessed None when the backend lacks them (MemoryBackend: None); type_label None; location None (until step 3); extra empty. Empty dir -> Ok(empty). Missing -> NotFound. A file -> Err(Other, source io NotADirectory). Root of an empty drive -> Ok(empty).",
+        "verificable": "MemoryBackend tests in both profiles check each field listed; list(root) on a fresh MemoryBackend is Ok with 0 entries; list of \"/f.txt\" (a file) is Err with kind Other."
+      },
+      {
+        "id": "cb_19",
+        "titulo": "stat agrees with list; stat of root; stat under a file",
+        "cita": "«list / stat round trip» (l. 154)",
+        "comportamiento": "stat(dir.join(e.name)) equals the list entry e on every field. stat(root) is Ok, kind Directory, name \"/\" (as kara_fs::listing::describe does for \"/\"). stat of a path whose parent is a file is NotFound (ENOTDIR maps to NotFound for stat), not Other.",
+        "verificable": "Equality on all FileEntry fields for every entry of a 5-entry dir in both profiles; stat(root).kind == Directory and name == \"/\"; stat(\"/f.txt/x\") -> NotFound."
+      },
+      {
+        "id": "cb_20",
+        "titulo": "list is cancellable per entry and never returns a partial Ok",
+        "cita": "«cancel mid-list» (l. 159) · CLAUDE.md «El listado de un directorio nunca bloquea la UI, ni con 100 k entradas ni con un volumen de red colgado»",
+        "comportamiento": "cancel is checked before the first entry and at least once per entry; once observed, list returns Err(Cancelled) with path == dir. Never Ok with fewer entries.",
+        "verificable": "Pre-cancelled token -> Err(Cancelled). MemoryBackend dir with 100_000 files and Fault{op: List, after: 10, effect: FaultEffect::Cancel(token), times: Some(1)} -> Err(Cancelled), and a counter wrapper shows at most 11 entries were produced (the fault cancels the shared token after 10 entries; the next check must see it)."
+      },
+      {
+        "id": "cb_21",
+        "titulo": "open_read offsets and targets",
+        "cita": "«Pausar y reanudar […] sin perder el progreso» (05-operaciones l. 33) — resuming is open_read(path, from)",
+        "comportamiento": "from == 0 reads all; 0 < from < len reads the tail; from == len returns a reader at EOF; from > len -> Err(Other, source InvalidInput) at open time, not a short read; directory -> Err(Other, source IsADirectory); missing -> NotFound. Offset arithmetic never overflows (from = u64::MAX -> Err, not panic).",
+        "verificable": "On a 10-byte file: from 0/4/10 read 10/6/0 bytes with the right content; from 11 and from u64::MAX -> Err. On a dir -> Err kind Other. On a missing path -> NotFound."
+      },
+      {
+        "id": "cb_22",
+        "titulo": "Write then read back: empty, small, multi-chunk",
+        "cita": "«write → read back, empty file, file larger than one chunk» (l. 155)",
+        "comportamiento": "finish commits exactly the bytes written, in order; size_hint is never enforced; an empty session commits an empty file.",
+        "verificable": "Conformance cases write_read_back, empty_file, multi_chunk_file, size_hint_is_only_a_hint pass on both profiles; stats().bytes_written increases by exactly the bytes written."
+      },
+      {
+        "id": "cb_23",
+        "titulo": "replace = false: refuse at begin, and again at finish",
+        "cita": "«`replace = false` on an existing target fails with `AlreadyExists`» (l. 156) · «La opción por defecto […] debe ser la MENOS destructiva (no reemplazar automáticamente)» (05-operaciones l. 151)",
+        "comportamiento": "begin_write(existing, false) fails immediately (no bytes sent). If the target appears while the session is open, finish fails with AlreadyExists, commits nothing, and the other writer's content stays.",
+        "verificable": "Conformance replace_false_existing and replace_false_race_at_finish; MemoryBackend snapshot after the failed finish equals the snapshot taken right after the competing finish."
+      },
+      {
+        "id": "cb_24",
+        "titulo": "replace = true never exposes a mix",
+        "cita": "«A half-written destination is never visible under its final name.» (l. 82-83)",
+        "comportamiento": "Until finish, the old content is what stat/open_read see. After finish, the new content. A reader opened before finish either reads the complete old content or returns an error; never old bytes followed by new bytes.",
+        "verificable": "Conformance replace_true. MemoryBackend (stricter): a reader opened before finish and read after finish returns the full OLD content."
+      },
+      {
+        "id": "cb_25",
+        "titulo": "Nothing visible before finish; abort and drop leave nothing behind",
+        "cita": "«`fn abort(self: Box<Self>); // leave nothing behind`» (l. 76) · «Dropping a session without `finish` aborts it.» (l. 81-82) · «aborted or dropped `WriteSession` leaves nothing visible» (l. 157)",
+        "comportamiento": "No entry with the final name and, for MemoryBackend, no node at all exists for an unfinished session; after abort() or drop the backend is as before begin_write and the session's bytes are released from the capacity count.",
+        "verificable": "Conformance invisible_before_finish, abort_leaves_nothing, drop_leaves_nothing. MemoryBackend: snapshot() before begin_write == snapshot() after abort/drop, and stats().open_sessions returns to its previous value; with set_capacity(Some(n)), a 3/4·n session that is aborted lets a second 3/4·n write succeed."
+      },
+      {
+        "id": "cb_26",
+        "titulo": "A failed write poisons the session",
+        "cita": "«si el destino se queda sin espacio, el diálogo debe pausar y ofrecer reintentar/omitir/cancelar en vez de fallar en silencio» (05-operaciones l. 19)",
+        "comportamiento": "When Write::write returns Err (NoSpace, Unavailable, injected), every later write returns Err and finish returns Err with the first error's kind; nothing is committed; a replace=true target keeps its old content.",
+        "verificable": "MemoryBackend set_capacity(Some(100)), write 150 bytes: a write returns an io::Error whose from_io kind is NoSpace; finish -> Err(NoSpace); snapshot unchanged versus before begin_write; with replace=true on an existing file, its old content is intact."
+      },
+      {
+        "id": "cb_27",
+        "titulo": "Disconnect reaches open readers and sessions",
+        "cita": "«un medio extraíble que se desconecta a mitad debe detectarse y avisar, no colgar la operación indefinidamente» (05-operaciones l. 213)",
+        "comportamiento": "After MemoryBackend::disconnect(): every Backend method returns Unavailable with the argument path; an already-open reader's next read returns an io::Error mapping to Unavailable; an open session's write/finish return Unavailable and commit nothing. After reconnect(), committed data is still there and the unfinished file is not.",
+        "verificable": "Sequence begin_write+write, open_read, disconnect, read -> Unavailable, finish -> Unavailable, reconnect: snapshot equals the pre-session snapshot; list/stat work again."
+      },
+      {
+        "id": "cb_28",
+        "titulo": "A directory is never replaced by a file",
+        "cita": "«conflicto entre archivo y carpeta con el mismo nombre debe tratarse aparte (no sobrescribir una carpeta con un archivo sin aviso explícito)» (05-operaciones l. 151)",
+        "comportamiento": "begin_write on an existing directory (or a DirMarker / implicit prefix in the object profile) fails with AlreadyExists for replace=false AND replace=true; the directory and its children are untouched.",
+        "verificable": "Conformance write_onto_directory on both profiles; MemoryBackend snapshot unchanged."
+      },
+      {
+        "id": "cb_29",
+        "titulo": "Missing parent depends on real_directories",
+        "cita": "«`real_directories` | yes | no (prefixes) | «Nueva carpeta» creates a `key/` marker» (l. 104)",
+        "comportamiento": "real_directories = true: create_dir, begin_write and rename into a missing parent -> NotFound (path = the requested path), nothing created; create_dir is not recursive. real_directories = false: begin_write under a missing prefix succeeds and every ancestor prefix lists as a Directory; create_dir creates a DirMarker only for the requested path.",
+        "verificable": "Conformance missing_parent on both profiles; MemoryBackend object profile: after begin_write(\"/x/y/z\")+finish, list(root) contains \"x\" as Directory and snapshot has no DirMarker for /x or /x/y."
+      },
+      {
+        "id": "cb_30",
+        "titulo": "Concurrent sessions do not share temporary state",
+        "cita": "«SFTP writes to a temporary name and renames» (l. 80-81) — two sessions on one target must not write into one temp file",
+        "comportamiento": "Two sessions on the same target are independent: with replace=true the final content is exactly one session's bytes; with replace=false the second finish is AlreadyExists.",
+        "verificable": "Conformance concurrent_sessions_same_target and replace_false_race_at_finish; MemoryBackend stats().open_sessions == 2 while both are open."
+      },
+      {
+        "id": "cb_31",
+        "titulo": "abort reports its own failure; Drop never panics",
+        "cita": "CLAUDE.md: «Cada syscall devuelve `Result` y cada error se propaga o se reporta» (dec_02)",
+        "comportamiento": "abort() returns Err when cleanup fails (MemoryBackend: Unavailable when disconnected; the session's bytes are still released so nothing becomes visible). Drop calls the same cleanup and ignores only its Result.",
+        "verificable": "disconnect(), then abort() of an open session -> Err(Unavailable); after reconnect(), snapshot shows nothing from it. Dropping a session while disconnected does not panic."
+      },
+      {
+        "id": "cb_32",
+        "titulo": "create_dir is exact and never merges",
+        "cita": "«Nueva carpeta» (l. 104) · «mover, copiar, renombrar y crear entran en la pila de deshacer» (CLAUDE.md) — create must be undoable, so it must report whether it created anything",
+        "comportamiento": "create_dir on an existing directory or file -> AlreadyExists, nothing changed (never Ok on an existing directory: undo would then delete something Kara did not create). Object profile: create_dir writes a DirMarker; list(dir) is Ok and empty (the marker is never an entry, no entry named \"\"); stat(dir) is Directory.",
+        "verificable": "Conformance create_dir, create_dir_existing; MemoryBackend object profile: snapshot().nodes[dir] == DirMarker and list(dir).entries.is_empty()."
+      },
+      {
+        "id": "cb_33",
+        "titulo": "rename never overwrites",
+        "cita": "«no reemplazar automáticamente» (05-operaciones l. 151) — POSIX rename(2) replaces silently; the trait forbids it",
+        "comportamiento": "If `to` exists (file, dir, marker or implicit prefix) -> AlreadyExists with path == to; both untouched. LocalBackend (step 2) will need renameat2(NOREPLACE), as kara-fs trash already does.",
+        "verificable": "Conformance rename_never_overwrites on both profiles; MemoryBackend snapshot unchanged after the Err."
+      },
+      {
+        "id": "cb_34",
+        "titulo": "rename(x, x) is a no-op",
+        "cita": "«mover a la misma carpeta (origen == destino) no es conflicto sino no-op» (05-operaciones l. 151)",
+        "comportamiento": "from == to -> Ok(()) without touching anything (checked before the exists test, so it is not AlreadyExists).",
+        "verificable": "Conformance rename_same_is_noop; MemoryBackend snapshot unchanged."
+      },
+      {
+        "id": "cb_35",
+        "titulo": "rename refuses impossible targets",
+        "cita": "«Reversibilidad por defecto» (00-filosofia l. 12) — moving a folder into itself or renaming the drive root cannot be undone",
+        "comportamiento": "to.starts_with(from) with to != from -> Err(Other, source InvalidInput), no change. from == root or to == root -> Err(Other, InvalidInput). from missing -> NotFound(path = from).",
+        "verificable": "Conformance rename_into_own_subtree; MemoryBackend: rename(root, \"/x\") and rename(\"/x\", root) -> Err kind Other, snapshot unchanged; rename(missing, \"/y\") -> NotFound with path == missing."
+      },
+      {
+        "id": "cb_36",
+        "titulo": "Non-atomic rename never loses data",
+        "cita": "«`atomic_rename` | yes | no (copy+delete)» (l. 102) · «The source is never deleted if the copy failed» (l. 119-120)",
+        "comportamiento": "With atomic_rename = false, rename of a file or tree is per-object copy then delete-of-that-object-only-after-its-copy-succeeded. On any failure midway it returns Err and every original object exists, with its original content, under `from` or under `to` (possibly both); none is lost.",
+        "verificable": "MemoryBackend object profile, tree of 10 files, Fault{op: Rename, after: k, effect: Fail(Unavailable), times: Some(1)} for each k in 0..10: Err returned, and for every original file f, read(from/f) or read(to/f) equals its original content. With atomic_rename = true (posix profile) the same fault leaves the tree entirely under `from`."
+      },
+      {
+        "id": "cb_37",
+        "titulo": "remove: file or empty dir only",
+        "cita": "«fn remove(&self, path: &RemotePath) -> Result<(), BackendError>; // file or empty dir» (l. 67)",
+        "comportamiento": "Non-empty dir -> Err(Other, source DirectoryNotEmpty), nothing removed. Missing -> NotFound. Root -> Err(Other, InvalidInput). A symlink is removed as a link (target untouched). Object profile: removing an empty marker-only dir removes the marker.",
+        "verificable": "Conformance remove_file_and_empty_dir, remove_nonempty_dir, remove_missing; MemoryBackend remove(root) -> Err, snapshot unchanged."
+      },
+      {
+        "id": "cb_38",
+        "titulo": "remove_tree: refuses the root, cancellable, stops at the first failure",
+        "cita": "«carpetas grandes deben mostrar diálogo de progreso y poder cancelarse» (05-operaciones l. 255) · «Reversibilidad por defecto» (00-filosofia l. 12)",
+        "comportamiento": "remove_tree(root) -> Err(Other, InvalidInput) and removes nothing (wiping a whole drive by accident is the one thing a backend refuses). Deletes deepest first; checks cancel before every entry; on Cancelled or on a failure returns Err with the path of the entry being processed (Cancelled: the argument path); what was already removed stays removed (not transactional, documented) and nothing else is attempted. On a file it removes the file. Missing -> NotFound.",
+        "verificable": "Conformance remove_tree, remove_tree_precancelled; MemoryBackend: remove_tree(root) -> Err, snapshot unchanged; Fault{op: RemoveTree, after: 3, effect: Cancel(token)} on a 10-file tree -> Err(Cancelled) and exactly 3 files are gone; Fault{op: RemoveTree, after: 3, effect: Fail(PermissionDenied)} -> Err(PermissionDenied) whose path is a descendant and 3 files are gone."
+      },
+      {
+        "id": "cb_39",
+        "titulo": "Symlinks are never followed by destructive operations",
+        "cita": "«`symlinks` | yes | no» (l. 106) · «Reversibilidad por defecto» (00-filosofia l. 12) — following a link would delete data outside the selection",
+        "comportamiento": "remove and remove_tree remove the link, never descend into or delete its target; rename moves the link; open_read follows the link (reads the target); list reports links per cb_18. MemoryBackend::create_symlink returns Unsupported without the capability.",
+        "verificable": "MemoryBackend posix profile: /t/keep.txt and /d/l -> \"/t\"; remove_tree(\"/d\") Ok and /t/keep.txt still readable; a broken link lists with symlink_broken = true and remove() Ok; object profile create_symlink -> Unsupported."
+      },
+      {
+        "id": "cb_40",
+        "titulo": "Implicit directories of the object profile",
+        "cita": "«`real_directories` | yes | no (prefixes)» (l. 104) · «S3 is deferred, but the contract is still checked against it […] so it must not be shaped around SFTP alone» (l. 12-14)",
+        "comportamiento": "With real_directories = false a directory exists iff it has a DirMarker or at least one descendant object. Removing the last descendant of an unmarked prefix makes it vanish from list(parent) and stat -> NotFound. Listing a prefix that has neither -> NotFound (not an empty Ok), except root.",
+        "verificable": "Conformance implicit_directories passes on the object profile and is Skipped{because: \"real_directories=true\"} on posix; MemoryBackend: begin_write(\"/p/f\")+finish, remove(\"/p/f\"), then stat(\"/p\") -> NotFound and list(\"/p\") -> NotFound."
+      },
+      {
+        "id": "cb_41",
+        "titulo": "copy_within: only when declared, moves no bytes through the client",
+        "cita": "«/// Only called if `capabilities().server_side_copy`.» (l. 70) · «Copy inside the drive moves no bytes» (l. 103)",
+        "comportamiento": "Without server_side_copy: Err(Unsupported) and no change (it is still never a panic). With it: copies a FILE; target exists -> AlreadyExists (no replace flag); source directory -> Unsupported (tree copies are composed by kara-ops); missing source -> NotFound(path = from).",
+        "verificable": "MemoryBackend posix profile copy_within -> Unsupported, snapshot unchanged. Object profile: copy of a 3 MiB file succeeds and stats().bytes_read and bytes_written are unchanged by it; conformance copy_within passes."
+      },
+      {
+        "id": "cb_42",
+        "titulo": "Every error kind is reachable, and a failed mutation changes nothing",
+        "cita": "«every error kind reachable, and only declared capabilities are exercised» (l. 160)",
+        "comportamiento": "MemoryBackend produces each of the 9 kinds through a real path: NotFound, AlreadyExists (natural), PermissionDenied / AuthRequired / Other (Fault), NoSpace (set_capacity), Unavailable (disconnect), Unsupported (copy_within without capability, create_symlink), Cancelled (Cancel). A Fault on a mutating op (create_dir, rename on the posix profile, remove, begin_write, finish) leaves the snapshot unchanged.",
+        "verificable": "One test per kind named cb_42_<kind>; each mutating-op fault test compares snapshots before/after."
+      },
+      {
+        "id": "cb_43",
+        "titulo": "The suite refuses a dirty or missing scratch and stays inside it",
+        "cita": "«SFTP and S3 run it against a real server» (l. 162-163) — the suite will run on real servers, so it must not be able to delete what it did not create",
+        "comportamiento": "run(): scratch missing -> Err(ScratchUnreachable(NotFound)); scratch is a file -> Err(ScratchNotDirectory); scratch has any entry -> Err(ScratchNotEmpty{entries}) — in all three cases it calls no mutating method. It never calls a mutating method on a path that is not strictly under scratch. On success scratch is empty again.",
+        "verificable": "A test-side spy Backend wrapper records every path passed to create_dir/begin_write/rename/remove/remove_tree/copy_within: all start_with scratch and none equals scratch; with a pre-existing entry, the spy records zero mutating calls and the entry survives; after a successful run list(scratch) is empty."
+      },
+      {
+        "id": "cb_44",
+        "titulo": "The suite only exercises declared capabilities",
+        "cita": "«only declared capabilities are exercised» (l. 160)",
+        "comportamiento": "copy_within is never called when !server_side_copy; implicit_directories is skipped when real_directories. A skipped case states the capability condition in `because`.",
+        "verificable": "Spy wrapper over MemoryBackend::posix_like(): copy_within call count == 0, report has copy_within: Skipped{because: \"server_side_copy=false\"} and implicit_directories: Skipped{because: \"real_directories=true\"}. Over object_store_like(): neither is skipped and no case is Skipped."
+      },
+      {
+        "id": "cb_45",
+        "titulo": "The suite catches broken backends (a passing suite must mean something)",
+        "cita": "CLAUDE.md: «A passing test proves little: break the invariant on purpose once and see it fail»",
+        "comportamiento": "Running the suite on deliberately broken wrappers yields Failed (never a panic, never Passed) for the matching case.",
+        "verificable": "Test-side wrappers over MemoryBackend, each breaking one rule: (a) rename that removes `to` first then renames -> rename_never_overwrites Failed; (b) begin_write ignoring replace=false -> replace_false_existing Failed; (c) WriteSession whose abort/drop commits -> abort_leaves_nothing and drop_leaves_nothing Failed; (d) list that ignores Cancel -> list_precancelled Failed; (e) WriteSession that commits on every write -> invisible_before_finish Failed; (f) remove that removes non-empty dirs -> remove_nonempty_dir Failed; (g) errors with path None -> error_names_path Failed. report.is_success() == false in each, and run() returns Ok(report) (the suite itself does not error)."
+      },
+      {
+        "id": "cb_46",
+        "titulo": "Both MemoryBackend profiles pass the whole suite",
+        "cita": "«`MemoryBackend` and `LocalBackend` run it in CI.» (l. 162) · «must not be shaped around SFTP alone» (l. 14)",
+        "comportamiento": "posix_like() and object_store_like() pass every non-skipped case.",
+        "verificable": "run(&MemoryBackend::posix_like(), &scratch) and run(&MemoryBackend::object_store_like(), &scratch) after create_dir(scratch): Ok(report) with is_success() and report.cases ids == CASE_IDS in order."
+      },
+      {
+        "id": "cb_47",
+        "titulo": "Backend calls never block forever and never need a runtime",
+        "cita": "«Blocking, `Send + Sync`. […] an async trait would force a runtime on every caller» (l. 50-52) · CLAUDE.md «Nada debe bloquear la UI, ni con 100k entradas ni con un volumen colgado»",
+        "comportamiento": "MemoryBackend never waits: every method returns without sleeping or blocking on a condition (a disconnected backend answers Unavailable at once). Concurrent use from several threads is safe: list from one thread while another writes.",
+        "verificable": "8 threads × 200 iterations of begin_write/finish/list/stat/remove on distinct names in one Arc<dyn Backend> finish with no error other than expected ones and a final list consistent with the operations; a disconnected backend answers 10_000 stat calls in well under 1 s (release-independent bound: 2 s)."
+      },
+      {
+        "id": "cb_48",
+        "titulo": "Layering and features",
+        "cita": "«kara-ui → kara-ops → { kara-fs, kara-remote, kara-index } → kara-vfs → kara-core» (l. 19) · «the conformance suite (feature `conformance`). No protocol code.» (l. 24)",
+        "comportamiento": "kara-vfs normal deps: kara-core, thiserror, percent-encoding only. default features empty; memory and conformance compile only when enabled; plain `cargo test -p kara-vfs` runs the suite thanks to the self dev-dependency (dec_06). No existing crate depends on kara-vfs yet.",
+        "verificable": "`cargo tree -p kara-vfs -e normal --depth 1` lists exactly kara-core, percent-encoding, thiserror; `cargo check -p kara-vfs --no-default-features` succeeds; `cargo test -p kara-vfs -- --list` includes the conformance tests; `grep -rn kara-vfs crates/*/Cargo.toml` matches only crates/kara-vfs/Cargo.toml."
+      }
+    ],
+    "criteriosDeAceptacion": [
+      {
+        "id": "ac_01",
+        "criterio": "`cargo test -p kara-vfs` passes: 0 failed, 0 ignored. Workspace `cargo test` is still green and the sha256 of every file in crates/kara-fs/tests/ is unchanged."
+      },
+      {
+        "id": "ac_02",
+        "criterio": "`cargo clippy --all-targets -- -D warnings` exits 0 for the whole workspace, kara-vfs included, without new crate-wide `allow`s."
+      },
+      {
+        "id": "ac_03",
+        "criterio": "The no-panic scan of cb_15 exists as a test in crates/kara-vfs/tests/ and passes; `grep -rnE '\\.unwrap\\(|\\.expect\\(|panic!|unreachable!|todo!|unimplemented!|assert' crates/kara-vfs/src/` prints nothing outside comment lines."
+      },
+      {
+        "id": "ac_04",
+        "criterio": "Every signature in apiPublica exists with the exact name, parameter types and return type: a compile-only test coerces each function/method to a fn pointer of the stated type and each trait to `dyn` (Arc<dyn Backend>, Box<dyn WriteSession>)."
+      },
+      {
+        "id": "ac_05",
+        "criterio": "Each of cb_01…cb_48 has at least one test whose name contains its id, and each test checks observable state (snapshot, list, read-back), not only the variant of a Result."
+      },
+      {
+        "id": "ac_06",
+        "criterio": "Every test that expects a failed mutating operation also asserts MemorySnapshot equality before/after (or, for cb_36/cb_38, the exact documented partial state)."
+      },
+      {
+        "id": "ac_07",
+        "criterio": "conformance::run on MemoryBackend::posix_like() and ::object_store_like() returns Ok(report) with report.is_success(), and report.cases ids equal CASE_IDS in order (39 ids, exactly those of casosDeConformidad)."
+      },
+      {
+        "id": "ac_08",
+        "criterio": "At least the 7 broken-backend wrappers of cb_45 make the matching case Failed; none makes run() panic or return Err."
+      },
+      {
+        "id": "ac_09",
+        "criterio": "Dependencies per cb_48; `git diff --stat` touches only crates/kara-vfs/**, the root Cargo.toml (members + workspace.dependencies) and Cargo.lock."
+      },
+      {
+        "id": "ac_10",
+        "criterio": "Code, identifiers, comments and doc comments in kara-vfs are in English; the crate-level doc names this contract's slug and links docs/remote-backends.md."
+      },
+      {
+        "id": "ac_11",
+        "criterio": "`cargo doc -p kara-vfs --features memory,conformance --no-deps` emits no warnings (broken intra-doc links included)."
+      }
+    ],
+    "riesgosDeImplementacionPlausiblePeroIncorrecta": [
+      "Resolving '..' lexically in RemotePath::parse instead of rejecting it (cb_02): gives S3 keys filesystem semantics the doc forbids.",
+      "String prefix test for starts_with: /ab counted as inside /a, so rename-into-self and remove_tree checks touch siblings (cb_04, cb_35).",
+      "Percent-encoding the local path through to_string_lossy, or with a different escape set than kara-fs uri.rs: breaks the shared thumbnail cache and non-UTF-8 round trips (cb_06, cb_07).",
+      "Mapping Cancelled to io::ErrorKind::Interrupted: io::copy and write_all retry Interrupted forever (cb_13).",
+      "Losing the kind through io::Error (from_io that only looks at io::ErrorKind): a disconnect mid-transfer becomes Other and kara-ops retries it in a loop (cb_13, cb_27).",
+      "Returning Ok with the entries read so far when list is cancelled (cb_20).",
+      "Committing on Drop, or writing straight to the final name and deleting on abort (visible half-written file in between) (cb_24, cb_25).",
+      "Checking replace=false only at begin_write, so a racing writer's file is overwritten at finish (cb_23).",
+      "Letting finish succeed after a failed write (session not poisoned): a truncated file appears under its final name (cb_26).",
+      "Using a POSIX-style rename that replaces an existing target (cb_33), or treating rename(x, x) as AlreadyExists (cb_34).",
+      "create_dir returning Ok on an existing directory: undo would later delete a folder Kara did not create (cb_32).",
+      "Object profile: deleting the source object before its copy is confirmed in a non-atomic rename (cb_36); keeping implicit directories alive after their last object is gone, or returning an empty Ok for a missing prefix (cb_40).",
+      "remove_tree accepting the drive root, or following a symlink into its target (cb_38, cb_39).",
+      "A conformance suite built on assert!: violates the no-panic rule and turns a broken backend into a test-harness crash instead of a report (cb_15, cb_45).",
+      "A suite that cleans up with remove_tree(scratch) or touches paths outside scratch: on a real server it would delete user data (cb_43).",
+      "Exercising copy_within on a backend that does not declare server_side_copy (cb_44).",
+      "Counting copy_within bytes in MemoryStats, which would make «moves no bytes» untestable (cb_41).",
+      "Holding the MemoryBackend Mutex across a returned reader/session, deadlocking concurrent callers (cb_47)."
+    ]
+  },
+  "pruebas": {
+    "testFiles": [
+      {
+        "path": "crates/kara-vfs/tests/api_signatures.rs",
+        "sha256": "93bea4701652ae9215fc35508546ffa470e347a61a24910f47cd7e9f467e86aa",
+        "testCount": 7
+      },
+      {
+        "path": "crates/kara-vfs/tests/concurrency.rs",
+        "sha256": "57a8ff8d740bf2a61c6abebcb6480a41bfac1c2958a830e2398ac1e9e3bad555",
+        "testCount": 3
+      },
+      {
+        "path": "crates/kara-vfs/tests/conformance.rs",
+        "sha256": "4ae12592da2367aa3143f0ae9d57e46c9b3cc4c04560310e35511b8b760be630",
+        "testCount": 20
+      },
+      {
+        "path": "crates/kara-vfs/tests/errors_and_cancel.rs",
+        "sha256": "094fc3b7571ecf1e6bec21b87357eb902583d5fce36eb367f4f1d5533d968692",
+        "testCount": 17
+      },
+      {
+        "path": "crates/kara-vfs/tests/location.rs",
+        "sha256": "4cede63d0db8479559a290a08d471a455e3185f95ed4152eed7c472015a1e820",
+        "testCount": 20
+      },
+      {
+        "path": "crates/kara-vfs/tests/memory_errors.rs",
+        "sha256": "063bd8f0d7b6ce599a769f3ef9f82156f905cb49e09023608e7dc31e2821de48",
+        "testCount": 14
+      },
+      {
+        "path": "crates/kara-vfs/tests/memory_listing.rs",
+        "sha256": "a83f668e2a028c21beb705ab701642c9f59e0d1bfc2fad0788140099e31033f7",
+        "testCount": 20
+      },
+      {
+        "path": "crates/kara-vfs/tests/memory_mutations.rs",
+        "sha256": "51b694512fc3a16116d05b3a46dffdf699854ce5a2b439ab7a491ff955d0db3d",
+        "testCount": 43
+      },
+      {
+        "path": "crates/kara-vfs/tests/memory_profiles.rs",
+        "sha256": "087e636035bf45521f7b7e1fdac112dbfcb1b309b66d4cb116a73c0f305396d9",
+        "testCount": 8
+      },
+      {
+        "path": "crates/kara-vfs/tests/memory_write.rs",
+        "sha256": "398665735cd85090f640aa672aff8803d4ba3404e6b072b8bd62e3bc95b77146",
+        "testCount": 31
+      },
+      {
+        "path": "crates/kara-vfs/tests/remote_path.rs",
+        "sha256": "1d4c807223285136fad51dae266e64aa3ae5311fb37a2fb42c29f8c9552474c4",
+        "testCount": 17
+      },
+      {
+        "path": "crates/kara-vfs/tests/source_rules.rs",
+        "sha256": "4058d07ea37259d24e14006cf7ca572a18505abb2cac6c517e9e50cd3b081ee1",
+        "testCount": 10
+      },
+      {
+        "path": "crates/kara-vfs/tests/common/mod.rs",
+        "sha256": "f957f6ca617701839a409e189075a89a368c9c49f4b027c432990fb4ae4631ba",
+        "testCount": 0
+      }
+    ],
+    "stubFiles": [
+      "Cargo.toml",
+      "crates/kara-vfs/Cargo.toml",
+      "crates/kara-vfs/src/lib.rs",
+      "crates/kara-vfs/src/path.rs",
+      "crates/kara-vfs/src/location.rs",
+      "crates/kara-vfs/src/error.rs",
+      "crates/kara-vfs/src/capabilities.rs",
+      "crates/kara-vfs/src/backend.rs",
+      "crates/kara-vfs/src/memory/mod.rs",
+      "crates/kara-vfs/src/conformance/mod.rs"
+    ],
+    "baseline": {
+      "comando": "cargo test --ignore-rust-version -p kara-vfs --no-fail-fast",
+      "resultado": "FALLA: 191 de 210 pruebas fallan por los todo!() de los stubs; 19 pasan",
+      "verdesEnBaseline": "19 pruebas estructurales que no dependen de ningun cuerpo: api_signatures (7, solo compilacion, ac_04); source_rules: cb_48 x7, cb_15_every_module_is_scanned y cb_15_scan_allows_the_non_panicking_unwrap_family; conformance cb_46_case_ids_are_the_normative_list (CASE_IDS es dato normativo, no logica); errors_and_cancel cb_11_errors_are_send_sync_static_errors; memory_profiles api_05_capabilities_default_declares_nothing. cb_15_no_unwrap_expect_or_panicking_macros_in_src falla en baseline a proposito (detecta los todo!)."
+    },
+    "validacion": "Las pruebas puras (remote_path 17, location 20, errors_and_cancel 16 de 17) se ejecutaron contra una implementacion de referencia desechable fuera del arbol y pasan todas; dos mutaciones del contrato (starts_with por prefijo de cadena; Cancelled -> Interrupted y from_io sin downcast) las hacen fallar. MemoryBackend y la suite no tienen implementacion de referencia: esas pruebas se revisaron a mano contra cada cb.",
+    "notas": [
+      "Toolchain del contenedor: rustc 1.97 y el workspace fija rust-version 1.98; aqui se compila con --ignore-rust-version. Sin esa bandera cargo se niega a compilar kara-core y kara-vfs.",
+      "kara-core se anadio como dev-dependency de kara-vfs (ya es dependencia normal; las pruebas nombran EntryKind/FileEntry). Las dependencias normales siguen siendo exactamente kara-core, percent-encoding y thiserror (cb_48).",
+      "tests/common/mod.rs es otro fichero de pruebas, esta en testFiles con su hash y no se edita.",
+      "Los ficheros de prueba ya pasan cargo fmt --check y cargo clippy --all-targets sin avisos propios: el implementador no tiene que tocarlos.",
+      "La implementacion debe dejar el crate sin avisos dead_code (hoy Cancel.0 y MemoryBackend.state no se leen porque los cuerpos son todo!()), o clippy -D warnings (ac_02) falla.",
+      "Interpretaciones fijadas por las pruebas donde el contrato era menos explicito: (1) los bytes de una sesion abierta cuentan para set_capacity (cb_25); (2) el error de un Fault de RemoveTree tras N objetos nombra el objeto N+1, el que se estaba procesando (cb_38); (3) NotAbsolute{raw}, InvalidScheme{raw} e InvalidName{raw} llevan la entrada tal cual; (4) un Fault de Read con after=N no entrega mas de N bytes antes del error (cb_13); (5) '%' suelto o con un solo hex es InvalidPercentEncoding."
+    ]
+  },
+  "intentos": 0,
+  "historial": [
+    {
+      "fecha": "2026-10-09T15:10:11+00:00",
+      "estado": "contrato_listo",
+      "nota": "Contract fixed by the architect. kara-vfs did not exist (crates/: core, fs, index, ops, ui): nothing to duplicate or break. Source is docs/remote-backends.md (no exact-title heading; title == Order of work step 1), grounded on ground/spec quotes per edge case. Six architect decisions recorded (dec_01..dec_06): MemoryBackend in kara-vfs behind feature memory; abort returns Result; DriveId carries the scheme; own Cancel type; nine closed error kinds with io sources; self dev-dependency so plain cargo test runs the suite. 48 edge cases, 39 conformance case ids, 11 acceptance criteria."
+    },
+    {
+      "fecha": "2026-10-09T15:34:59+00:00",
+      "estado": "pruebas_listas",
+      "nota": "Stubs (todas las firmas de apiPublica; tipos, errores y CASE_IDS reales; cuerpos todo!()) y 210 pruebas en 12 ficheros + tests/common/mod.rs. Cada cb_01..cb_48 tiene al menos una prueba con su id en el nombre. Wrappers rotos de cb_45 (los 7 del contrato + uno que falla todas las mutaciones), espia de cb_43/cb_44, firmas de ac_04 por coercion a fn pointer e impl de los traits. Baseline: 191/210 fallan."
+    }
+  ],
+  "actualizado": "2026-10-09T15:34:59+00:00"
+}

@@ -18,6 +18,7 @@ Rectangle {
     id: panel
 
     required property var app
+    required property var drives
 
     color: Theme.sidebar
 
@@ -62,12 +63,23 @@ Rectangle {
         }
     }
 
+    // Remote drives sit between the folder tree and the trash.
+    DrivesSection {
+        id: remote
+        drives: panel.drives
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: trashRow.top
+        anchors.bottomMargin: 4
+        height: remote.implicitHeight
+    }
+
     ListView {
         id: rows
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        anchors.bottom: trashRow.top
+        anchors.bottom: remote.top
         anchors.topMargin: 6
         anchors.bottomMargin: 6
         clip: true
@@ -98,6 +110,8 @@ Rectangle {
             readonly property bool expanded: (panel.app.nav_expanded[row.index] ?? 0) !== 0
             readonly property bool current: panel.app.nav_current === row.index
             readonly property string iconUrl: panel.app.nav_icons[row.index] ?? ""
+            // 1 eject, 2 unmount, 3 disconnect, 0 nothing.
+            readonly property int action: panel.app.nav_actions[row.index] ?? 0
 
             width: rows.width
             // Las cabeceras respiran por arriba para que la sección se lea como
@@ -151,7 +165,7 @@ Rectangle {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.leftMargin: 14 + row.depth * 14
-                anchors.rightMargin: 10
+                anchors.rightMargin: row.action !== 0 ? 34 : 10
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: 4
 
@@ -188,14 +202,26 @@ Rectangle {
                 }
 
                 Image {
+                    id: rowIcon
+                    // A file that fails to load still leaves a folder, never
+                    // a gap.
+                    property bool failed: false
                     width: 16
                     height: 16
                     anchors.verticalCenter: parent.verticalCenter
-                    source: row.iconUrl
+                    source: rowIcon.failed ? "qrc:/qt/qml/com/kara/ui/icons/folder.svg" : row.iconUrl
                     sourceSize.width: 16
                     sourceSize.height: 16
                     visible: status === Image.Ready
                     asynchronous: true
+                    onStatusChanged: if (status === Image.Error)
+                        rowIcon.failed = true
+                    Connections {
+                        target: row
+                        function onIconUrlChanged() {
+                            rowIcon.failed = false;
+                        }
+                    }
                 }
 
                 Text {
@@ -209,8 +235,47 @@ Rectangle {
                 }
             }
 
+            // Eject, unmount or disconnect, beside the volume it acts on, as
+            // the spec asks: «las unidades aparecen en la barra lateral con un
+            // botón de expulsar».
+            Item {
+                id: ejectButton
+                visible: row.action !== 0
+                anchors.right: parent.right
+                anchors.rightMargin: 10
+                anchors.verticalCenter: parent.verticalCenter
+                width: 24
+                height: 24
+                z: 1
+
+                Rectangle {
+                    anchors.fill: parent
+                    radius: Theme.radius
+                    color: ejectArea.pressed ? Theme.pressed : (ejectArea.containsMouse ? Theme.hover : "transparent")
+                }
+                EjectGlyph {
+                    anchors.centerIn: parent
+                    ink: ejectArea.containsMouse ? Theme.text : Theme.textDim
+                }
+                MouseArea {
+                    id: ejectArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: panel.app.nav_eject(row.index)
+                }
+                ToolTip.visible: ejectArea.containsMouse
+                ToolTip.delay: 600
+                ToolTip.text: row.action === 1 ? qsTr("Expulsar") : row.action === 2 ? qsTr("Desmontar") : qsTr("Desconectar")
+            }
+
             Menu {
                 id: rowMenu
+                MenuItem {
+                    text: row.action === 1 ? qsTr("Expulsar") : row.action === 2 ? qsTr("Desmontar") : qsTr("Desconectar")
+                    visible: row.action !== 0
+                    height: visible ? implicitHeight : 0
+                    onTriggered: panel.app.nav_eject(row.index)
+                }
                 MenuItem {
                     // El rótulo se pregunta al abrir el menú, no se ata a una
                     // propiedad: anclar y desanclar es el mismo gesto y el

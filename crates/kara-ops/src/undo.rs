@@ -20,8 +20,10 @@ use std::path::{Path, PathBuf};
 
 use kara_fs::trash::{ConflictPolicy, TrashedItem, restore_item, trash_one};
 use kara_fs::transfer::{TransferError, move_to, rename};
+use kara_vfs::Location;
 
 use crate::clock::trash_policy;
+use crate::location::{BackendResolver, no_drives};
 
 /// Una operación reversible ya ejecutada.
 #[derive(Debug, Clone)]
@@ -36,6 +38,26 @@ pub enum Action {
     DirectoryCreated { path: PathBuf },
     /// Se envió algo a la papelera.
     Trashed { item: Box<TrashedItem> },
+    /// A copy created `created` on a remote drive. Undo removes it, for good:
+    /// a remote drive has no trash.
+    RemoteCopied { created: Location },
+    /// `from` was moved to `to` inside one remote drive that declares
+    /// `undo_move`. Undo renames it back.
+    RemoteMoved { from: Location, to: Location },
+    /// `from` was renamed to `to` on a remote drive that declares
+    /// `undo_rename`.
+    RemoteRenamed { from: Location, to: Location },
+    /// The folder `path` was created on a remote drive. Undo removes it only
+    /// while it is still empty.
+    RemoteDirectoryCreated { path: Location },
+    /// Something happened that cannot be taken back. It stays on the stack so
+    /// the menu can say «Deshacer `label`» disabled, with `reason`, as the
+    /// spec asks for remote volumes.
+    NotUndoable {
+        label: &'static str,
+        subject: Location,
+        reason: String,
+    },
 }
 
 impl Action {
@@ -50,18 +72,47 @@ impl Action {
             Self::Renamed { .. } => "renombrar",
             Self::DirectoryCreated { .. } => "crear carpeta",
             Self::Trashed { .. } => "enviar a la papelera",
+            Self::RemoteCopied { .. } => "copiar",
+            Self::RemoteMoved { .. } => "mover",
+            Self::RemoteRenamed { .. } => "renombrar",
+            Self::RemoteDirectoryCreated { .. } => "crear carpeta",
+            Self::NotUndoable { label, .. } => label,
+        }
+    }
+
+    /// `false` for a record that only says what happened.
+    #[must_use]
+    pub fn is_undoable(&self) -> bool {
+        !matches!(self, Self::NotUndoable { .. })
+    }
+
+    /// Why this cannot be undone, for the disabled menu entry.
+    #[must_use]
+    pub fn not_undoable_reason(&self) -> Option<&str> {
+        match self {
+            Self::NotUndoable { reason, .. } => Some(reason),
+            _ => None,
         }
     }
 
     /// Dónde quedó el resultado, que es lo que hay que comprobar antes de
-    /// deshacer.
-    fn subject(&self) -> &Path {
+    /// deshacer. `None` for the remote records, checked by `remote_revert`.
+    fn subject(&self) -> Option<&Path> {
         match self {
-            Self::Moved { to, .. } | Self::Renamed { to, .. } => to,
-            Self::Copied { created } => created,
-            Self::DirectoryCreated { path } => path,
-            Self::Trashed { item } => &item.trashed_path,
+            Self::Moved { to, .. } | Self::Renamed { to, .. } => Some(to),
+            Self::Copied { created } => Some(created),
+            Self::DirectoryCreated { path } => Some(path),
+            Self::Trashed { item } => Some(&item.trashed_path),
+            Self::RemoteCopied { .. }
+            | Self::RemoteMoved { .. }
+            | Self::RemoteRenamed { .. }
+            | Self::RemoteDirectoryCreated { .. }
+            | Self::NotUndoable { .. } => None,
         }
+    }
+
+    fn is_remote(&self) -> bool {
+        self.subject().is_none()
     }
 }
 
@@ -78,6 +129,15 @@ pub enum UndoError {
     Transfer(#[from] TransferError),
     #[error("{0}")]
     Trash(String),
+    /// The action is recorded as not undoable; the reason says why.
+    #[error("this action cannot be undone: {0}")]
+    NotUndoable(String),
+    /// The drive of a remote action is not connected (or no resolver was given).
+    #[error("{} is on a drive that is not connected", .0.display())]
+    DriveUnavailable(PathBuf),
+    /// The remote drive refused; `path` is the item's URI.
+    #[error("{}: {reason}", path.display())]
+    Remote { path: PathBuf, reason: String },
 }
 
 /// Pila de deshacer/rehacer de una ventana.
@@ -100,9 +160,17 @@ impl UndoStack {
         self.undone.clear();
     }
 
+    /// `false` when the stack is empty or its top is recorded as not
+    /// undoable ([`Self::undo_disabled_reason`] says why).
     #[must_use]
     pub fn can_undo(&self) -> bool {
-        !self.done.is_empty()
+        self.done.last().is_some_and(Action::is_undoable)
+    }
+
+    /// Why «Deshacer» is disabled although there is something on the stack.
+    #[must_use]
+    pub fn undo_disabled_reason(&self) -> Option<&str> {
+        self.done.last().and_then(Action::not_undoable_reason)
     }
 
     #[must_use]
@@ -131,8 +199,23 @@ impl UndoStack {
     /// Si falla, la acción **vuelve a la pila**: un deshacer que no pudo con su
     /// trabajo no debe además perder el registro de que aquello ocurrió.
     pub fn undo(&mut self) -> Result<Action, UndoError> {
+        self.undo_with(&no_drives())
+    }
+
+    /// [`Self::undo`] for a stack that may hold remote actions: `resolver`
+    /// reaches their drives. Blocking (network), so the UI calls it from a
+    /// worker when the top action is remote.
+    ///
+    /// A record that is not undoable stays on top and answers
+    /// [`UndoError::NotUndoable`].
+    pub fn undo_with(&mut self, resolver: &BackendResolver) -> Result<Action, UndoError> {
         let action = self.done.pop().ok_or(UndoError::Empty)?;
-        match revert(&action) {
+        let result = if action.is_remote() {
+            crate::remote_undo::revert(&action, resolver)
+        } else {
+            revert(&action)
+        };
+        match result {
             Ok(reapplied) => {
                 self.undone.push(action);
                 Ok(reapplied)
@@ -146,8 +229,18 @@ impl UndoStack {
 
     /// Rehace la última operación deshecha.
     pub fn redo(&mut self) -> Result<Action, UndoError> {
+        self.redo_with(&no_drives())
+    }
+
+    /// [`Self::redo`] for a stack that may hold remote actions.
+    pub fn redo_with(&mut self, resolver: &BackendResolver) -> Result<Action, UndoError> {
         let action = self.undone.pop().ok_or(UndoError::Empty)?;
-        match reapply(&action) {
+        let result = if action.is_remote() {
+            crate::remote_undo::reapply(&action, resolver)
+        } else {
+            reapply(&action)
+        };
+        match result {
             Ok(()) => {
                 self.done.push(action.clone());
                 Ok(action)
@@ -170,7 +263,9 @@ fn ensure_present(path: &Path) -> Result<(), UndoError> {
 
 /// Ejecuta la inversa de `action`.
 fn revert(action: &Action) -> Result<Action, UndoError> {
-    ensure_present(action.subject())?;
+    if let Some(subject) = action.subject() {
+        ensure_present(subject)?;
+    }
 
     match action {
         Action::Renamed { from, to } => {
@@ -207,6 +302,12 @@ fn revert(action: &Action) -> Result<Action, UndoError> {
                 .map_err(|e| UndoError::Trash(e.to_string()))?;
             Ok(action.clone())
         }
+        // Routed to `remote_undo` by `undo_with`; never reached.
+        Action::RemoteCopied { .. }
+        | Action::RemoteMoved { .. }
+        | Action::RemoteRenamed { .. }
+        | Action::RemoteDirectoryCreated { .. }
+        | Action::NotUndoable { .. } => crate::remote_undo::revert(action, &no_drives()),
     }
 }
 
@@ -238,5 +339,11 @@ fn reapply(action: &Action) -> Result<(), UndoError> {
         Action::Copied { .. } | Action::DirectoryCreated { .. } => {
             Err(UndoError::Trash("rehacer una copia no esta soportado".into()))
         }
+        // Routed to `remote_undo` by `redo_with`; never reached.
+        Action::RemoteCopied { .. }
+        | Action::RemoteMoved { .. }
+        | Action::RemoteRenamed { .. }
+        | Action::RemoteDirectoryCreated { .. }
+        | Action::NotUndoable { .. } => crate::remote_undo::reapply(action, &no_drives()),
     }
 }

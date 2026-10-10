@@ -46,11 +46,22 @@ Por qué, medido en esta máquina (no de folleto):
 - Rust 1.98 · Node 22 · Python 3.14 (GIL activo)
 - Dolphin, `kioclient` y 217 paquetes KF presentes → referencia de comportamiento a mano
 
-**Prerrequisito de toolchain.** Sin esto `rustc` ni siquiera enlaza (falta `cc`):
+**Since 2026-10: also a pure Ubuntu 26.04.1 GNOME 50 (Mutter, Wayland)
+machine**, the current development target. No KDE packages there; Nautilus,
+Ptyxis (via `xdg-terminal-exec`), gvfs, UDisks2 and `xdg-desktop-portal-gnome`
+are. Kara must behave the same on both desktops; the plan and the live
+checklist are in `docs/desktop-integration-plan.md`.
+
+**Prerrequisito de toolchain.** Sin esto `rustc` ni siquiera enlaza (falta `cc`).
+A GNOME install has none of the Qt runtime Plasma brings, so the line names
+every QML module Kara imports and the Wayland platform plugin:
 
 ```bash
-sudo apt install -y build-essential cmake ninja-build pkg-config qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qt6-svg-dev
+sudo apt install -y build-essential cmake ninja-build pkg-config qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qt6-svg-dev qt6-svg-plugins qt6-qpa-plugins qt6-wayland qml6-module-qtqml qml6-module-qtqml-workerscript qml6-module-qtquick qml6-module-qtquick-window qml6-module-qtquick-layouts qml6-module-qtquick-controls qml6-module-qtquick-templates qml6-module-qttest mold
 ```
+
+A QML file that imports a new module means a new package in this line, in
+`README.md`, and a check that `scripts/build-appimage` bundles it.
 
 Requiere `sudo`: pídeselo al usuario, no intentes ejecutarlo tú.
 
@@ -65,6 +76,12 @@ crates/
   kara-index/  Travesía paralela (jwalk/rayon), búsqueda, watcher inotify (notify).
   kara-ops/    Cola de operaciones, progreso con velocidad/ETA, resolución de
                conflictos, pila de deshacer/rehacer.
+  kara-desktop/ The boundary with the desktop, behind `DesktopIntegration`:
+               Settings portal (dark mode, accent, icon theme), opening files
+               and «Abrir con» (mimeapps.list + .desktop), terminal, UDisks2
+               and gvfs volumes, org.freedesktop.FileManager1. Portal or
+               freedesktop standard first; desktop-specific fallbacks stay in
+               the module that needs them.
   kara-ui/     Puente cxx-qt + binario principal. Expone modelos a QML.
     qml/       La UI. Vive dentro del crate, no en la raíz: cxx-qt escribe las
                rutas del `qmldir` tal cual se le dan, y un `../..` sale del
@@ -72,6 +89,7 @@ crates/
 ```
 
 Regla de capas: `ui → ops → {fs, index} → core`. Nunca al revés.
+`ui → desktop → fs → core`: no core crate learns which desktop it runs on.
 
 ## Comandos
 
@@ -132,6 +150,18 @@ Sin el `-I` falla con "Failed to import com.kara.ui", que es un falso positivo.
   so stale results are dropped (`list_request`).
 
 ## Environment notes
+
+- Desktop integration gotchas (GNOME):
+  - The OpenURI portal shows an app chooser for any type with several
+    handlers, until one is picked three times: double-click opens through
+    `gio open`/`xdg-open`, the portal is only a fallback.
+  - Nautilus keeps running as a D-Bus service and holds
+    `org.freedesktop.FileManager1` without allowing replacement; Kara queues
+    and gets it when Nautilus exits (`nautilus -q`).
+  - Nautilus rejects an `x-special/gnome-copied-files` payload with a trailing
+    newline and does not fall back: see `tests/clipboard_nautilus.rs`.
+  - Qt prints «Could not register app ID … 'kara'» until `kara.desktop` is
+    installed (`scripts/install-desktop-integration`). Harmless.
 
 - Never `pkill -f <pattern>` from the shell tool: the pattern matches its own
   command line and kills it. Kill by PID.

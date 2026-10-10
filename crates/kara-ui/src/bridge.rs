@@ -41,7 +41,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::bridge::qobject::{
     clipboard_clear, clipboard_gnome, clipboard_kde_cut, clipboard_set_text, clipboard_uri_list,
-    clipboard_write,
+    clipboard_write, present_window,
+};
+use kara_desktop::{
+    Associations, ColorScheme, DesktopIntegration, FileManagerRequest, FileManagerService, Volume,
+    VolumeAction, VolumeError,
 };
 use crate::prefs::Prefs;
 use crate::present;
@@ -200,7 +204,82 @@ pub mod qobject {
         /// Si queda sitio para seguir alejando o acercando.
         #[qproperty(bool, can_zoom_out)]
         #[qproperty(bool, can_zoom_in)]
+        /// What the desktop says about its look, through the Settings portal:
+        /// -1 when it does not say, 0 no preference, 1 dark, 2 light.
+        #[qproperty(i32, desktop_scheme)]
+        /// The desktop's accent colour as `#rrggbb`, or empty.
+        #[qproperty(QString, desktop_accent)]
+        /// The button beside each pane row: 0 none, 1 eject, 2 unmount,
+        /// 3 disconnect.
+        #[qproperty(QList_i32, nav_actions)]
+        /// Something worth telling that is not an error: a drive being
+        /// ejected, and that it can now be pulled out.
+        #[qproperty(QString, notice)]
+        /// Whether the notice stays until replaced (work in progress) or
+        /// fades on its own.
+        #[qproperty(bool, notice_sticky)]
+        /// The passphrase prompt of an encrypted volume.
+        #[qproperty(bool, unlock_prompt)]
+        #[qproperty(QString, unlock_name)]
+        #[qproperty(QString, unlock_error)]
+        #[qproperty(bool, unlock_busy)]
+        /// «Abrir con»: the applications for the selection, filled when the
+        /// context menu opens.
+        #[qproperty(QStringList, open_with_names)]
+        #[qproperty(QStringList, open_with_icons)]
+        /// Whether the selection is a disk image Kara can mount.
+        #[qproperty(bool, menu_is_image)]
+        /// «Elegir otra aplicación»: every installed application.
+        #[qproperty(bool, chooser_open)]
+        #[qproperty(QString, chooser_title)]
+        /// The type «usar siempre» would apply to, or empty when the
+        /// selection mixes types and there is no single one.
+        #[qproperty(QString, chooser_kind)]
+        #[qproperty(QStringList, chooser_names)]
+        #[qproperty(QStringList, chooser_icons)]
+        /// Whether the window should be on screen. False only while Kara,
+        /// started by D-Bus to show something, waits for the request.
+        #[qproperty(bool, window_wanted)]
         type App = super::AppRust;
+
+        /// The eject (or unmount, or disconnect) button of pane row `row`.
+        #[qinvokable]
+        fn nav_eject(self: Pin<&mut App>, row: i32);
+
+        /// Unlocks the volume the passphrase prompt is about.
+        #[qinvokable]
+        fn unlock_volume(self: Pin<&mut App>, passphrase: &QString);
+
+        #[qinvokable]
+        fn cancel_unlock(self: Pin<&mut App>);
+
+        #[qinvokable]
+        fn dismiss_notice(self: Pin<&mut App>);
+
+        /// Fills «Abrir con» for the current selection. The context menu
+        /// calls it as it opens.
+        #[qinvokable]
+        fn prepare_menu(self: Pin<&mut App>);
+
+        /// Opens the selection with application `index` of «Abrir con».
+        #[qinvokable]
+        fn open_with(self: Pin<&mut App>, index: i32);
+
+        /// «Elegir otra aplicación…»
+        #[qinvokable]
+        fn open_chooser(self: Pin<&mut App>);
+
+        /// Opens the selection with application `index` of the chooser, and
+        /// makes it the default for the type when `always` is set.
+        #[qinvokable]
+        fn choose_app(self: Pin<&mut App>, index: i32, always: bool);
+
+        #[qinvokable]
+        fn close_chooser(self: Pin<&mut App>);
+
+        /// Mounts the selected disk image and opens it.
+        #[qinvokable]
+        fn mount_selected_image(self: Pin<&mut App>);
 
         /// Shift+Supr: pregunta antes de borrar la selección para siempre. No
         /// borra nada por sí sola.
@@ -527,6 +606,10 @@ pub mod qobject {
     // fotos congelaría la ventana hasta acabar de decodificarlas todas.
     impl cxx_qt::Threading for App {}
 
+    // The desktop's watchers (appearance, drives, FileManager1) need the Qt
+    // thread to report back to, which only exists once the object does.
+    impl cxx_qt::Initialize for App {}
+
     unsafe extern "C++" {
         include!("cxx-qt-lib/qstring.h");
         include!("cxx-qt-lib/qstringlist.h");
@@ -547,6 +630,13 @@ pub mod qobject {
         fn clipboard_gnome() -> String;
         #[namespace = "kara"]
         fn clipboard_kde_cut() -> bool;
+
+        // Window-system calls cxx-qt-lib does not wrap.
+        include!("window.h");
+        #[namespace = "kara"]
+        fn set_desktop_file_name(name: &str);
+        #[namespace = "kara"]
+        fn present_window(activation_token: &str);
 
         type QString = cxx_qt_lib::QString;
         type QStringList = cxx_qt_lib::QStringList;
@@ -575,11 +665,82 @@ struct Loaded {
 /// Lee una carpeta entera, `.hidden` incluido. Bloquea: se llama desde un hilo
 /// aparte, o al arrancar.
 fn read_folder(path: &Path) -> Result<Loaded, String> {
+    if crate::remote_nav::is_remote(path) {
+        return read_remote_folder(path);
+    }
     let listing = list_directory(path).map_err(|error| error.source.to_string())?;
     Ok(Loaded {
         entries: listing.entries,
         hidden: kara_fs::read_hidden_file(path),
     })
+}
+
+/// Remote items put on the clipboard inside Kara.
+#[derive(Clone)]
+struct RemoteClip {
+    paths: Vec<PathBuf>,
+    cut: bool,
+    /// The desktop clipboard's file list at that moment; a different one
+    /// means something else was copied since.
+    snapshot: String,
+}
+
+/// Finds the backends of the drives in the registry.
+fn drive_resolver() -> kara_ops::BackendResolver {
+    crate::drives::registry().resolver()
+}
+
+/// A copy, move or delete between `sources` and `destination`, local or
+/// remote (remote items are `kara+…` addresses in the `PathBuf`s).
+fn location_request(
+    op: kara_ops::runner::Op,
+    sources: &[PathBuf],
+    destination: &Path,
+) -> kara_ops::LocationRequest {
+    kara_ops::LocationRequest {
+        op,
+        sources: sources.iter().map(|path| kara_ops::parse_display_path(path)).collect(),
+        dest_dir: kara_ops::parse_display_path(destination),
+        confirmed_permanent: op == kara_ops::runner::Op::Delete,
+    }
+}
+
+/// `name` inside `folder`, local or remote.
+fn child_path(folder: &Path, name: &str) -> PathBuf {
+    crate::remote_nav::child(folder, name).unwrap_or_else(|| folder.join(name))
+}
+
+/// The folder above `folder`; `None` at a local `/` or a drive's root.
+fn parent_path(folder: &Path) -> Option<PathBuf> {
+    if crate::remote_nav::is_remote(folder) {
+        return crate::remote_nav::parent(folder);
+    }
+    folder.parent().map(Path::to_path_buf)
+}
+
+/// Lists a folder of a remote drive. A lost connection marks the drive lost
+/// (the panel then offers «Reconectar»); the listing's per-entry errors are
+/// dropped, as a local listing's are.
+fn read_remote_folder(path: &Path) -> Result<Loaded, String> {
+    use kara_vfs::{BackendErrorKind, Cancel};
+    let (drive, remote) = crate::remote_nav::parse(path)
+        .ok_or_else(|| "dirección de unidad remota no válida".to_string())?;
+    let registry = crate::drives::registry();
+    let backend = registry
+        .backend(&drive)
+        .ok_or_else(|| "la unidad no está conectada".to_string())?;
+    match backend.list(&remote, &Cancel::new()) {
+        Ok(listing) => Ok(Loaded {
+            entries: listing.entries,
+            hidden: std::collections::BTreeSet::new(),
+        }),
+        Err(error) => {
+            if error.kind == BackendErrorKind::Unavailable {
+                registry.report_failure(&drive, &error);
+            }
+            Err(error.to_string())
+        }
+    }
 }
 
 /// Qué hacer con un listado cuando llega del hilo que lo leyó.
@@ -633,6 +794,19 @@ struct TabView {
     /// otra vez, y sin una base fija encogerlo no desharía nada; y la spec pide
     /// que Esc a mitad lo cancele **sin tocar la selección previa**.
     band_base: Option<Selection>,
+    /// Entries to select once `folder` is listed: what «Show in folder»
+    /// asked for, or a file given on the command line.
+    reveal: Option<Reveal>,
+}
+
+/// A request to show entries selected in their folder, which can only be
+/// met once that folder's listing has arrived from its thread.
+#[derive(Debug, Clone)]
+struct Reveal {
+    folder: PathBuf,
+    names: Vec<std::ffi::OsString>,
+    /// Open Properties on them too (`ShowItemProperties`).
+    properties: bool,
 }
 
 pub struct AppRust {
@@ -735,12 +909,58 @@ pub struct AppRust {
     /// Si el portapapeles hay que vaciarlo cuando el trabajo acabe: un corte es
     /// de un solo uso.
     paste_clears_clipboard: bool,
+    /// Remote items copied or cut in Kara (the desktop clipboard cannot hold them).
+    remote_clip: Option<RemoteClip>,
     view_mode: i32,
     icon_size: i32,
     can_zoom_out: bool,
     can_zoom_in: bool,
+    desktop_scheme: i32,
+    desktop_accent: QString,
+    nav_actions: cxx_qt_lib::QList<i32>,
+    notice: QString,
+    notice_sticky: bool,
+    unlock_prompt: bool,
+    unlock_name: QString,
+    unlock_error: QString,
+    unlock_busy: bool,
+    open_with_names: QStringList,
+    open_with_icons: QStringList,
+    menu_is_image: bool,
+    chooser_open: bool,
+    chooser_title: QString,
+    chooser_kind: QString,
+    chooser_names: QStringList,
+    chooser_icons: QStringList,
+    window_wanted: bool,
 
     // Estado que no se expone a QML.
+    /// Everything that depends on the desktop Kara runs on.
+    desktop: Arc<dyn DesktopIntegration>,
+    /// The drives and network locations, once the desktop has said; `None`
+    /// until then, and the pane shows the mount table meanwhile.
+    volumes: Option<Vec<Volume>>,
+    /// Which volume each pane row key stands for.
+    volume_rows: HashMap<PathBuf, usize>,
+    /// The volume the passphrase prompt is about.
+    unlock_target: Option<String>,
+    /// Kept alive while Kara answers `org.freedesktop.FileManager1`.
+    file_manager: Option<FileManagerService>,
+    /// Started by D-Bus activation and still waiting for its first request:
+    /// that request shows its folder in the first tab instead of a new one.
+    awaiting_request: bool,
+    /// Applications and types, read from disk, and when.
+    associations: Option<(Instant, Arc<Associations>)>,
+    /// What «Abrir con» and the chooser act on, and what they list.
+    menu_files: Vec<PathBuf>,
+    menu_mimes: Vec<String>,
+    menu_apps: Vec<String>,
+    chooser_apps: Vec<String>,
+    /// Icons at the size the entries are drawn. `icons` stays at the pane's
+    /// 16 px; a theme of bitmaps (Yaru) has another file for every size.
+    entry_icon_set: Icons,
+    /// The icon theme both resolvers use.
+    icon_theme: String,
     home: Option<PathBuf>,
     crumb_capacity: usize,
     tree: Tree,
@@ -786,9 +1006,16 @@ impl Default for AppRust {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .filter(|h| h.is_absolute());
+        let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        let startup = crate::args::parse(&args, std::env::current_dir().ok().as_deref());
         // Sin `$HOME` utilizable se arranca en la raiz: es la unica carpeta que
         // seguro existe, y arrancar con la vista vacia no orienta a nadie.
-        let start = starting_folder().or_else(|| home.clone()).unwrap_or_else(|| PathBuf::from("/"));
+        let start = startup
+            .folder
+            .clone()
+            .or_else(|| home.clone())
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let icon_theme = kara_fs::icons::current_theme_name();
 
         let mut prefs = Prefs::load();
         let complaint = prefs.take_complaint();
@@ -883,6 +1110,7 @@ impl Default for AppRust {
             paste_clock: Instant::now(),
             paste_destination: PathBuf::new(),
             paste_clears_clipboard: false,
+            remote_clip: None,
             // Del fichero de ajustes, no de la constante: el modo que el
             // usuario dejó puesto tiene que estar aplicado ya en el primer
             // fotograma. `render` lo restaura al navegar, pero al arrancar
@@ -891,15 +1119,45 @@ impl Default for AppRust {
             icon_size: clamp_count(initial_view.icon_size as usize),
             can_zoom_out: !initial_view.is_smallest(),
             can_zoom_in: !initial_view.is_largest(),
+            desktop_scheme: -1,
+            desktop_accent: QString::default(),
+            nav_actions: cxx_qt_lib::QList::<i32>::default(),
+            notice: QString::default(),
+            notice_sticky: false,
+            unlock_prompt: false,
+            unlock_name: QString::default(),
+            unlock_error: QString::default(),
+            unlock_busy: false,
+            open_with_names: QStringList::default(),
+            open_with_icons: QStringList::default(),
+            menu_is_image: false,
+            chooser_open: false,
+            chooser_title: QString::default(),
+            chooser_kind: QString::default(),
+            chooser_names: QStringList::default(),
+            chooser_icons: QStringList::default(),
+            window_wanted: !startup.service,
+            desktop: kara_desktop::detect(),
+            volumes: None,
+            volume_rows: HashMap::new(),
+            unlock_target: None,
+            file_manager: None,
+            awaiting_request: startup.service,
+            associations: None,
+            menu_files: Vec::new(),
+            menu_mimes: Vec::new(),
+            menu_apps: Vec::new(),
+            chooser_apps: Vec::new(),
+            entry_icon_set: Icons::with_theme(&icon_theme, entry_icon_size(initial_view.icon_size)),
             tabs: Tabs::new(start.clone()),
             tab_views: HashMap::new(),
             home: home.clone(),
             crumb_capacity: DEFAULT_CRUMB_CAPACITY,
-            tree: Tree::new(sections(home.as_deref(), &pinned)),
-            // 16 píxeles es la talla de la vista de detalles. Los temas
-            // modernos son SVG, así que la talla solo decide de qué carpeta del
-            // tema sale el fichero, no la nitidez.
-            icons: Icons::load(ICON_SIZE),
+            tree: Tree::new(sections(home.as_deref(), &pinned, None)),
+            // 16 píxeles es la talla del panel y de la vista de detalles. Las
+            // entradas de las rejillas usan `entry_icon_set`, a su tamaño.
+            icons: Icons::with_theme(&icon_theme, ICON_SIZE),
+            icon_theme,
             descriptions: MimeDescriptions::new(TYPE_LANGUAGES.iter().map(|l| (*l).to_string()).collect()),
             undo: UndoStack::new(),
             sort_defaults: prefs.sort_defaults(),
@@ -925,6 +1183,13 @@ impl Default for AppRust {
         // no hay nada que congelar.
         if let Ok(loaded) = read_folder(&start) {
             app.store_raw(&start, loaded);
+        }
+        if !startup.select.is_empty() {
+            app.view_mut().reveal = Some(Reveal {
+                folder: start.clone(),
+                names: startup.select.clone(),
+                properties: false,
+            });
         }
         if let Some(snapshot) = app.snapshot(&start) {
             app.version = QString::from(env!("CARGO_PKG_VERSION"));
@@ -967,24 +1232,18 @@ impl Default for AppRust {
         app.nav_depths = nav.depths;
         app.nav_expandable = nav.expandable;
         app.nav_expanded = nav.expanded;
+        app.nav_actions = nav.actions;
         app.nav_count = nav.count;
         app.nav_current = nav.current;
         app
     }
 }
 
-/// La carpeta que se pide por línea de órdenes: `kara ~/Imágenes`.
-///
-/// Se ignora lo que no sea una carpeta legible en vez de arrancar con la vista
-/// vacía: quien se equivoca de ruta prefiere ver su carpeta personal a ver nada.
-fn starting_folder() -> Option<PathBuf> {
-    let requested = PathBuf::from(std::env::args_os().nth(1)?);
-    let absolute = if requested.is_absolute() {
-        requested
-    } else {
-        std::env::current_dir().ok()?.join(requested)
-    };
-    absolute.is_dir().then_some(absolute)
+/// The size entry icons are looked up at for an icon drawn `side` pixels
+/// wide. Rounded up to whole multiples of 8 so a zoom step inside the same
+/// band does not throw away what was already found.
+fn entry_icon_size(side: u32) -> u32 {
+    side.clamp(16, 256).div_ceil(8) * 8
 }
 
 /// Migas visibles cuando la vista todavía no ha dicho cuántas caben.
@@ -1227,20 +1486,23 @@ impl AppRust {
             .iter()
             .map(|e| QString::from(&self.type_label(e)))
             .collect();
+        // At the size this folder draws its entries: the remembered view, not
+        // the one on screen, which still belongs to the previous folder.
+        self.entry_icon_set
+            .set_size(entry_icon_size(self.views.settings_for(target).icon_size));
         let icons = entries
             .iter()
-            .map(|e| {
-                let path = self.icons.of(&e.display, e.kind);
-                QString::from(&path.map(|p| present::file_url(&p)).unwrap_or_default())
-            })
+            .map(|e| QString::from(&self.entry_icon_url(e)))
             .collect();
 
         // La caché se consulta para todo, no solo para las imágenes: un PDF o
         // un AppImage pueden tener miniatura hecha por otro programa. Generar,
         // en cambio, solo se intenta con imágenes.
+        let remote = crate::remote_nav::is_remote(target);
         let jobs = entries
             .iter()
             .enumerate()
+            .filter(|_| !remote)
             .filter(|(_, entry)| entry.kind != EntryKind::Directory)
             .filter_map(|(row, entry)| {
                 let modified = entry.modified?;
@@ -1261,6 +1523,11 @@ impl AppRust {
         // dice dónde está el usuario, sin fingir una jerarquía.
         let segments = if self.in_trash {
             Vec::new()
+        } else if remote {
+            let label = crate::remote_nav::parse(target)
+                .and_then(|(drive, _)| crate::drives::registry().config(&drive))
+                .map_or_else(|| "Unidad remota".to_string(), |config| config.label);
+            crate::remote_nav::crumbs(target, &label)
         } else {
             breadcrumb::segments(target, self.home.as_deref())
         };
@@ -1357,12 +1624,27 @@ struct NavView {
     depths: cxx_qt_lib::QList<i32>,
     expandable: cxx_qt_lib::QList<i32>,
     expanded: cxx_qt_lib::QList<i32>,
+    /// The button beside each row; see `present::volume_button`.
+    actions: cxx_qt_lib::QList<i32>,
     count: i32,
     current: i32,
 }
 
-/// Las dos secciones del panel, con las ubicaciones que hay ahora mismo.
-fn sections(home: Option<&Path>, pinned: &[PathBuf]) -> Vec<Section> {
+/// The key a pane row uses for a volume: where it is mounted, or, while it
+/// is not, a relative path no folder can have, which the tree treats like any
+/// other row and which lists as empty, so it never grows an arrow.
+fn volume_key(volume: &Volume) -> PathBuf {
+    volume
+        .mount_point
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!("kara-volume:{}", volume.id)))
+}
+
+/// Las secciones del panel, con las ubicaciones que hay ahora mismo.
+///
+/// `volumes` is what the desktop reported; `None` until it has, and then the
+/// mount table stands in, as it did before Kara asked UDisks2.
+fn sections(home: Option<&Path>, pinned: &[PathBuf], volumes: Option<&[Volume]>) -> Vec<Section> {
     let branch = |place: &kara_fs::places::Place| Branch {
         name: std::ffi::OsString::from(present::place_label(place)),
         path: place.path.clone(),
@@ -1379,16 +1661,51 @@ fn sections(home: Option<&Path>, pinned: &[PathBuf]) -> Vec<Section> {
             .filter(|place| !pinned.contains(&place.path)),
     );
 
-    vec![
+    let Some(volumes) = volumes else {
+        return vec![
+            Section {
+                id: SectionId::QuickAccess,
+                roots: quick,
+            },
+            Section {
+                id: SectionId::ThisComputer,
+                roots: kara_fs::places::this_computer().iter().map(branch).collect(),
+            },
+        ];
+    };
+
+    let root = kara_fs::places::Place {
+        path: PathBuf::from("/"),
+        kind: PlaceKind::Root,
+        label: None,
+    };
+    let row = |volume: &Volume| Branch {
+        name: std::ffi::OsString::from(present::volume_label(volume)),
+        path: volume_key(volume),
+    };
+    let mut computer = vec![branch(&root)];
+    computer.extend(volumes.iter().filter(|v| v.network.is_none()).map(row));
+    let network: Vec<Branch> = volumes.iter().filter(|v| v.network.is_some()).map(row).collect();
+
+    let mut out = vec![
         Section {
             id: SectionId::QuickAccess,
             roots: quick,
         },
         Section {
             id: SectionId::ThisComputer,
-            roots: kara_fs::places::this_computer().iter().map(branch).collect(),
+            roots: computer,
         },
-    ]
+    ];
+    // «Red» appears only when there is something in it: an empty heading
+    // is a promise the pane cannot keep.
+    if !network.is_empty() {
+        out.push(Section {
+            id: SectionId::Network,
+            roots: network,
+        });
+    }
+    out
 }
 
 /// Qué ubicación es cada raíz, para darle su icono.
@@ -1409,6 +1726,59 @@ fn ints(values: impl IntoIterator<Item = i32>) -> cxx_qt_lib::QList<i32> {
 }
 
 impl AppRust {
+    /// The volume a pane row key stands for.
+    fn volume_at(&self, key: &Path) -> Option<&Volume> {
+        let index = *self.volume_rows.get(key)?;
+        self.volumes.as_ref()?.get(index)
+    }
+
+    /// The MIME type of a path, as «Abrir con» sees it.
+    fn mime_of_path(&self, path: &Path) -> String {
+        if path.is_dir() {
+            return "inode/directory".to_string();
+        }
+        path.file_name()
+            .and_then(|name| self.icons.mime_of(&name.to_string_lossy()))
+            .unwrap_or("application/octet-stream")
+            .to_string()
+    }
+
+    /// The applications and their types, read again when the copy in memory
+    /// is more than a few seconds old: installing an application or changing
+    /// a default elsewhere must show up the next time the menu opens.
+    fn associations(&mut self) -> Arc<Associations> {
+        if let Some((read, set)) = &self.associations
+            && read.elapsed() < Duration::from_secs(10)
+        {
+            return set.clone();
+        }
+        let languages: Vec<String> = TYPE_LANGUAGES.iter().map(|l| (*l).to_string()).collect();
+        let set = Arc::new(Associations::load(
+            &kara_desktop::BaseDirs::from_env(),
+            &kara_desktop::session::current_desktops(),
+            &languages,
+        ));
+        self.associations = Some((Instant::now(), set.clone()));
+        set
+    }
+
+    /// The icon of an application: a theme name or an absolute path.
+    fn app_icon_url(&mut self, icon: Option<&str>) -> String {
+        match icon {
+            Some(path) if path.starts_with('/') => present::file_url(Path::new(path)),
+            Some(name) => self
+                .icons
+                .any_of(&[name, "application-x-executable"])
+                .map(|p| present::file_url(&p))
+                .unwrap_or_default(),
+            None => self
+                .icons
+                .any_of(&["application-x-executable"])
+                .map(|p| present::file_url(&p))
+                .unwrap_or_default(),
+        }
+    }
+
     /// Aplana el árbol a listas paralelas y localiza la fila de `current`.
     fn nav_view(&mut self, current: &Path) -> NavView {
         let rows = self.tree.rows();
@@ -1419,6 +1789,7 @@ impl AppRust {
         let mut depths = Vec::with_capacity(rows.len());
         let mut expandable = Vec::with_capacity(rows.len());
         let mut expanded = Vec::with_capacity(rows.len());
+        let mut actions = Vec::with_capacity(rows.len());
         let mut current_row = -1_i32;
 
         for (index, row) in rows.iter().enumerate() {
@@ -1431,6 +1802,7 @@ impl AppRust {
                     icons.push(QString::default());
                     expandable.push(0);
                     expanded.push(0);
+                    actions.push(0);
                 }
                 RowKind::Folder {
                     path,
@@ -1441,17 +1813,30 @@ impl AppRust {
                     labels.push(QString::from(&name.to_string_lossy().into_owned()));
                     paths.push(QString::from(&path.to_string_lossy().into_owned()));
 
-                    // Una raíz conocida usa su icono propio; lo que cuelga del
-                    // árbol es siempre una carpeta.
-                    let found = match self.place_kinds.get(path).copied() {
-                        Some(kind) => self.icons.any_of(present::place_icons(kind)),
-                        None => self
-                            .icons
-                            .of(&name.to_string_lossy(), kara_core::entry::EntryKind::Directory),
+                    // A volume uses its own icon, a known root its own, and
+                    // whatever hangs from the tree is a folder. When the theme
+                    // has none of them, a bundled icon stands in.
+                    let volume = (row.depth == 1)
+                        .then(|| self.volume_rows.get(path))
+                        .flatten()
+                        .and_then(|index| self.volumes.as_ref()?.get(*index));
+                    let url = if let Some(volume) = volume {
+                        actions.push(present::volume_button(volume));
+                        let names: Vec<&str> = volume.icons.iter().map(String::as_str).collect();
+                        self.icons
+                            .any_of(&names)
+                            .map_or_else(|| present::fallback_volume_icon(volume.kind).to_string(), |p| present::file_url(&p))
+                    } else {
+                        actions.push(0);
+                        let found = match self.place_kinds.get(path).copied() {
+                            Some(kind) => self.icons.any_of(present::place_icons(kind)),
+                            None => self
+                                .icons
+                                .of(&name.to_string_lossy(), kara_core::entry::EntryKind::Directory),
+                        };
+                        found.map_or_else(|| present::FALLBACK_FOLDER_ICON.to_string(), |p| present::file_url(&p))
                     };
-                    icons.push(QString::from(
-                        &found.map(|p| present::file_url(&p)).unwrap_or_default(),
-                    ));
+                    icons.push(QString::from(&url));
                     // Mientras no se sepa, se ofrece la flecha: averiguarlo exige
                     // leer la carpeta, que es justo lo que se difiere.
                     expandable.push(i32::from(*can_expand != Expandable::No));
@@ -1476,7 +1861,16 @@ impl AppRust {
             depths: ints(depths),
             expandable: ints(expandable),
             expanded: ints(expanded),
+            actions: ints(actions),
         }
+    }
+
+    /// The icon of an entry at the entry size, or the bundled one when the
+    /// theme has nothing for it.
+    fn entry_icon_url(&mut self, entry: &kara_core::FileEntry) -> String {
+        self.entry_icon_set
+            .of(&entry.display, entry.kind)
+            .map_or_else(|| present::fallback_icon(entry.kind).to_string(), |p| present::file_url(&p))
     }
 
     /// Cómo se lee el tipo de una entrada en la columna «Tipo».
@@ -1564,6 +1958,40 @@ fn clamp_count(n: usize) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
 }
 
+/// The types UDisks2 can attach as a loop device and mount.
+const DISK_IMAGE_TYPES: [&str; 5] = [
+    "application/x-cd-image",
+    "application/x-iso9660-image",
+    "application/x-raw-disk-image",
+    "application/vnd.efi.iso",
+    "application/vnd.efi.img",
+];
+
+/// Items grouped by their folder, in the order the folders first appear,
+/// for `ShowItems`: one tab per folder, its items selected together.
+fn by_folder(items: Vec<PathBuf>) -> Vec<(PathBuf, Vec<std::ffi::OsString>)> {
+    let mut groups: Vec<(PathBuf, Vec<std::ffi::OsString>)> = Vec::new();
+    for item in items {
+        let (Some(parent), Some(name)) = (item.parent(), item.file_name()) else {
+            continue;
+        };
+        if !parent.is_dir() {
+            continue;
+        }
+        match groups.iter_mut().find(|(folder, _)| folder == parent) {
+            Some((_, names)) => names.push(name.to_os_string()),
+            None => groups.push((parent.to_path_buf(), vec![name.to_os_string()])),
+        }
+    }
+    groups
+}
+
+impl cxx_qt::Initialize for qobject::App {
+    fn initialize(self: Pin<&mut Self>) {
+        self.start_desktop();
+    }
+}
+
 impl qobject::App {
     /// Vuelca una vista ya calculada usando los setters, para que QML reciba las
     /// señales de cambio. Devuelve `false` si la carpeta no se pudo leer.
@@ -1627,7 +2055,493 @@ impl qobject::App {
         // El rótulo de la pestaña activa es el nombre de su carpeta, así que
         // navegar lo cambia.
         self.as_mut().publish_tabs();
+        self.as_mut().apply_reveal(target);
         true
+    }
+
+    // ---- The desktop -------------------------------------------------------
+
+    /// Starts listening to the desktop: its look, its drives, and requests
+    /// from other applications. Everything that may wait runs on threads and
+    /// reports back through the Qt thread.
+    fn start_desktop(mut self: Pin<&mut Self>) {
+        let desktop = self.rust().desktop.clone();
+        let thread = self.qt_thread();
+
+        {
+            let desktop = desktop.clone();
+            let thread = thread.clone();
+            std::thread::spawn(move || {
+                if let Some(look) = desktop.appearance() {
+                    let _ = thread.queue(move |app| app.apply_appearance(look));
+                }
+                let later = thread.clone();
+                desktop.watch_appearance(Arc::new(move |look| {
+                    let _ = later.queue(move |app| app.apply_appearance(look));
+                }));
+            });
+        }
+
+        {
+            let thread = thread.clone();
+            desktop.watch_volumes(Arc::new(move || {
+                let _ = thread.queue(|app| app.request_volumes());
+            }));
+        }
+        self.as_mut().request_volumes();
+
+        // Answering FileManager1 is for the user's file manager: Kara takes
+        // the name when it is the default for folders, or when the bus
+        // started it for exactly that.
+        let service = self.rust().awaiting_request;
+        let languages: Vec<String> = TYPE_LANGUAGES.iter().map(|l| (*l).to_string()).collect();
+        std::thread::spawn(move || {
+            let is_default = Associations::load(
+                &kara_desktop::BaseDirs::from_env(),
+                &kara_desktop::session::current_desktops(),
+                &languages,
+            )
+            .default_for("inode/directory")
+            .is_some_and(|app| app.id == "kara.desktop");
+            if !(service || is_default) {
+                return;
+            }
+            let requests = thread.clone();
+            let served = desktop.serve_file_manager(Arc::new(move |request| {
+                let _ = requests.queue(move |app| app.handle_file_manager(request));
+            }));
+            if let Ok(served) = served {
+                let _ = thread.queue(move |mut app| app.as_mut().rust_mut().get_mut().file_manager = Some(served));
+            }
+        });
+
+        let current = self.rust().active_path();
+        self.as_mut().apply_reveal(&current);
+    }
+
+    /// Applies what the desktop says about its look. The icon theme takes
+    /// effect at once: both resolvers are rebuilt and what is on screen is
+    /// drawn again.
+    fn apply_appearance(mut self: Pin<&mut Self>, look: kara_desktop::Appearance) {
+        let scheme = match look.color_scheme {
+            None => -1,
+            Some(ColorScheme::NoPreference) => 0,
+            Some(ColorScheme::Dark) => 1,
+            Some(ColorScheme::Light) => 2,
+        };
+        self.as_mut().set_desktop_scheme(scheme);
+        let accent = look.accent.map(kara_desktop::Accent::to_hex).unwrap_or_default();
+        self.as_mut().set_desktop_accent(QString::from(&accent));
+
+        let Some(theme) = look.icon_theme else {
+            return;
+        };
+        if theme == self.rust().icon_theme {
+            return;
+        }
+        {
+            let state = self.as_mut().rust_mut().get_mut();
+            let entry_size = state.entry_icon_set.size();
+            state.icons = Icons::with_theme(&theme, ICON_SIZE);
+            state.entry_icon_set = Icons::with_theme(&theme, entry_size);
+            state.icon_theme = theme;
+        }
+        let current = self.rust().active_path();
+        self.as_mut().render(&current);
+        self.as_mut().publish_nav();
+    }
+
+    /// Asks the desktop for its volumes on another thread: UDisks2 may be
+    /// slow to answer, and the pane must not wait for it.
+    fn request_volumes(self: Pin<&mut Self>) {
+        let desktop = self.rust().desktop.clone();
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let volumes = desktop.volumes();
+            let _ = thread.queue(move |app| app.apply_volumes(volumes));
+        });
+    }
+
+    fn apply_volumes(mut self: Pin<&mut Self>, volumes: Vec<Volume>) {
+        {
+            let state = self.as_mut().rust_mut().get_mut();
+            state.volume_rows = volumes.iter().enumerate().map(|(i, v)| (volume_key(v), i)).collect();
+            for volume in volumes.iter().filter(|v| v.mount_point.is_none()) {
+                // Nothing to list: no arrow.
+                state.tree.set_children(&volume_key(volume), Vec::new());
+            }
+            state.volumes = Some(volumes);
+            let pinned = state.prefs.pinned();
+            let sections = sections(state.home.as_deref(), &pinned, state.volumes.as_deref());
+            state.tree.set_sections(sections);
+        }
+        self.publish_nav();
+    }
+
+    fn nav_eject(mut self: Pin<&mut Self>, row: i32) {
+        let Some(path) = self.nav_path_at(row) else {
+            return;
+        };
+        let Some(volume) = self.rust().volume_at(&path).cloned() else {
+            return;
+        };
+        self.as_mut().run_volume_action(volume, VolumeAction::Eject);
+    }
+
+    fn ask_passphrase(mut self: Pin<&mut Self>, volume: &Volume) {
+        self.as_mut().rust_mut().get_mut().unlock_target = Some(volume.id.clone());
+        self.as_mut().set_unlock_name(QString::from(&present::volume_label(volume)));
+        self.as_mut().set_unlock_error(QString::default());
+        self.as_mut().set_unlock_busy(false);
+        self.as_mut().set_unlock_prompt(true);
+    }
+
+    fn unlock_volume(mut self: Pin<&mut Self>, passphrase: &QString) {
+        let Some(id) = self.rust().unlock_target.clone() else {
+            return;
+        };
+        let Some(volume) = self.rust().volumes.as_ref().and_then(|v| v.iter().find(|v| v.id == id)).cloned() else {
+            self.as_mut().set_unlock_prompt(false);
+            return;
+        };
+        self.as_mut().set_unlock_error(QString::default());
+        self.as_mut().set_unlock_busy(true);
+        self.as_mut()
+            .run_volume_action(volume, VolumeAction::Unlock(passphrase.to_string()));
+    }
+
+    fn cancel_unlock(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().get_mut().unlock_target = None;
+        self.as_mut().set_unlock_busy(false);
+        self.as_mut().set_unlock_prompt(false);
+    }
+
+    fn show_notice(mut self: Pin<&mut Self>, text: &str, sticky: bool) {
+        self.as_mut().set_notice_sticky(sticky);
+        self.as_mut().set_notice(QString::from(text));
+    }
+
+    fn dismiss_notice(mut self: Pin<&mut Self>) {
+        self.as_mut().set_notice_sticky(false);
+        self.as_mut().set_notice(QString::default());
+    }
+
+    /// Mounts, unlocks or ejects a volume on the desktop's thread, and
+    /// carries on in [`Self::finish_volume_action`].
+    fn run_volume_action(mut self: Pin<&mut Self>, volume: Volume, action: VolumeAction) {
+        let eject = action == VolumeAction::Eject;
+        if eject {
+            // The spec: no ejecting while an operation may be writing to it.
+            if self.rust().paste_job.is_some() {
+                self.as_mut().report(&format!(
+                    "Espera a que termine la operación en curso antes de expulsar «{}».",
+                    present::volume_label(&volume)
+                ));
+                return;
+            }
+            self.as_mut().show_notice(&present::ejecting_notice(&volume), true);
+        }
+        let thread = self.qt_thread();
+        let id = volume.id.clone();
+        self.rust().desktop.volume_action(
+            &id,
+            action,
+            Box::new(move |result| {
+                let _ = thread.queue(move |app| app.finish_volume_action(volume, eject, result));
+            }),
+        );
+    }
+
+    fn finish_volume_action(
+        mut self: Pin<&mut Self>,
+        volume: Volume,
+        eject: bool,
+        result: Result<Option<PathBuf>, VolumeError>,
+    ) {
+        let unlocking = *self.unlock_prompt();
+        match result {
+            Ok(mounted) => {
+                if unlocking {
+                    self.as_mut().cancel_unlock();
+                }
+                if eject {
+                    self.as_mut().show_notice(&present::ejected_notice(&volume), false);
+                    // A folder on the volume that just went is nowhere: go
+                    // home rather than show what is no longer there.
+                    let current = self.rust().active_path();
+                    if let Some(point) = &volume.mount_point
+                        && current.starts_with(point)
+                    {
+                        let home = self.rust().home.clone().unwrap_or_else(|| PathBuf::from("/"));
+                        self.as_mut().navigate_to(&home);
+                    }
+                } else if let Some(point) = mounted {
+                    self.as_mut().navigate_to(&point);
+                }
+            }
+            Err(VolumeError::Dismissed) => {
+                self.as_mut().set_unlock_busy(false);
+                self.as_mut().dismiss_notice();
+            }
+            Err(error @ VolumeError::WrongPassphrase(_)) if unlocking => {
+                self.as_mut().set_unlock_busy(false);
+                self.as_mut().set_unlock_error(QString::from(&error.to_string()));
+            }
+            Err(error) => {
+                if unlocking {
+                    self.as_mut().cancel_unlock();
+                }
+                self.as_mut().dismiss_notice();
+                self.as_mut().report(&error.to_string());
+            }
+        }
+        self.as_mut().request_volumes();
+    }
+
+    fn mount_selected_image(self: Pin<&mut Self>) {
+        let Some(image) = self.selected_paths().into_iter().next() else {
+            return;
+        };
+        let thread = self.qt_thread();
+        self.rust().desktop.mount_image(
+            &image,
+            Box::new(move |result| {
+                let _ = thread.queue(move |mut app| match result {
+                    Ok(Some(point)) => app.as_mut().navigate_to(&point),
+                    Ok(None) | Err(VolumeError::Dismissed) => {}
+                    Err(error) => app.as_mut().report(&error.to_string()),
+                });
+            }),
+        );
+    }
+
+    // ---- «Abrir con» -----------------------------------------------------------
+
+    fn prepare_menu(mut self: Pin<&mut Self>) {
+        let files = self.selected_paths();
+        let (names, icons, is_image) = {
+            let state = self.as_mut().rust_mut().get_mut();
+            let mut mimes: Vec<String> = Vec::new();
+            for file in &files {
+                let mime = state.mime_of_path(file);
+                if !mimes.contains(&mime) {
+                    mimes.push(mime);
+                }
+            }
+            let set = state.associations();
+            let canonical: Vec<String> = mimes.iter().map(|m| set.canonical(m)).collect();
+            let mut apps: Vec<&kara_desktop::AppInfo> = set.apps_for_all(&canonical);
+            // A type nothing claims still opens in a text editor, which is the
+            // generic editor the spec asks to offer.
+            if apps.is_empty() && !canonical.iter().any(|m| m == "inode/directory") {
+                apps = set.apps_for("text/plain");
+            }
+            let ids: Vec<String> = apps.iter().map(|a| a.id.clone()).collect();
+            let labels: Vec<String> = apps.iter().map(|a| a.name.clone()).collect();
+            let icon_names: Vec<Option<String>> = apps.iter().map(|a| a.icon.clone()).collect();
+            let icons: Vec<String> = icon_names.iter().map(|i| state.app_icon_url(i.as_deref())).collect();
+            let is_image = files.len() == 1
+                && canonical.len() == 1
+                && DISK_IMAGE_TYPES.contains(&canonical[0].as_str());
+            state.menu_files = files;
+            state.menu_mimes = canonical;
+            state.menu_apps = ids;
+            (labels, icons, is_image)
+        };
+        self.as_mut()
+            .set_open_with_names(names.iter().map(QString::from).collect());
+        self.as_mut()
+            .set_open_with_icons(icons.iter().map(QString::from).collect());
+        self.as_mut().set_menu_is_image(is_image);
+    }
+
+    fn open_with(mut self: Pin<&mut Self>, index: i32) {
+        let Some(id) = usize::try_from(index).ok().and_then(|i| self.rust().menu_apps.get(i).cloned()) else {
+            return;
+        };
+        self.as_mut().launch_app(&id, false);
+    }
+
+    fn open_chooser(mut self: Pin<&mut Self>) {
+        let (title, kind, names, icons) = {
+            let state = self.as_mut().rust_mut().get_mut();
+            if state.menu_files.is_empty() {
+                return;
+            }
+            let set = state.associations();
+            let apps: Vec<(String, String, Option<String>)> = set
+                .all_apps()
+                .into_iter()
+                .map(|a| (a.id.clone(), a.name.clone(), a.icon.clone()))
+                .collect();
+            let icons: Vec<String> = apps.iter().map(|(_, _, icon)| state.app_icon_url(icon.as_deref())).collect();
+            state.chooser_apps = apps.iter().map(|(id, _, _)| id.clone()).collect();
+            let title = match state.menu_files.as_slice() {
+                [one] => format!(
+                    "Abrir «{}» con",
+                    one.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+                ),
+                many => format!("Abrir {} elementos con", many.len()),
+            };
+            // «Usar siempre» needs one type to apply to.
+            let kind = match state.menu_mimes.as_slice() {
+                [mime] => state
+                    .descriptions
+                    .of(mime)
+                    .map(present::capitalize_type)
+                    .unwrap_or_else(|| mime.clone()),
+                _ => String::new(),
+            };
+            (title, kind, apps.into_iter().map(|(_, name, _)| name).collect::<Vec<_>>(), icons)
+        };
+        self.as_mut().set_chooser_title(QString::from(&title));
+        self.as_mut().set_chooser_kind(QString::from(&kind));
+        self.as_mut()
+            .set_chooser_names(names.iter().map(QString::from).collect());
+        self.as_mut()
+            .set_chooser_icons(icons.iter().map(QString::from).collect());
+        self.as_mut().set_chooser_open(true);
+    }
+
+    fn choose_app(mut self: Pin<&mut Self>, index: i32, always: bool) {
+        let Some(id) = usize::try_from(index).ok().and_then(|i| self.rust().chooser_apps.get(i).cloned()) else {
+            return;
+        };
+        self.as_mut().set_chooser_open(false);
+        self.as_mut().launch_app(&id, always);
+    }
+
+    fn close_chooser(mut self: Pin<&mut Self>) {
+        self.as_mut().set_chooser_open(false);
+    }
+
+    /// Starts application `id` on the menu's files and records the choice
+    /// the way GIO does, so Nautilus and Kara list the same recent picks:
+    /// as the default when the user ticked «usar siempre», as the most
+    /// recently used otherwise.
+    fn launch_app(mut self: Pin<&mut Self>, id: &str, always: bool) {
+        let (app, files, mimes) = {
+            let state = self.as_mut().rust_mut().get_mut();
+            let set = state.associations();
+            (set.app(id).cloned(), state.menu_files.clone(), state.menu_mimes.clone())
+        };
+        let Some(app) = app else {
+            self.as_mut().report("Esa aplicación ya no está instalada.");
+            return;
+        };
+        if let Err(error) = self.rust().desktop.launch(&app, &files) {
+            self.as_mut().report(&error.to_string());
+            return;
+        }
+        self.as_mut().clear_error();
+
+        let Some(list) = kara_desktop::BaseDirs::from_env().user_mimeapps() else {
+            return;
+        };
+        let recorded = if always && mimes.len() == 1 {
+            kara_desktop::apps::mimeapps::set_default(&list, &mimes[0], &app.id)
+        } else {
+            mimes
+                .iter()
+                .try_for_each(|mime| kara_desktop::apps::mimeapps::remember_used(&list, mime, &app.id))
+        };
+        if let Err(error) = recorded {
+            self.as_mut().report(&format!("No se pudo guardar la elección de aplicación: {error}"));
+        }
+        // Read again next time: the order just changed.
+        self.as_mut().rust_mut().get_mut().associations = None;
+    }
+
+    // ---- org.freedesktop.FileManager1 ----------------------------------------
+
+    fn handle_file_manager(mut self: Pin<&mut Self>, request: FileManagerRequest) {
+        let (groups, properties, token) = match request {
+            FileManagerRequest::ShowFolders {
+                folders,
+                activation_token,
+            } => (
+                folders
+                    .into_iter()
+                    .filter(|f| f.is_dir())
+                    .map(|f| (f, Vec::new()))
+                    .collect(),
+                false,
+                activation_token,
+            ),
+            FileManagerRequest::ShowItems {
+                items,
+                activation_token,
+            } => (by_folder(items), false, activation_token),
+            FileManagerRequest::ShowItemProperties {
+                items,
+                activation_token,
+            } => (by_folder(items), true, activation_token),
+        };
+        for (folder, names) in groups {
+            self.as_mut().reveal_in_tab(folder, names, properties);
+        }
+        self.as_mut().set_window_wanted(true);
+        present_window(&token);
+    }
+
+    /// Shows `folder` with `names` selected: in the first tab when the bus
+    /// started Kara for this, in a new one otherwise, as Kara keeps one
+    /// window and its tabs.
+    fn reveal_in_tab(mut self: Pin<&mut Self>, folder: PathBuf, names: Vec<std::ffi::OsString>, properties: bool) {
+        let reuse = std::mem::replace(&mut self.as_mut().rust_mut().get_mut().awaiting_request, false);
+        if reuse {
+            self.as_mut().navigate_to(&folder);
+        } else {
+            self.as_mut()
+                .open_tab(&QString::from(&folder.to_string_lossy().into_owned()), false);
+        }
+        self.as_mut().rust_mut().get_mut().view_mut().reveal = Some(Reveal {
+            folder: folder.clone(),
+            names,
+            properties,
+        });
+        // If the folder was already in memory it is on screen by now, and
+        // no further render would come to apply it.
+        self.as_mut().apply_reveal(&folder);
+    }
+
+    /// Selects what a [`Reveal`] asked for, once `target` is the listing on
+    /// screen.
+    fn apply_reveal(mut self: Pin<&mut Self>, target: &Path) {
+        let ready = {
+            let state = self.rust();
+            let view = state.view();
+            view.visible_path.as_deref() == Some(target)
+                && view.reveal.as_ref().is_some_and(|r| r.folder == target)
+        };
+        if !ready {
+            return;
+        }
+        let Some(reveal) = self.as_mut().rust_mut().get_mut().view_mut().reveal.take() else {
+            return;
+        };
+        if !reveal.names.is_empty() {
+            let state = self.as_mut().rust_mut().get_mut();
+            let len = state.view().visible.len();
+            let indices: Vec<usize> = reveal
+                .names
+                .iter()
+                .filter_map(|name| state.view().visible.iter().position(|e| &e.name == name))
+                .collect();
+            let selection = &mut state.view_mut().selection;
+            selection.deselect_all();
+            for (n, index) in indices.iter().enumerate() {
+                if n == 0 {
+                    selection.click(*index, len);
+                } else {
+                    selection.ctrl_click(*index, len);
+                }
+            }
+            self.as_mut().publish_selection();
+        }
+        if reveal.properties {
+            self.as_mut().show_properties();
+        }
     }
 
     /// Vuelca las filas del panel de navegación.
@@ -1640,6 +2554,7 @@ impl qobject::App {
         self.as_mut().set_nav_depths(nav.depths);
         self.as_mut().set_nav_expandable(nav.expandable);
         self.as_mut().set_nav_expanded(nav.expanded);
+        self.as_mut().set_nav_actions(nav.actions);
         self.as_mut().set_nav_count(nav.count);
         self.as_mut().set_nav_current(nav.current);
     }
@@ -1670,6 +2585,18 @@ impl qobject::App {
         let Some(path) = self.nav_path_at(row) else {
             return;
         };
+        // A volume with nowhere to browse yet is mounted first — after its
+        // passphrase, if it is encrypted — and opened when it is.
+        if let Some(volume) = self.rust().volume_at(&path).cloned()
+            && volume.mount_point.is_none()
+        {
+            if volume.locked {
+                self.as_mut().ask_passphrase(&volume);
+            } else {
+                self.as_mut().run_volume_action(volume, VolumeAction::Mount);
+            }
+            return;
+        }
         self.as_mut().navigate_to(&path);
     }
 
@@ -1710,7 +2637,7 @@ impl qobject::App {
             // Cambiar las raíces no cierra lo que el usuario tenía desplegado:
             // `set_sections` conserva la expansión y lo ya leído.
             let pinned = state.prefs.pinned();
-            state.tree.set_sections(sections(state.home.as_deref(), &pinned));
+            state.tree.set_sections(sections(state.home.as_deref(), &pinned, state.volumes.as_deref()));
         }
 
         self.as_mut().persist();
@@ -2018,6 +2945,42 @@ impl qobject::App {
     /// Ninguna operación puede fallar en silencio: es una regla del proyecto, y
     /// una carpeta que no se crea sin decir por qué es indistinguible de un
     /// clic que no llegó.
+    /// Runs a blocking rename / new-folder on a worker, records its undo
+    /// action and reloads the folder, or reports `failure` with the reason.
+    fn run_location_op(
+        mut self: Pin<&mut Self>,
+        work: impl FnOnce(
+                &kara_ops::BackendResolver,
+            ) -> Result<(kara_vfs::Location, Action), kara_ops::LocationOpError>
+            + Send
+            + 'static,
+        failure: &'static str,
+    ) {
+        self.as_mut().clear_error();
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let result = work(&drive_resolver());
+            let _ = thread.queue(move |mut app| match result {
+                Ok((_, action)) => app.as_mut().record(action),
+                Err(error) => app.as_mut().report(&format!("{failure}: {error}")),
+            });
+        });
+    }
+
+    /// File actions that still need a local folder: say so instead of
+    /// letting a `kara+…` address be taken for a local path.
+    fn remote_blocked(mut self: Pin<&mut Self>) -> bool {
+        // Properties and the terminal need a local folder.
+        let current = PathBuf::from(self.path().to_string());
+        if !crate::remote_nav::is_remote(&current) {
+            return false;
+        }
+        self.as_mut().report(
+            "Las acciones sobre ficheros de una unidad remota aún no están disponibles: por ahora solo se puede examinar.",
+        );
+        true
+    }
+
     fn report(mut self: Pin<&mut Self>, message: &str) {
         self.as_mut().set_last_error(QString::from(&message.to_string()));
     }
@@ -2037,7 +3000,7 @@ impl qobject::App {
     fn undo(mut self: Pin<&mut Self>) {
         // Un deshacer que falla no pierde el registro: `UndoStack` devuelve la
         // acción a la pila, así que aquí basta con contarlo y no refrescar.
-        if let Err(error) = self.as_mut().rust_mut().get_mut().undo.undo() {
+        if let Err(error) = self.as_mut().rust_mut().get_mut().undo.undo_with(&drive_resolver()) {
             self.as_mut().report(&format!("No se pudo deshacer: {error}"));
             return;
         }
@@ -2048,7 +3011,7 @@ impl qobject::App {
     }
 
     fn redo(mut self: Pin<&mut Self>) {
-        if let Err(error) = self.as_mut().rust_mut().get_mut().undo.redo() {
+        if let Err(error) = self.as_mut().rust_mut().get_mut().undo.redo_with(&drive_resolver()) {
             self.as_mut().report(&format!("No se pudo rehacer: {error}"));
             return;
         }
@@ -2061,6 +3024,15 @@ impl qobject::App {
     fn create_folder(mut self: Pin<&mut Self>, name: &QString) -> QString {
         let parent = PathBuf::from(self.path().to_string());
         let name = name.to_string();
+        if crate::remote_nav::is_remote(&parent) {
+            // A network round trip: on a worker. The new name is not known
+            // here, so the inline editor does not open.
+            let location = kara_ops::parse_display_path(&parent);
+            self.as_mut().run_location_op(move |resolver| {
+                kara_ops::create_dir_at(&location, &name, resolver)
+            }, "No se pudo crear la carpeta");
+            return QString::default();
+        }
 
         // `KeepBoth`: crear «Nueva carpeta» cuando ya hay una da «Nueva carpeta
         // (2)», como el Explorador. Fallar obligaría al usuario a inventar un
@@ -2093,7 +3065,7 @@ impl qobject::App {
             .selected()
             .iter()
             .filter_map(|index| state.view().visible.get(*index))
-            .map(|entry| current.join(&entry.name))
+            .map(|entry| child_path(&current, &entry.name.to_string_lossy()))
             .collect()
     }
 
@@ -2102,6 +3074,16 @@ impl qobject::App {
         if paths.is_empty() {
             return;
         }
+        let current = PathBuf::from(self.path().to_string());
+        if crate::remote_nav::is_remote(&current) {
+            let cut = action == kara_fs::clipboard::ClipboardAction::Cut;
+            let snapshot = clipboard_uri_list();
+            self.as_mut().rust_mut().get_mut().remote_clip =
+                Some(RemoteClip { paths, cut, snapshot });
+            self.as_mut().clear_error();
+            return;
+        }
+        self.as_mut().rust_mut().get_mut().remote_clip = None;
 
         let state = match action {
             kara_fs::clipboard::ClipboardAction::Cut => {
@@ -2149,8 +3131,23 @@ impl qobject::App {
             gnome_copied_files: (!gnome.is_empty()).then_some(gnome.as_bytes()),
             kde_cut_selection: Some(kde.as_bytes()),
         };
-        let Some(state) = kara_fs::clipboard::parse(formats) else {
-            return;
+        // Remote items cannot ride the desktop clipboard (no `file://` for
+        // them): Kara keeps them itself, valid while the desktop clipboard is
+        // still what it was when they were copied.
+        let internal = self
+            .rust()
+            .remote_clip
+            .clone()
+            .filter(|clip| clip.snapshot == uri_list);
+        let state = match internal {
+            Some(clip) if clip.cut => kara_fs::clipboard::ClipboardState::cut(clip.paths),
+            Some(clip) => kara_fs::clipboard::ClipboardState::copy(clip.paths),
+            None => {
+                let Some(state) = kara_fs::clipboard::parse(formats) else {
+                    return;
+                };
+                state
+            }
         };
 
         let destination = PathBuf::from(self.path().to_string());
@@ -2159,24 +3156,27 @@ impl qobject::App {
         } else {
             kara_ops::runner::Op::Copy
         };
-        let request = kara_ops::runner::Request {
-            op,
-            sources: state.paths.clone(),
-            dest_dir: destination,
-        };
+        let request = location_request(op, &state.paths, &destination);
         let clears = state.after_paste().is_none();
         self.start_job(request, clears);
     }
 
     /// Arranca un trabajo de copiar, mover o eliminar en su hilo.
-    fn start_job(mut self: Pin<&mut Self>, request: kara_ops::runner::Request, clears: bool) {
+    fn start_job(mut self: Pin<&mut Self>, request: kara_ops::LocationRequest, clears: bool) {
         let op = request.op;
-        let destination = request.dest_dir.clone();
+        let destination = kara_ops::display_path(&request.dest_dir);
         let thread = self.qt_thread();
-        let handle = kara_ops::runner::spawn(request, move |event| {
+        let spawned = kara_ops::runner::spawn_with(request, drive_resolver(), move |event| {
             // Si el objeto ya no está, la ventana se cerró y nadie espera nada.
             let _ = thread.queue(move |app| app.on_paste_event(event));
         });
+        let handle = match spawned {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.as_mut().report(&format!("No se pudo empezar: {error}"));
+                return;
+            }
+        };
 
         self.as_mut().clear_error();
         let title = format!("{}…", op.gerund());
@@ -2372,13 +3372,15 @@ impl qobject::App {
 
         // La pregunta dice cuántos y, si es uno, cuál: es lo que impide un
         // borrado masivo por un Shift+Supr con la selección equivocada.
+        let remote = crate::remote_nav::is_remote(&PathBuf::from(self.path().to_string()));
+        let note = if remote { "\nLa unidad remota no tiene papelera." } else { "" };
         let text = match paths.as_slice() {
             [one] => format!(
-                "¿Eliminar permanentemente «{}»?\nEsta acción no se puede deshacer.",
+                "¿Eliminar permanentemente «{}»?\nEsta acción no se puede deshacer.{note}",
                 one.file_name().map_or_else(|| one.display().to_string(), |n| n.to_string_lossy().into_owned())
             ),
             many => format!(
-                "¿Eliminar permanentemente estos {} elementos?\nEsta acción no se puede deshacer.",
+                "¿Eliminar permanentemente estos {} elementos?\nEsta acción no se puede deshacer.{note}",
                 many.len()
             ),
         };
@@ -2393,11 +3395,8 @@ impl qobject::App {
         if paths.is_empty() {
             return;
         }
-        let request = kara_ops::runner::Request {
-            op: kara_ops::runner::Op::Delete,
-            sources: paths,
-            dest_dir: PathBuf::from(self.path().to_string()),
-        };
+        let destination = PathBuf::from(self.path().to_string());
+        let request = location_request(kara_ops::runner::Op::Delete, &paths, &destination);
         self.start_job(request, false);
     }
 
@@ -2407,6 +3406,9 @@ impl qobject::App {
     }
 
     fn show_properties(mut self: Pin<&mut Self>) {
+        if self.as_mut().remote_blocked() {
+            return;
+        }
         if *self.in_trash() {
             return;
         }
@@ -2558,6 +3560,9 @@ impl qobject::App {
     }
 
     fn open_terminal_here(mut self: Pin<&mut Self>, row: i32) {
+        if self.as_mut().remote_blocked() {
+            return;
+        }
         if *self.in_trash() {
             return;
         }
@@ -2567,10 +3572,15 @@ impl qobject::App {
             .and_then(|row| self.rust().view().visible.get(row))
             .filter(|entry| entry.kind == EntryKind::Directory)
             .map_or_else(|| current.clone(), |entry| current.join(&entry.name));
-        match kara_fs::open::open_terminal(&folder) {
-            Ok(()) => self.as_mut().clear_error(),
-            Err(error) => self.as_mut().report(&error.to_string()),
-        }
+        let thread = self.qt_thread();
+        self.rust().desktop.open_terminal(
+            &folder,
+            Arc::new(move |error| {
+                let message = error.to_string();
+                let _ = thread.queue(move |app| app.report(&message));
+            }),
+        );
+        self.as_mut().clear_error();
     }
 
     fn toggle_hidden(mut self: Pin<&mut Self>) {
@@ -2890,6 +3900,11 @@ impl qobject::App {
 
     fn trash_selected(mut self: Pin<&mut Self>) {
         let current = PathBuf::from(self.path().to_string());
+        if crate::remote_nav::is_remote(&current) {
+            // A remote drive has no trash: deleting is permanent, so it asks.
+            self.as_mut().request_permanent_delete();
+            return;
+        }
         let victims: Vec<PathBuf> = {
             let state = self.rust();
             state
@@ -2950,10 +3965,17 @@ impl qobject::App {
 
     fn rename_entry(mut self: Pin<&mut Self>, from: &QString, to: &QString) {
         let parent = PathBuf::from(self.path().to_string());
-        let source = parent.join(from.to_string());
+        let source = child_path(&parent, &from.to_string());
         let target = to.to_string();
 
         if target.is_empty() || target == from.to_string() {
+            return;
+        }
+        if crate::remote_nav::is_remote(&parent) {
+            let location = kara_ops::parse_display_path(&source);
+            self.as_mut().run_location_op(move |resolver| {
+                kara_ops::rename_at(&location, &target, resolver)
+            }, "No se pudo renombrar");
             return;
         }
 
@@ -3095,6 +4117,17 @@ impl qobject::App {
             state.prefs.set_default_view(settings);
         }
         self.as_mut().persist();
+
+        let wanted = entry_icon_size(settings.icon_size);
+        if self.rust().entry_icon_set.size() != wanted {
+            let icons: QStringList = {
+                let state = self.as_mut().rust_mut().get_mut();
+                state.entry_icon_set.set_size(wanted);
+                let visible = state.view().visible.clone();
+                visible.iter().map(|e| QString::from(&state.entry_icon_url(e))).collect()
+            };
+            self.as_mut().set_entry_icons(icons);
+        }
 
         // Solo se vuelve a mirar la caché si el zoom cruza a otra talla del
         // estándar; dentro de la misma, las miniaturas que hay ya sirven.
@@ -3256,6 +4289,11 @@ impl qobject::App {
     /// ya demostró que la carpeta responde, y quien llama necesita ver el
     /// resultado ya (el editor de renombrado busca la entrada recién creada).
     fn render_fresh(mut self: Pin<&mut Self>, target: &Path) -> bool {
+        // A remote folder is never read on the UI thread.
+        if crate::remote_nav::is_remote(target) && !*self.in_trash() {
+            self.as_mut().request_listing(target.to_path_buf(), Commit::Reload);
+            return false;
+        }
         if !*self.in_trash() {
             let Ok(loaded) = read_folder(target) else {
                 return false;
@@ -3303,7 +4341,7 @@ impl qobject::App {
         let current = PathBuf::from(self.path().to_string());
         let Some((target, is_dir)) = self.rust().view().visible.get(row).map(|entry| {
             (
-                current.join(&entry.name),
+                child_path(&current, &entry.name.to_string_lossy()),
                 matches!(entry.kind, kara_core::entry::EntryKind::Directory),
             )
         }) else {
@@ -3314,10 +4352,17 @@ impl qobject::App {
             self.as_mut().navigate_to(&target);
             return;
         }
-        match kara_fs::open::open(&target) {
-            Ok(()) => self.as_mut().clear_error(),
-            Err(error) => self.as_mut().report(&error.to_string()),
-        }
+        // The desktop launches it on a thread of its own; a failure comes
+        // back here to be shown.
+        let thread = self.qt_thread();
+        self.rust().desktop.open(
+            &target,
+            Arc::new(move |error| {
+                let message = error.to_string();
+                let _ = thread.queue(move |app| app.report(&message));
+            }),
+        );
+        self.as_mut().clear_error();
     }
 
     fn open_focused(mut self: Pin<&mut Self>) {
@@ -3328,15 +4373,14 @@ impl qobject::App {
     }
 
     fn cd(mut self: Pin<&mut Self>, name: &QString) {
-        let mut target = PathBuf::from(self.path().to_string());
-        target.push(name.to_string());
+        let current = PathBuf::from(self.path().to_string());
+        let target = child_path(&current, &name.to_string());
         self.as_mut().navigate_to(&target);
     }
 
     fn up(mut self: Pin<&mut Self>) {
         let current = PathBuf::from(self.path().to_string());
-        if let Some(parent) = current.parent() {
-            let parent = parent.to_path_buf();
+        if let Some(parent) = parent_path(&current) {
             self.as_mut().navigate_to(&parent);
         }
     }
@@ -3402,6 +4446,9 @@ impl qobject::App {
     /// `TrashPolicy::default()` deja el desfase horario a cero y estampa el
     /// `.trashinfo` en UTC, que no falla en ninguna parte y corre la fecha.
     fn trash(mut self: Pin<&mut Self>, name: &QString) {
+        if self.as_mut().remote_blocked() {
+            return;
+        }
         let current = PathBuf::from(self.path().to_string());
         let victim = current.join(name.to_string());
         match kara_fs::trash::trash_one(&victim, &kara_ops::trash_policy()) {

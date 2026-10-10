@@ -1,12 +1,20 @@
 //! Binario principal de Kara: arranca Qt y carga el módulo QML.
 
+mod args;
 mod bridge;
+mod drives;
 mod prefs;
 mod present;
+mod remote_nav;
+mod remote_present;
+mod remote_store;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
 
 fn main() -> std::process::ExitCode {
+    // Before the window exists: the Wayland app_id is fixed when it is created,
+    // and it has to name `kara.desktop` for the desktop to show Kara's icon.
+    bridge::qobject::set_desktop_file_name("kara");
     let mut app = QGuiApplication::new();
     let mut engine = QQmlApplicationEngine::new();
 

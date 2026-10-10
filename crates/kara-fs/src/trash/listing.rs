@@ -320,7 +320,7 @@ fn scan_trash_dir(
 /// called once per [`TrashEntry`] a listing produced.
 ///
 /// Never follows a symlink to delete outside the trash: a directory is
-/// removed entry by entry (via [`super::delete_recursive`], the same walk
+/// removed entry by entry through directory descriptors (the same walk
 /// [`super::delete_permanently`] uses), and the top-level `files/`/`info/`
 /// entry itself is only ever `lstat`-ed, never `stat`-ed.
 pub fn delete_trash_entry(
@@ -330,8 +330,7 @@ pub fn delete_trash_entry(
     match entry {
         TrashEntry::Item(item) => {
             let metadata = dir::lstat(&item.trashed_path)?;
-            let mut removed_count: u64 = 0;
-            super::delete_recursive(&item.trashed_path, &metadata, observer, &mut removed_count)?;
+            super::remove::delete_tree(&item.trashed_path, &metadata, observer)?;
             // Best-effort, exactly like `restore_item`'s own cleanup: once
             // the file is gone there is nothing left to protect by failing
             // here, and a `.trashinfo` that outlives it is precisely the
@@ -344,8 +343,7 @@ pub fn delete_trash_entry(
         }
         TrashEntry::MissingInfo { file_path, .. } => {
             let metadata = dir::lstat(file_path)?;
-            let mut removed_count: u64 = 0;
-            super::delete_recursive(file_path, &metadata, observer, &mut removed_count)
+            super::remove::delete_tree(file_path, &metadata, observer).map(|_| ())
         }
     }
 }

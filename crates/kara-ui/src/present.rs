@@ -12,6 +12,7 @@ use kara_core::entry::EntryKind;
 use kara_core::sort::ColumnId;
 use kara_core::filter::base_and_extension;
 use kara_core::tree::SectionId;
+use kara_desktop::{NetworkLocation, Volume, VolumeKind};
 use kara_fs::places::{Place, PlaceKind};
 
 /// Tamaño legible con la escala binaria que usan Windows y Dolphin.
@@ -277,6 +278,7 @@ pub fn section_label(id: SectionId) -> &'static str {
     match id {
         SectionId::QuickAccess => "Acceso rápido",
         SectionId::ThisComputer => "Este equipo",
+        SectionId::Network => "Red",
     }
 }
 
@@ -690,6 +692,131 @@ pub fn properties_rows(infos: &[kara_fs::props::Properties], type_label: Option<
     out.size_row = Some(size_row);
     out.contents_row = contents_row;
     out
+}
+
+/// Bundled icons, for when the desktop's theme has none: a row without an
+/// icon reads as a glitch, and themes do miss names (Adwaita has no
+/// `application-zip`, Yaru no `media-eject`).
+pub const FALLBACK_FOLDER_ICON: &str = "qrc:/qt/qml/com/kara/ui/icons/folder.svg";
+pub const FALLBACK_FILE_ICON: &str = "qrc:/qt/qml/com/kara/ui/icons/file.svg";
+pub const FALLBACK_DRIVE_ICON: &str = "qrc:/qt/qml/com/kara/ui/icons/drive.svg";
+pub const FALLBACK_NETWORK_ICON: &str = "qrc:/qt/qml/com/kara/ui/icons/network.svg";
+
+/// The bundled icon for an entry the theme could not draw.
+#[must_use]
+pub fn fallback_icon(kind: EntryKind) -> &'static str {
+    match kind {
+        EntryKind::Directory => FALLBACK_FOLDER_ICON,
+        _ => FALLBACK_FILE_ICON,
+    }
+}
+
+/// The bundled icon for a volume the theme could not draw.
+#[must_use]
+pub fn fallback_volume_icon(kind: VolumeKind) -> &'static str {
+    match kind {
+        VolumeKind::Network | VolumeKind::Phone | VolumeKind::Camera => FALLBACK_NETWORK_ICON,
+        _ => FALLBACK_DRIVE_ICON,
+    }
+}
+
+/// How a volume reads in the navigation pane.
+///
+/// Its own name when it has one; otherwise what it is and how big, as the
+/// Explorer and Nautilus do: «Volumen de 29.8 GB».
+#[must_use]
+pub fn volume_label(volume: &Volume) -> String {
+    if let Some(network) = &volume.network {
+        return network_label(network);
+    }
+    if let Some(label) = &volume.label {
+        return label.clone();
+    }
+    let size = if volume.size > 0 {
+        format!(" de {}", format_size(volume.size))
+    } else {
+        String::new()
+    };
+    if volume.locked {
+        return format!("Volumen cifrado{size}");
+    }
+    match volume.kind {
+        VolumeKind::Optical => format!("Disco{size}"),
+        VolumeKind::Image => format!("Imagen de disco{size}"),
+        _ => format!("Volumen{size}"),
+    }
+}
+
+/// How a gvfs network location reads: the share and the server for SMB, the
+/// user and the host for the rest, the device for phones and cameras.
+#[must_use]
+pub fn network_label(location: &NetworkLocation) -> String {
+    if let Some(name) = &location.display_name {
+        return name.clone();
+    }
+    let device = |fallback: &str| {
+        location
+            .host
+            .as_deref()
+            .map(|h| h.replace('_', " ").trim().to_string())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| fallback.to_string())
+    };
+    match location.scheme.as_str() {
+        "smb-share" => match (&location.share, &location.host) {
+            (Some(share), Some(host)) => format!("{share} en {host}"),
+            (None, Some(host)) => host.clone(),
+            _ => "Recurso compartido".to_string(),
+        },
+        "mtp" | "afc" => device("Teléfono"),
+        "gphoto2" => device("Cámara"),
+        _ => match (&location.user, &location.host) {
+            (Some(user), Some(host)) => format!("{user} en {host}"),
+            (None, Some(host)) => host.clone(),
+            _ => location.scheme.clone(),
+        },
+    }
+}
+
+/// What the button next to a volume does, as QML reads it: 0 none, 1 eject a
+/// device, 2 unmount a partition, 3 disconnect a network location.
+#[must_use]
+pub fn volume_button(volume: &Volume) -> i32 {
+    if !volume.can_eject() {
+        return 0;
+    }
+    match volume.kind {
+        VolumeKind::Removable | VolumeKind::Optical | VolumeKind::Image => 1,
+        VolumeKind::Fixed => 2,
+        VolumeKind::Network | VolumeKind::Phone | VolumeKind::Camera => 3,
+    }
+}
+
+/// While the eject runs: unmounting flushes what is still cached, which on a
+/// slow stick takes a while, and the spec asks to say so.
+#[must_use]
+pub fn ejecting_notice(volume: &Volume) -> String {
+    match volume.kind {
+        VolumeKind::Network | VolumeKind::Phone | VolumeKind::Camera => {
+            format!("Desconectando «{}»…", volume_label(volume))
+        }
+        _ => format!("Expulsando «{}»: escribiendo lo que queda pendiente…", volume_label(volume)),
+    }
+}
+
+/// Once it is done: for a device, that it may be pulled out now.
+#[must_use]
+pub fn ejected_notice(volume: &Volume) -> String {
+    if volume.ejects_hardware() {
+        let name = volume.drive_name.clone().unwrap_or_else(|| volume_label(volume));
+        return format!("Ya puedes retirar «{name}» con seguridad");
+    }
+    match volume.kind {
+        VolumeKind::Network | VolumeKind::Phone | VolumeKind::Camera => {
+            format!("Se ha desconectado «{}»", volume_label(volume))
+        }
+        _ => format!("«{}» se ha desmontado", volume_label(volume)),
+    }
 }
 
 #[cfg(test)]
@@ -1130,5 +1257,72 @@ mod tests {
         assert_eq!(row.display, "huerfano.bin");
         assert_eq!(row.location, None, "su carpeta de origen se desconoce");
         assert_eq!(trash_index_of(&row), Some(3));
+    }
+
+    fn volume(kind: VolumeKind) -> Volume {
+        Volume {
+            id: "/b/sdb1".into(),
+            label: None,
+            size: 32 * 1024 * 1024 * 1024,
+            kind,
+            icons: Vec::new(),
+            mount_point: Some(PathBuf::from("/run/media/ana/x")),
+            filesystem: Some("/b/sdb1".into()),
+            locked: false,
+            drive: Some("/d/usb".into()),
+            drive_name: Some("SanDisk Ultra".into()),
+            network: None,
+        }
+    }
+
+    #[test]
+    fn an_unlabelled_volume_is_named_by_its_size() {
+        assert_eq!(volume_label(&volume(VolumeKind::Removable)), "Volumen de 32.0 GB");
+        let mut locked = volume(VolumeKind::Fixed);
+        locked.locked = true;
+        assert_eq!(volume_label(&locked), "Volumen cifrado de 32.0 GB");
+        let mut named = volume(VolumeKind::Removable);
+        named.label = Some("FOTOS".into());
+        assert_eq!(volume_label(&named), "FOTOS");
+    }
+
+    #[test]
+    fn network_locations_name_their_share_and_server() {
+        let smb = NetworkLocation {
+            scheme: "smb-share".into(),
+            host: Some("nas.local".into()),
+            share: Some("fotos".into()),
+            ..NetworkLocation::default()
+        };
+        assert_eq!(network_label(&smb), "fotos en nas.local");
+        let sftp = NetworkLocation {
+            scheme: "sftp".into(),
+            host: Some("example.org".into()),
+            user: Some("ana".into()),
+            ..NetworkLocation::default()
+        };
+        assert_eq!(network_label(&sftp), "ana en example.org");
+        let phone = NetworkLocation {
+            scheme: "mtp".into(),
+            host: Some("SAMSUNG_Android".into()),
+            ..NetworkLocation::default()
+        };
+        assert_eq!(network_label(&phone), "SAMSUNG Android");
+    }
+
+    #[test]
+    fn the_eject_message_names_the_drive_a_user_pulls_out() {
+        assert_eq!(ejected_notice(&volume(VolumeKind::Removable)), "Ya puedes retirar «SanDisk Ultra» con seguridad");
+        assert_eq!(volume_button(&volume(VolumeKind::Removable)), 1);
+        assert_eq!(volume_button(&volume(VolumeKind::Fixed)), 2);
+        let mut unmounted = volume(VolumeKind::Fixed);
+        unmounted.mount_point = None;
+        assert_eq!(volume_button(&unmounted), 0);
+    }
+
+    #[test]
+    fn every_entry_has_a_bundled_icon_to_fall_back_on() {
+        assert!(fallback_icon(EntryKind::Directory).ends_with("folder.svg"));
+        assert!(fallback_icon(EntryKind::File).ends_with("file.svg"));
     }
 }

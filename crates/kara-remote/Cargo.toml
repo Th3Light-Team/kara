@@ -1,0 +1,92 @@
+[package]
+name = "kara-remote"
+description = "Remote drives for Kara: configuration, secret storage, connection state and the registry that serves backends to kara-ops. Protocol adapters (SFTP, S3) plug in as factories."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kara-core.workspace = true
+kara-fs.workspace = true
+kara-vfs.workspace = true
+# async-io, not tokio: kara-desktop's ashpd already runs on zbus's async-io, and ashpd refuses both.
+oo7 = { version = "0.6.0", default-features = false, features = ["async-std", "native_crypto"], optional = true }
+# Drives a private current-thread runtime for the async keyring client.
+tokio = { version = "1", default-features = false, features = ["rt"], optional = true }
+thiserror = "2.0.20"
+# SFTP (feature `sftp`): pure Rust SSH and SFTP, driven by a private runtime per drive.
+russh = { version = "0.64.1", optional = true }
+russh-sftp = { version = "3.0.1", optional = true }
+# known_hosts: hashed `|1|salt|hash` entries are HMAC-SHA1 of the host name.
+hmac = { version = "0.13", optional = true }
+sha1 = { version = "0.11", optional = true }
+data-encoding = { version = "2.3", optional = true }
+# Object storage (features `s3`, `gcs`): Apache Arrow's `object_store`, one API for
+# S3-compatible services and Google Cloud Storage, driven by a private runtime per drive.
+object_store = { version = "0.14.2", default-features = false, optional = true }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"], optional = true }
+bytes = { version = "1.12.1", optional = true }
+
+[features]
+default = []
+# An in-memory drive kind ("mem"), for tests and demos.
+memory = ["kara-vfs/memory"]
+# System keyring (Secret Service, or the sandbox portal file) through oo7.
+keyring = ["dep:oo7", "dep:tokio"]
+# The SFTP adapter (`sftp::SftpFactory`, scheme "sftp").
+sftp = [
+    "dep:russh",
+    "dep:russh-sftp",
+    "dep:hmac",
+    "dep:sha1",
+    "dep:data-encoding",
+    "dep:tokio",
+    "tokio/rt-multi-thread",
+    "tokio/time",
+    "tokio/net",
+    "tokio/sync",
+    "tokio/macros",
+]
+# The generic object-store backend (`objstore::ObjectStoreBackend`) that `s3` and
+# `gcs` share. Enabled by either of them; on its own it serves any
+# `object_store::ObjectStore` (tests use `object_store::memory::InMemory`).
+objectstore = [
+    "dep:object_store",
+    "dep:futures-util",
+    "dep:bytes",
+    "dep:tokio",
+    "tokio/rt-multi-thread",
+    "tokio/time",
+    "tokio/sync",
+    "tokio/macros",
+]
+# Amazon S3 and S3-compatible services (MinIO, R2, B2, Ceph): `objstore::S3Factory`, scheme "s3".
+s3 = ["objectstore", "object_store/aws"]
+# Google Cloud Storage: `objstore::GcsFactory`, scheme "gcs".
+gcs = ["objectstore", "object_store/gcp"]
+
+[dev-dependencies]
+kara-remote = { path = ".", features = ["memory", "sftp", "s3", "gcs"] }
+kara-ops.workspace = true
+kara-vfs = { workspace = true, features = ["memory", "conformance"] }
+tempfile = "3.27.0"
+# The hermetic SFTP test server (tests/support) speaks russh's server API.
+russh = "0.64.1"
+russh-sftp = "3.0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync", "io-util"] }
+hmac = "0.13"
+sha1 = "0.11"
+data-encoding = "2.3"
+futures = "0.3"
+# The fault-injecting ObjectStore in tests/objstore_support implements an async trait.
+async-trait = "0.1"
+bytes = "1"
+# The hermetic S3 server (tests/s3_mock_support) that the real AWS client talks to:
+# HTTP/1.1 with hyper, SigV4 checked with HMAC-SHA256.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+sha2 = "0.11"
+percent-encoding = "2.3"
