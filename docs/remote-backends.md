@@ -1,6 +1,7 @@
 # Remote drives: one contract, interchangeable adapters
 
-Status: steps 1–5 built (see «Order of work»); the UI side and S3 are pending.
+Status: steps 1–6 built (see «Order of work»); the UI side is pending, and S3/GCS
+have never met a real service.
 
 ## Goal
 
@@ -9,9 +10,9 @@ behaves like any other place: browse, select, copy, move, rename, delete, drag,
 progress, conflicts. **There is one UI.** The QML never learns which protocol is
 underneath.
 
-First adapter: **SFTP**. **S3 is deferred**, but the contract is still checked
-against it (it is the awkward case: no real directories, no atomic rename), so
-it must not be shaped around SFTP alone.
+First adapter: **SFTP**; second: **object storage** (S3 and S3-compatible
+services, Google Cloud Storage), the awkward case the contract was checked
+against from the start: no real directories, no atomic rename.
 
 ## Where it goes
 
@@ -23,7 +24,7 @@ kara-ui → kara-ops → { kara-fs, kara-remote, kara-index } → kara-vfs → k
 |---|---|
 | `kara-vfs` (new) | `Location`, the `Backend` trait, `BackendError`, `Capabilities`, and the conformance suite (feature `conformance`). No protocol code. |
 | `kara-fs` | Gains `LocalBackend`: the existing code behind the trait. Public functions stay. |
-| `kara-remote` (new) | `MemoryBackend` (tests) and `sftp` (`russh` + `russh-sftp`) behind a cargo feature; `s3` (`object_store`) later, same shape. |
+| `kara-remote` (new) | `MemoryBackend` (tests), `sftp` (`russh` + `russh-sftp`) and `objstore` (`object_store`: features `s3`, `gcs`), each behind cargo features. |
 
 `kara-core` stays free of I/O, so the trait does not live there. `kara-vfs`
 depends on `kara-core` only for `FileEntry`.
@@ -101,7 +102,7 @@ spec already asks for. It never branches on the protocol.
 | `trash` | no | no | Supr warns and offers permanent delete, confirmed, focus on the safe button |
 | `atomic_rename` | yes | no (copy+delete) | Rename of big trees shows progress |
 | `server_side_copy` | no | yes | Copy inside the drive moves no bytes |
-| `real_directories` | yes | no (prefixes) | «Nueva carpeta» creates a `key/` marker |
+| `real_directories` | yes | no (prefixes) | «Nueva carpeta» writes a hidden `.kara-dir` placeholder object |
 | `posix_permissions` | yes | no | Permissions tab hidden |
 | `symlinks` | yes | no | |
 | `watch` | no | no | Manual refresh only; no inotify |
@@ -140,12 +141,16 @@ deleted if the copy failed or the sizes differ.** This is the invariant that
 a *changed* key is a hard refusal. Keepalive plus reconnect. Writes go to a temp
 name then rename. mtime preserved when the server allows it.
 
-**S3 (deferred).** One drive = endpoint + bucket (+ optional prefix) + credentials, so MinIO,
-R2 and B2 work. Listing uses `delimiter=/` and pagination, streaming entries so
-a 100 000-object prefix does not block. No `created`/`accessed`; `modified` is
-`LastModified`; storage class and ETag go in the `MetadataBag`. Upload is
-multipart above a threshold, aborted on cancel. `remove_tree` lists and batch-deletes.
-A drive with no bucket (listing buckets) is out of scope for now.
+**S3 and GCS.** One drive = bucket (+ optional key prefix) + credentials, plus
+an endpoint for S3-compatible services (MinIO, R2, B2, Ceph). Listing uses
+`delimiter=/` page by page, cancellable between and during pages. No
+`created`/`accessed`; `modified` is `LastModified` cut to seconds; the ETag
+and the version go in the `MetadataBag` (the storage class is not available
+through `object_store`). Upload is one `PUT` below a part and multipart above,
+aborted on cancel/drop/failure. `remove_tree` lists and batch-deletes, children
+before the placeholders. Empty folders are a hidden `.kara-dir` object
+(`object_store` cannot write `key/` markers). A drive with no bucket (listing
+buckets) is out of scope. Details: `remote-drives-handoff.md` § «Step 6».
 
 ## Conformance suite
 
@@ -159,9 +164,11 @@ One generic function in `kara-vfs`, run against every backend:
 - cancel mid-list and mid-transfer
 - every error kind reachable, and only declared capabilities are exercised
 
-`MemoryBackend` and `LocalBackend` run it in CI. SFTP and S3 run it against a
-real server (OpenSSH container, MinIO) behind `KARA_TEST_SFTP`/`KARA_TEST_S3`
-environment variables and `#[ignore]` otherwise. Add them in new test files;
+`MemoryBackend` and `LocalBackend` run it in CI. SFTP and S3/GCS run it against a
+real server (OpenSSH container, MinIO, a GCS bucket) behind `KARA_TEST_SFTP`/
+`KARA_TEST_S3`/`KARA_TEST_GCS` environment variables and `#[ignore]` otherwise;
+hermetically, SFTP against an in-process server and S3 against an in-process
+S3 server that checks signatures. Add them in new test files;
 `crates/kara-fs/tests/*` is hash-checked.
 
 ## Order of work
@@ -174,17 +181,18 @@ Status (see `remote-drives-handoff.md` for what is left in each):
 4. `DriveRegistry`, config, `SecretStore` with `oo7` — **done** in `kara-remote`
    (the «Añadir unidad…» panel and bridge are pending, needs Qt).
 5. SFTP adapter on `russh-sftp` — **done** (`kara-remote`, feature `sftp`); real-sshd run pending.
-6. S3 adapter on `object_store` — deferred.
+6. S3 and GCS adapters on `object_store` — **done** (`kara-remote`, features `s3`, `gcs`); real-service runs and throughput pending.
 
 ## Decisions
 
 - **Secrets:** system keyring, stored when the user adds the drive.
 - **SFTP crate:** `russh-sftp` (pure Rust, async) under a private runtime inside the adapter.
 - **Keyring crate:** `oo7`.
-- **S3:** deferred. Crate: `object_store` (Apache Arrow): concurrent multipart and ranged reads,
-  paginated listing with delimiter, server-side copy, S3-compatible endpoints (MinIO, R2, B2),
-  lighter to build than `aws-sdk-s3`. Fall back to `aws-sdk-s3` only if the full AWS credential
-  chain (SSO, profiles) is needed. Measure throughput against MinIO before trusting it.
+- **S3 / GCS crate:** `object_store` 0.14 (Apache Arrow): one API for both, concurrent
+  multipart and ranged reads, paginated listing with delimiter, server-side copy,
+  S3-compatible endpoints (MinIO, R2, B2), lighter to build than `aws-sdk-s3`. Fall back to
+  `aws-sdk-s3` only if the full AWS credential chain (SSO, profiles) is needed. Throughput
+  against MinIO is still to be measured (`objstore_real_service::s3_throughput`).
 
 ## Open questions
 

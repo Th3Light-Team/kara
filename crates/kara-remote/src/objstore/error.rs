@@ -163,6 +163,7 @@ pub(crate) fn kind_of(error: &object_store::Error) -> BackendErrorKind {
 
 impl Fail {
     /// The text of the failure and all its causes.
+    #[cfg(any(feature = "s3", feature = "gcs"))]
     pub(crate) fn full_text(&self) -> String {
         match self {
             Fail::Store(error) => chain_text(error),

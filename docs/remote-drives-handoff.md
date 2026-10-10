@@ -1,6 +1,6 @@
 # Remote drives: what is built, what is left
 
-Status after steps 1–5 (Rust side). Everything below the UI is done and tested in
+Status after steps 1–6 (Rust side). Everything below the UI is done and tested in
 the cloud container; what is left either needs Qt, a real server, or an owner
 decision. Design: `remote-backends.md`. Tests and mutation tables:
 `remote-backends-testing.md`. Known red tests: `known-test-failures.md`.
@@ -15,6 +15,7 @@ Job API for the UI: `remote-ops-integration.md`.
 | 3 | `kara-ops` | `LocationRequest`, `spawn_with`, streaming copy/move with size check, remote delete (confirmed), undo rules |
 | 4 | `kara-remote` | `DriveConfig` <-> `settings.conf`, `SecretStore` (+ `oo7` keyring), groups with shared secrets, CSV / `ssh_config` import, `DriveRegistry`, `BackendFactory`, prompts |
 | 5 | `kara-remote` (`--features sftp`) | `sftp::SftpFactory` / `SftpBackend` on `russh` 0.64 + `russh-sftp` 3.0, `known_hosts` handling, hermetic test server |
+| 6 | `kara-remote` (`--features s3`, `gcs`) | `objstore::ObjectStoreBackend` over any `object_store` 0.14 store, `S3Factory` (S3, MinIO, R2, B2, Ceph) and `GcsFactory`, fault-injecting store, hermetic S3 server that checks SigV4 |
 
 ### `kara-remote` in one page
 
@@ -98,6 +99,20 @@ mode/uid/gid (open decision 4 below) to be useful, since the API takes them on w
   blocks on it; nothing async leaks into `kara-vfs`, `kara-ops` or the UI.
 - **Root and no tmpfs** in the container make 19 older `kara-fs` tests fail
   (`known-test-failures.md`).
+- **No MinIO, no GCS, no network to a bucket**: the object-store adapter is
+  tested over `object_store::memory::InMemory` (through a fault-injecting
+  wrapper, `tests/objstore_support/`) and, for the real AWS client, against an
+  in-process S3 server (`tests/s3_mock_support/`) that checks SigV4 the way AWS
+  documents it. The GCS client (`object_store::gcp`) is built and its
+  parameter/credential handling tested, but **no GCS request was ever made**.
+- **Disk.** The container's disk filled up at 27 GB of `target/debug` (each
+  `kara-remote` test binary is ~150 MB with full debug info). This step was
+  built with `CARGO_PROFILE_DEV_DEBUG=line-tables-only` and an emptied
+  `target/debug`; with full debug info the object-store test binaries add a
+  few GB more.
+- **`object_store` brings `reqwest` + `rustls`** and reuses `aws-lc-rs` (already
+  there for `russh`). The dev self-dependency enables `s3` and `gcs`, so a plain
+  `cargo test -p kara-remote` builds both clients.
 
 ## Left: step 4, UI side (needs Qt)
 
@@ -107,7 +122,7 @@ Wiring in `kara-ui` (nothing of this is business logic; it lives in Rust, QML on
    Report the returned problems once, like `Prefs` reports an unreadable file.
    Build the `SecretStore`: try `KeyringSecretStore::open()`, fall back to
    `MemorySecretStore` and show «Las contraseñas no se guardarán» when
-   `secrets_are_persistent()` is false. Register the factories (SFTP, later S3).
+   `secrets_are_persistent()` is false. Register the factories (SFTP, S3, GCS).
 2. **Panel.** A «Red» section in the left panel listing `registry.configs()` with
    `registry.state(id)` (icon: connected / connecting / lost / failed) and
    `subscribe` feeding a QML model. Click on a disconnected drive → `connect` on a
@@ -195,17 +210,143 @@ Tests (all hermetic, `cargo test -p kara-remote`): see
 - With a dead connection a temporary cannot be removed: a hidden
   `.name.<pid>.<n>.kara-part` stays on the server.
 
-## Left: step 6, S3 adapter (`object_store`)
+## Step 6, object storage: done (`kara-remote/src/objstore/`, features `s3`, `gcs`)
 
-Deferred by decision. Same shape: `S3Factory` (scheme `s3`), params `endpoint`,
-`bucket`, `prefix`, `region`; credentials access key id as a param and the secret
-key through the `SecretStore`. Capabilities: `server_side_copy=true`,
-`real_directories=false`, `atomic_rename=false` (copy + delete),
-`posix_permissions=false`, `symlinks=false`, undo of move/rename false. «Nueva
-carpeta» writes a `key/` marker. Listing: `delimiter=/`, paginated, streamed.
-Upload: multipart above a threshold, aborted on cancel/drop (maps to `WriteSession`).
-Conformance against MinIO (`KARA_TEST_S3`), and measure throughput before trusting it
-(concurrent ranged GETs / multipart parts are the knobs).
+Module docs (`src/objstore/mod.rs`) list both factories' parameters; `backend.rs`,
+`io.rs` and `keys.rs` say how each operation maps onto object requests. One
+generic `ObjectStoreBackend` (`Arc<dyn object_store::ObjectStore>` + a key
+prefix; internal feature `objectstore`) and two factories:
+
+| Scheme | Factory | Service |
+|---|---|---|
+| `s3` | `objstore::S3Factory` (feature `s3`) | Amazon S3 and S3-compatible: MinIO, Cloudflare R2, Backblaze B2, Ceph RGW |
+| `gcs` | `objstore::GcsFactory` (feature `gcs`) | Google Cloud Storage |
+
+**Registering them in kara-ui:** build with `kara-remote/s3` and/or
+`kara-remote/gcs`, then at startup, next to SFTP:
+
+```rust
+registry.register_factory(kara_remote::objstore::S3Factory::new());
+registry.register_factory(kara_remote::objstore::GcsFactory::new());
+```
+
+Nothing else changes: an S3 drive's secret is asked for by the registry
+(`AuthRequired`, then `AuthFailed` on a wrong one); a GCS drive never asks.
+«Añadir unidad…» shows, for `s3`: bucket, endpoint (empty = AWS), region,
+prefix, access key id, `allow_http` (only offered for an `http://` endpoint,
+with the warning that credentials and data travel unencrypted), credentials
+(key / environment / anonymous) and the secret («Clave secreta»; a session
+token goes on a second line); for `gcs`: bucket, prefix, the key file path
+(file chooser; the JSON content is never copied into the settings) or
+«credenciales por defecto de la aplicación».
+
+### S3 parameters
+
+| Key | Default | Meaning |
+|---|---|---|
+| `bucket` | required | |
+| `endpoint` | AWS | `https://…`; `http://` only with `allow_http=true` |
+| `allow_http` | `false` | Refused unless the endpoint is `http://` (and an `http://` endpoint is refused without it) |
+| `region` | `us-east-1` | Must match the bucket's on AWS |
+| `prefix` | none | Key prefix the drive's root stands for |
+| `access_key_id` | required with `credentials=key` | |
+| `credentials` | `key` | `env`: the ambient AWS chain (`AWS_*` variables, web identity, ECS, EC2 metadata); **SSO and `~/.aws` profiles are not supported**. `anonymous`: public buckets |
+| `path_style` | `true` with an endpoint | |
+| `conditional_put` | `etag` | `disabled` for servers that reject `If-None-Match` |
+| `copy_if_not_exists` | none | e.g. `multipart`, or R2's `header: cf-copy-destination-if-none-match: *` |
+| `timeout_s` / `part_size_mb` / `upload_concurrency` | 30 / 8 / 4 | |
+
+Secret: the secret access key, optionally `\n` + a session token. Neither is a
+parameter (`DriveConfig` refuses secret-looking keys).
+
+### GCS parameters
+
+`bucket` (required), `prefix`, `service_account_file` (path, `~/` expanded) **or**
+`credentials=adc` (`GOOGLE_APPLICATION_CREDENTIALS`, then gcloud's
+`application_default_credentials.json`, then the GCE metadata server), `endpoint`
++ `allow_http` (emulators), `timeout_s`, `part_size_mb`, `upload_concurrency`.
+
+### Decisions taken while building it
+
+- **Crate:** `object_store` 0.14.2 (Apache Arrow) for both services; private
+  tokio runtime per drive (2 workers, so upload parts move while the caller
+  writes). A call from inside an async runtime is refused with `Other`.
+- **Empty folders:** a hidden empty object `<folder>/.kara-dir`. Hidden from every
+  listing, `stat`/`open_read` say `NotFound`, removed with its folder, and the
+  name is **reserved** (writing, creating or renaming onto it is `Other`).
+  `object_store` cannot write the S3 console's `folder/` markers (its paths
+  never end in `/`); one written by another tool makes its folder exist, is
+  never listed, but cannot be deleted through `object_store` (`remove` of such
+  a folder answers `Unsupported`). Other tools see `.kara-dir` as a 0-byte file.
+- **Object and folder with one name** (written by another tool): the object
+  wins (`stat` is the file, `list` of it is `Other`), the listing of the parent
+  reports the hidden folder as a per-entry error. Same rule as `MemoryBackend`.
+- **No-overwrite:** small files are one `PUT`: a `HEAD` check, then
+  `PutMode::Create` (`If-None-Match: *` / `ifGenerationMatch=0`); a store that
+  refuses the condition falls back to the check alone. Multipart uploads are
+  completed unconditionally by `object_store`, so the target is checked right
+  before `complete` — **a small race window** for files above one part.
+  Server-side copies use `CopyMode::Create` where configured, else
+  check-then-copy (same window). S3 itself has no copy-if-not-exists by default.
+- **Rename** (`atomic_rename=false`): copy every object (no-clobber, 32 at a
+  time), delete the sources only after all copies exist, files before
+  placeholders. A failed copy takes back the copies already made (every object
+  keeps its old name only); if that clean-up fails, or a delete of the sources
+  fails, objects exist under both names — never under neither — and the error
+  is reported.
+- **Copies above 5 GiB** (`CopyObject`'s limit on S3) are streamed through the
+  client by `copy_within` and `rename`; GCS has no limit set.
+- **`list`/`stat` times** are cut to whole seconds (S3's `HEAD` has second
+  precision, its listing millisecond). Folders have no time. The ETag and the
+  version go into `extra` (`object.etag`, `object.version`); the storage class is
+  not available (`object_store` drops it).
+- **Timeouts:** no whole-request timeout (`object_store`'s default 30 s also
+  bounds the response body and would cut every large download); a connection
+  silent for `timeout_s` fails, connecting takes at most 10 s, 3 retries within
+  `timeout_s`. Metadata calls are also bounded by 4×`timeout_s` + 5 s; an
+  upload part, a single `PUT` and the completion by that plus the time the
+  bytes in flight need at 16 KiB/s (`MIN_UPLOAD_RATE`: ~35 min for 4 × 8 MiB).
+  A refused connection answers `Unavailable` in about a second; a silent
+  endpoint in about `timeout_s`.
+- **Requests per operation:** `begin_write` makes three requests at once (the
+  target, a folder of that name, every ancestor), a small file's `finish` two
+  (check, conditional `PUT`), `stat` of a folder two, `list` one per page plus a
+  `HEAD`. Copying 10 000 small files to S3 is about 50 000 requests.
+- **Errors:** listing and bulk delete wrap HTTP failures in `Generic` with the
+  status only in the text (found by the S3 mock): 401/403 there map to
+  `PermissionDenied`, 5xx/connection failures to `Unavailable`, 507 and quota
+  messages to `NoSpace`. At connect time S3's code decides:
+  `SignatureDoesNotMatch`/`InvalidAccessKeyId` → `AuthFailed` (prompt again),
+  `AccessDenied` → a plain error, `NoSuchBucket` → «the bucket does not exist».
+  The object key is replaced by the caller's path in the text of the cause; a
+  percent-encoded key inside a URL is **not** (it is the user's own bucket path,
+  no secret).
+- **Capabilities:** fixed, `MemoryBackend::object_store_like()`'s:
+  `server_side_copy` only; no trash, no atomic rename, no real directories, no
+  permissions, no links, no watch, no undo of rename/move.
+
+Tests (`cargo test -p kara-remote`, all hermetic): see
+`remote-backends-testing.md` § «Object-store adapter (step 6)».
+
+### Left for S3 and GCS
+
+- **Never run against a real service.** MinIO/AWS:
+  `KARA_TEST_S3="endpoint,bucket,access_key_id,secret" cargo test -p kara-remote
+  --test objstore_real_service -- --ignored --nocapture` (MinIO docker one-liner
+  in that file). GCS: `KARA_TEST_GCS="bucket,/path/key.json"` (fake-gcs-server:
+  add `KARA_TEST_GCS_ENDPOINT`). Expect surprises around `If-None-Match` support
+  (B2 and older Ceph/MinIO may reject or ignore it: `conditional_put=disabled`),
+  region redirects on AWS, and R2's copy header.
+- **Throughput not measured.** `s3_throughput` (same file, `--ignored`) prints
+  upload/download MB/s for a 256 MiB object with 1/4/8 parts in flight; the only
+  numbers taken are loopback ones against the in-process mock, which measure the
+  mock and SHA-256 signing, not a link.
+- The S3 mock decodes `+` in query strings as a space, as `object_store` signs
+  it; that AWS does the same is assumed, not verified.
+- Listing buckets (a drive with no bucket), storage classes, versioning, SSE
+  options, the AWS CLI's profiles/SSO.
+- A rename of a large folder is one blocking call with no progress (owner
+  decision 5 applies here too, and more: it is one request per object).
 
 ## Left: needs a real environment
 
@@ -213,7 +354,9 @@ Conformance against MinIO (`KARA_TEST_S3`), and measure throughput before trusti
   build with `--features keyring`; call `KeyringSecretStore::open()`, `set`, `get`,
   `delete` for a throwaway `DriveId`; check `secret-tool search application kara`.
   The code compiles and is clippy-clean but has never talked to a keyring.
-- **SFTP conformance against a real sshd** (`KARA_TEST_SFTP`, above) and S3 against MinIO.
+- **SFTP conformance against a real sshd** (`KARA_TEST_SFTP`, above), S3 against
+  MinIO/AWS (`KARA_TEST_S3`) and GCS (`KARA_TEST_GCS`), and the S3 throughput
+  measurement.
 - **Qt build** of all UI work; `qmllint` per `CLAUDE.md`; run `scripts/kara-e2e` once
   and treat a red run as unverified (see CLAUDE.md).
 - fsync durability and the no-clobber fallback on NFS/FUSE: not testable in a
@@ -230,3 +373,9 @@ Conformance against MinIO (`KARA_TEST_S3`), and measure throughput before trusti
    progress; accept or add chunked progress.
 6. A move between two different backends is never undoable; accept or record the
    reverse transfer.
+7. Object-store folders: the `.kara-dir` placeholder name (other tools see it),
+   and «the object wins» when an object and a folder share a name.
+8. `replace=false` above one upload part is check-then-complete (a small race),
+   because `object_store` completes multipart uploads unconditionally. Accept,
+   or upload to a temporary key and `copy_if_not_exists` (doubles the work and
+   needs per-service configuration).

@@ -6,6 +6,10 @@ None of the 21 is a regression of the remote-backend work; 19 fail identically o
 the commit before it. Run on a normal developer machine (non-root user, `/tmp`
 on tmpfs) the first two groups should pass.
 
+With `-p kara-ops -p kara-remote` added (after step 6): **1006 pass, the same
+21 fail, 9 ignored** (the gated real-server tests); `kara-ops` and `kara-remote`
+have no failing test.
+
 Re-check with `cargo test -p kara-vfs -p kara-fs --no-fail-fast`. Plain `cargo`
 needs the 1.98 toolchain (`rustup default 1.98`).
 

@@ -295,3 +295,115 @@ missing final components), latency and throughput over a real link, servers
 speaking SFTP v4+ (status codes above 8, e.g. `FILE_ALREADY_EXISTS`, which
 `russh-sftp` cannot decode), keyboard-interactive auth (not implemented), and
 non-UTF-8 names (`russh-sftp` decodes them lossily).
+
+## Object-store adapter (step 6)
+
+All hermetic: `cargo test -p kara-remote` (the self dev-dependency enables `s3`
+and `gcs`). Two doubles stand in for the services:
+
+- `tests/objstore_support/`: `Faulty`, an `ObjectStore` + `PaginatedListStore`
+  over `object_store::memory::InMemory` with call counts, a count of multipart
+  uploads still open, paged listing (`page_size` keys per page), and faults per
+  operation (head, get, body piece, put, start upload, part, complete, abort,
+  list page, copy, delete): connection refused and 503 shaped like the real
+  client's errors, 403, 401, 507 «storage full», `NoSuchBucket`, stalls, a body
+  cut short, «unplugged» (every call refused), no conditional put, no
+  copy-if-not-exists. Also the fake S3/GCS factories used with the registry.
+- `tests/s3_mock_support/`: an S3 server on `127.0.0.1` (hyper) for the **real**
+  AWS client of `object_store`. It checks the SigV4 signature of every request
+  the way AWS documents it (path decoded and each segment re-encoded with the
+  unreserved set, query sorted and encoded, signed headers, payload SHA-256),
+  and serves ListObjectsV2 with continuation tokens, ranged `GET`, `HEAD`,
+  `PUT` with `If-None-Match: *`, copy, bulk delete and multipart, with 503 and
+  delay injection.
+
+| File | Tests | What |
+|---|---|---|
+| `objstore_conformance.rs` | 6 | `conformance::run` + `run_extra`: over plain `InMemory`, paged (2 keys per page), without conditional put / copy-if-not-exists, under a prefix (nothing escapes it), with 4 KiB multipart parts; capabilities = `object_store_like()` and stable |
+| `objstore_differential.rs` | 2 | seeded random ops vs `MemoryBackend::object_store_like()` (pages of 3, 16-byte parts), with and without conditional requests; 40 seeds × 100 ops each by default, **1000 seeds each passed once**; no divergence was ever found |
+| `objstore_failures.rs` | 27 | failed part / completion / single put (no object, upload aborted), abort and drop abort, finish waits for every part, multipart and single-put races on `replace=false`, offsets, a lost and a truncated body, error kinds and paths without the key, unplugged service, hung request cut by the drive timeout, cancel between pages / during a page / in `remove_tree`, failed delete keeps placeholders, rename failing while copying / rolling back / deleting sources, no-overwrite and server-side `copy_within` (and a race on it), streamed copies above the copy limit, the placeholder hidden and reserved, empty-folder `remove`, object/folder name clash, names that are not keys |
+| `objstore_factories.rs` | 14 | S3 and GCS parameters and defaults, the `allow_http` rule, secret-looking params refused, `~/` in the key file, prompts through the registry (missing → wrong → right, only the working secret kept; refused → `AuthRequired`; 3 wrong → `AuthFailed`), GCS never prompts, connect-time errors and cancel, the real AWS client against a closed port and a silent one (`Unreachable` in < 5 s / < 8 s), every call `Unavailable` on a dead endpoint, broken GCS key file reported without its content, nothing secret in `Debug` |
+| `objstore_with_ops.rs` | 6 | `Lost` → reconnect with the data, upload/download of a folder (multipart, empty folders), copy and move inside the drive with **no `GET`**, cancel an upload (no object, no open upload), `MediaGone` mid-move keeps the source, confirmed permanent delete |
+| `objstore_s3_client.rs` | 9 | the real client against the S3 server: conformance (pages of 2, under a prefix), 15 awkward names signed/listed/read/renamed, 12 MiB in 5 MiB parts and reads from offsets, abandoned upload aborted, `If-None-Match` race, server-side copy, paging over 50 entries + bulk delete, wrong secret / unknown key id → `AuthFailed` and the registry asks again, session token, 503 retried then `Unavailable` in < 6 s |
+| `objstore_mutation_gaps.rs` | 4 | written after the mutation pass: cancel while a `remove_tree` page hangs, `AuthRequired` before any request, a part slower than the metadata bound, a 6 s download that keeps moving with `timeout_s=1` |
+| `objstore_source_rules.rs` | 4 | no `unwrap`/`expect`/panicking macros, no printing in `src/objstore`; `Secret::expose` only in `s3.rs` (twice) |
+| `objstore_real_service.rs` | 4 (ignored) | conformance against a real bucket (`KARA_TEST_S3`, `KARA_TEST_GCS`), `s3_throughput` (256 MiB, 1/4/8 parts in flight), and the same harness against the mock (loopback; checks the harness only) |
+
+The S3 server found one bug before the mutation pass: `object_store` reports
+a 401/403 on listing and bulk delete as `Generic` with the status only in the
+text, so a wrong secret came out of `connect` as a plain error instead of
+`AuthFailed`, and a denied listing as `Other`. Both are mapped now.
+
+Not tested here: any real service (no network to a bucket, no MinIO, no GCS
+emulator); the GCS client never made a request; throughput (only loopback
+numbers against the mock exist, and they measure the mock); servers that ignore
+`If-None-Match`; region redirects; keys `object_store` cannot parse; `object_store`'s
+`LocalFileSystem` (not run: it has real directories, which this adapter does not
+model).
+
+### Mutation pass
+
+Same method as above, over `crates/kara-remote/src/objstore/`: a script applies
+one edit, runs `objstore_conformance`, `objstore_failures`,
+`objstore_factories`, `objstore_with_ops`, `objstore_differential` and
+`objstore_s3_client` (and, from the second round, `objstore_mutation_gaps`),
+then `git checkout` + `touch`. 38 mutations: 35 caught at once, 2 survived and
+are caught now, 1 equivalent.
+
+| # | Mutation | File | Caught by |
+|---|---|---|---|
+| O01 | put_new: no check before the conditional put | `backend.rs` | `the_suite_passes_without_conditional_put_or_copy` |
+| O02 | put_new: unconditional PUT after the check | `backend.rs` | `a_name_taken_between_the_check_and_the_put_is_not_overwritten` |
+| O03 | multipart: no check before complete | `io.rs` | `the_loser_of_a_multipart_race_gets_already_exists` |
+| O04 | abort_upload never aborts the multipart upload | `io.rs` | `the_suite_passes_with_small_multipart_parts`, `object_store_and_memory_model_agree`, `object_store_without_conditional_requests_and_memory_model_agree` |
+| O05 | Drop does not abort | `io.rs` | `the_suite_passes_with_small_multipart_parts`, `object_store_without_conditional_requests_and_memory_model_agree`, `object_store_and_memory_model_agree` |
+| O06 | a failed finish does not abort | `io.rs` | `a_failed_completion_leaves_no_object_and_aborts_the_upload`, `the_loser_of_a_multipart_race_gets_already_exists`, `a_connection_lost_mid_move_is_media_gone_and_keeps_the_source` |
+| O07 | finish completes without waiting for the parts | `io.rs` | `big_files_go_up_in_parts_and_come_back_from_any_offset`, `a_connection_lost_mid_move_is_media_gone_and_keeps_the_source` |
+| O08 | store errors name / instead of the caller's path | `error.rs` | `the_suite_passes_listing_page_by_page`, `the_suite_passes_over_in_memory`, `the_suite_passes_under_a_prefix_and_nothing_escapes_it` |
+| O09 | the placeholder object is listed | `backend.rs` | `the_suite_passes_listing_page_by_page`, `the_suite_passes_over_in_memory`, `the_suite_passes_under_a_prefix_and_nothing_escapes_it` |
+| O10 | rename deletes each source right after its copy | `backend.rs` | `a_rename_that_fails_while_copying_leaves_everything_under_the_old_name`, `sources_are_deleted_only_after_every_copy_and_a_late_failure_loses_nothing` |
+| O11 | a failed rename does not take its copies back | `backend.rs` | `a_rename_that_fails_while_copying_leaves_everything_under_the_old_name` |
+| O12 | remove_tree deletes placeholders together with the children | `backend.rs` | `a_failed_delete_in_remove_tree_keeps_the_placeholders_and_names_the_object`, `cancel_stops_remove_tree_midway_and_no_child_outlives_its_placeholder` |
+| O13 | list ignores the token between and during later pages | `backend.rs` | `cancel_stops_a_listing_between_pages` |
+| O14 | remove_tree ignores the token at each page (the in-batch check stays) | `backend.rs` | **survived** → `objstore_mutation_gaps::cancel_stops_remove_tree_while_a_page_is_on_its_way` |
+| O15 | connection failures and 5xx are Other, not Unavailable | `error.rs` | `connect_time_errors_come_out_of_connect`, `a_dead_endpoint_is_unreachable_at_connect_promptly_and_says_nothing_secret`, `a_silent_endpoint_times_out_instead_of_hanging` |
+| O16 | reads start at 0 whatever the offset | `io.rs` | `the_suite_passes_over_in_memory`, `the_suite_passes_under_a_prefix_and_nothing_escapes_it`, `the_suite_passes_listing_page_by_page` |
+| O17 | server-side copies may overwrite | `backend.rs` | `a_copy_target_taken_during_the_copy_is_not_overwritten` |
+| O18 | capabilities follow what the store turned out to support | `backend.rs` | `the_suite_passes_without_conditional_put_or_copy`, `the_suite_passes_through_the_real_client` |
+| O19 | a missing secret reaches the service instead of AuthRequired | `s3.rs` | **survived** → `objstore_mutation_gaps::a_missing_s3_secret_is_auth_required_before_any_request` |
+| O20 | plain http accepted without allow_http | `connect.rs` | `gcs_parameters_and_the_key_file_path`, `plain_http_needs_allow_http_and_allow_http_needs_plain_http` |
+| O21 | objects may be created under an object | `backend.rs` | `object_store_and_memory_model_agree`, `object_store_without_conditional_requests_and_memory_model_agree` |
+| O22 | a file may be written over a folder | `backend.rs` | `the_suite_passes_listing_page_by_page`, `the_suite_passes_under_a_prefix_and_nothing_escapes_it`, `the_suite_passes_over_in_memory` |
+| O23 | a body that ends early is a short file | `io.rs` | `reads_start_at_the_offset_and_a_lost_body_is_unavailable` |
+| O24 | S3 connect makes no request | `s3.rs` | `a_dead_endpoint_is_unreachable_at_connect_promptly_and_says_nothing_secret`, `a_refused_prompt_is_auth_required_and_three_wrong_secrets_are_auth_failed`, `a_missing_secret_is_asked_for_a_wrong_one_again_and_the_right_one_kept_if_asked` |
+| O25 | a wrong S3 secret is not AuthFailed | `connect.rs` | **equivalent**: a 403 without `AccessDenied` is `AuthFailed` by the fallback rule anyway |
+| O26 | remove of a non-empty folder removes its placeholder | `backend.rs` | `the_suite_passes_under_a_prefix_and_nothing_escapes_it`, `the_suite_passes_listing_page_by_page`, `the_suite_passes_over_in_memory` |
+| O27 | objects above the copy limit are copied by the service anyway | `backend.rs` | `objects_above_the_server_copy_limit_are_streamed` |
+| O28 | a folder may be renamed into itself | `backend.rs` | `the_suite_passes_over_in_memory`, `the_suite_passes_under_a_prefix_and_nothing_escapes_it`, `the_suite_passes_listing_page_by_page` |
+| O29 | no bound on a hung call | `backend.rs` | `a_hung_request_is_cut_by_the_drive_timeout` |
+| O30 | a missing folder lists as empty | `backend.rs` | `the_suite_passes_over_in_memory`, `the_suite_passes_listing_page_by_page`, `the_suite_passes_under_a_prefix_and_nothing_escapes_it` |
+| O31 | listing a file lists the folder of the same name | `backend.rs` | `the_suite_passes_over_in_memory`, `the_suite_passes_under_a_prefix_and_nothing_escapes_it`, `the_suite_passes_listing_page_by_page` |
+| O32 | 507 / storage full is not NoSpace | `error.rs` | `a_failed_single_put_leaves_no_object`, `errors_map_by_kind_and_name_the_callers_path_not_the_key` |
+| O33 | the object key stays in the error text | `error.rs` | `errors_map_by_kind_and_name_the_callers_path_not_the_key` |
+| O34 | the session token is not split off the secret | `s3.rs` | `a_session_token_after_the_secret_is_sent_and_signed` |
+| O35 | AccessDenied with a valid key prompts for the secret again | `connect.rs` | `connect_time_errors_come_out_of_connect` |
+| O36 | the whole request (body included) is bounded by 4 × `timeout_s` (the configuration before the fix below) | `connect.rs` | `a_long_download_that_keeps_moving_is_not_cut` |
+| O37 | an upload part gets the metadata bound only | `backend.rs` | `a_slow_part_is_given_more_time_than_a_metadata_call` |
+| O38 | an artificial leak: the secret appended to an `Unreachable` reason | `s3.rs` | `a_dead_endpoint_is_unreachable_at_connect_promptly_and_says_nothing_secret` (and the `expose()` count of `objstore_source_rules`) |
+
+Why the survivors slipped through:
+
+- **O14:** the check that follows each page still saw the token, only after
+  the page arrived. The new test hangs the first page for 20 s and requires
+  `Cancelled` within 2 s.
+- **O19:** the fake service answers 401 without a secret, and the registry
+  asks for the secret after `AuthFailed` as it does after `AuthRequired`, so
+  the flow looked the same. The new test calls the factory directly and
+  requires `AuthRequired` with no request made.
+
+Found in review during the pass (not by a mutation): the clients were built
+with `object_store`'s whole-request timeout (set to 4 × `timeout_s`), which
+also bounds the response body, so a download longer than two minutes or an
+upload part slower than about 70 KB/s was cut and retried until it failed.
+Fixed (no whole-request timeout; read timeout `timeout_s`; parts bounded by
+`MIN_UPLOAD_RATE`); O36 and O37 are its regression checks.
