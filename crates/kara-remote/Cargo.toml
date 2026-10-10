@@ -8,12 +8,20 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+kara-core.workspace = true
 kara-fs.workspace = true
 kara-vfs.workspace = true
 oo7 = { version = "0.6.0", optional = true }
 # Drives a private current-thread runtime for the async keyring client.
 tokio = { version = "1", default-features = false, features = ["rt"], optional = true }
 thiserror = "2.0.20"
+# SFTP (feature `sftp`): pure Rust SSH and SFTP, driven by a private runtime per drive.
+russh = { version = "0.64.1", optional = true }
+russh-sftp = { version = "3.0.1", optional = true }
+# known_hosts: hashed `|1|salt|hash` entries are HMAC-SHA1 of the host name.
+hmac = { version = "0.13", optional = true }
+sha1 = { version = "0.11", optional = true }
+data-encoding = { version = "2.3", optional = true }
 
 [features]
 default = []
@@ -21,9 +29,31 @@ default = []
 memory = ["kara-vfs/memory"]
 # System keyring (Secret Service, or the sandbox portal file) through oo7.
 keyring = ["dep:oo7", "dep:tokio"]
+# The SFTP adapter (`sftp::SftpFactory`, scheme "sftp").
+sftp = [
+    "dep:russh",
+    "dep:russh-sftp",
+    "dep:hmac",
+    "dep:sha1",
+    "dep:data-encoding",
+    "dep:tokio",
+    "tokio/rt-multi-thread",
+    "tokio/time",
+    "tokio/net",
+    "tokio/sync",
+    "tokio/macros",
+]
 
 [dev-dependencies]
-kara-remote = { path = ".", features = ["memory"] }
+kara-remote = { path = ".", features = ["memory", "sftp"] }
 kara-ops.workspace = true
 kara-vfs = { workspace = true, features = ["memory", "conformance"] }
 tempfile = "3.27.0"
+# The hermetic SFTP test server (tests/support) speaks russh's server API.
+russh = "0.64.1"
+russh-sftp = "3.0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync", "io-util"] }
+hmac = "0.13"
+sha1 = "0.11"
+data-encoding = "2.3"
+futures = "0.3"
