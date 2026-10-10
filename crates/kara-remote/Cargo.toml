@@ -11,7 +11,8 @@ repository.workspace = true
 kara-core.workspace = true
 kara-fs.workspace = true
 kara-vfs.workspace = true
-oo7 = { version = "0.6.0", optional = true }
+# async-io, not tokio: kara-desktop's ashpd already runs on zbus's async-io, and ashpd refuses both.
+oo7 = { version = "0.6.0", default-features = false, features = ["async-std", "native_crypto"], optional = true }
 # Drives a private current-thread runtime for the async keyring client.
 tokio = { version = "1", default-features = false, features = ["rt"], optional = true }
 thiserror = "2.0.20"

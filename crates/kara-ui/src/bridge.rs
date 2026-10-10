@@ -4219,6 +4219,14 @@ impl qobject::App {
     }
 
     fn navigate(mut self: Pin<&mut Self>, path: &QString) {
+        // A remote drive's address (`kara+sftp://…`). Tabs and history still
+        // hold local paths, so say so rather than treat it as a folder name.
+        if path.to_string().starts_with("kara+") {
+            self.as_mut().report(
+                "Examinar unidades remotas dentro de una pestaña aún no está disponible: las pestañas todavía solo guardan carpetas locales.",
+            );
+            return;
+        }
         let target = PathBuf::from(path.to_string());
         self.as_mut().navigate_to(&target);
     }

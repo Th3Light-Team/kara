@@ -115,3 +115,67 @@ impl SecretStore for MemorySecretStore {
         false
     }
 }
+
+/// A persistent store with a session-only one behind it.
+///
+/// The system keyring can be missing (no session bus), locked and refused, or
+/// gone halfway through a run. The drive must still connect then, so every
+/// failure of `primary` is answered from `fallback` instead, and
+/// [`SecretStore::is_persistent`] turns `false` from the first failure on, which
+/// is how the UI knows to say «Las contraseñas no se guardarán». A secret that
+/// the primary did store stays readable from it.
+pub struct FallbackSecretStore {
+    primary: Box<dyn SecretStore>,
+    fallback: MemorySecretStore,
+    degraded: std::sync::atomic::AtomicBool,
+}
+
+impl FallbackSecretStore {
+    #[must_use]
+    pub fn new(primary: Box<dyn SecretStore>) -> FallbackSecretStore {
+        FallbackSecretStore {
+            primary,
+            fallback: MemorySecretStore::new(),
+            degraded: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn degrade(&self) {
+        self.degraded
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl SecretStore for FallbackSecretStore {
+    fn get(&self, key: &SecretKey) -> Result<Option<Secret>, SecretError> {
+        match self.primary.get(key) {
+            Ok(Some(secret)) => Ok(Some(secret)),
+            Ok(None) => self.fallback.get(key),
+            Err(_) => {
+                self.degrade();
+                self.fallback.get(key)
+            }
+        }
+    }
+
+    fn set(&self, key: &SecretKey, secret: &Secret) -> Result<(), SecretError> {
+        if self.primary.set(key, secret).is_ok() {
+            // Do not keep a stale copy that would outlive a later delete.
+            return self.fallback.delete(key);
+        }
+        self.degrade();
+        self.fallback.set(key, secret)
+    }
+
+    fn delete(&self, key: &SecretKey) -> Result<(), SecretError> {
+        let kept = self.fallback.delete(key);
+        if self.primary.delete(key).is_err() {
+            self.degrade();
+        }
+        kept
+    }
+
+    fn is_persistent(&self) -> bool {
+        self.primary.is_persistent() && !self.degraded.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}

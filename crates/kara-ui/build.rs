@@ -30,6 +30,9 @@ fn main() {
             QmlFile::from("qml/AppChooserDialog.qml"),
             QmlFile::from("qml/UnlockDialog.qml"),
             QmlFile::from("qml/EjectGlyph.qml"),
+            QmlFile::from("qml/DrivesSection.qml"),
+            QmlFile::from("qml/DriveDialog.qml"),
+            QmlFile::from("qml/DrivePrompts.qml"),
             // Prueba de extremo a extremo. Va en el módulo siempre, y solo se
             // instancia con `--e2e`: separarla por feature obligaría a que
             // `Main.qml` la cargara por URL y perdería la comprobación de
@@ -60,5 +63,6 @@ fn main() {
     // name (the Wayland app_id) and raising the window for another app.
     .cpp_file("cpp/window.cpp")
     .file("src/bridge.rs")
+    .file("src/drives.rs")
     .build();
 }

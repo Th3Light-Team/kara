@@ -99,7 +99,14 @@ impl Prefs {
     /// Writes the file. Failing to save is reported, never fatal.
     pub fn save(&self) -> Result<(), SettingsError> {
         match &self.path {
-            Some(path) => kara_fs::settings::save(path, &self.settings),
+            Some(path) => {
+                // The drives panel writes its own `[drive:*]` sections to this
+                // file; keep what is on disk instead of erasing it with the
+                // older copy held here.
+                let mut merged = self.settings.clone();
+                crate::remote_store::carry_drives(&kara_fs::settings::load(path).settings, &mut merged);
+                kara_fs::settings::save(path, &merged)
+            }
             None => Ok(()),
         }
     }

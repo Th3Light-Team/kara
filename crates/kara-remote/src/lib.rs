@@ -16,6 +16,7 @@
 //! S3 and Google Cloud Storage in `objstore` (features `s3`, `gcs`).
 
 pub mod config;
+pub mod form;
 pub mod import;
 pub mod registry;
 pub mod secrets;
@@ -34,4 +35,4 @@ pub use registry::{
     BackendFactory, ConnectError, ConnectOrRegistryError, ConnectionState, DriveRegistry, Prompt,
     PromptAnswer, PromptHandler, RefuseAll, RegistryError, Remember, Resolver,
 };
-pub use secrets::{MemorySecretStore, Secret, SecretError, SecretKey, SecretStore};
+pub use secrets::{FallbackSecretStore, MemorySecretStore, Secret, SecretError, SecretKey, SecretStore};

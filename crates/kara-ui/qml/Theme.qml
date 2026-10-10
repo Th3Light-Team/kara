@@ -80,6 +80,7 @@ QtObject {
     readonly property color accent:    theme.hasDesktopAccent ? theme.readable(theme.desktopAccent) : (theme.dark ? "#60CDFF" : "#005FB8")
     readonly property color divider:   theme.dark ? "#383838" : "#E7E7E7"
     readonly property color danger:    "#C42B1C"
+    readonly property color success:   theme.dark ? "#6CCB5F" : "#107C10"
     readonly property color dangerText: "#FFFFFF"
 
     // ---- Métricas ----------------------------------------------------------

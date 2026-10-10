@@ -61,6 +61,12 @@ Window {
         id: app
     }
 
+    // Remote drives: the panel section, their dialog and their questions.
+    Drives {
+        id: drives
+        onOpen_requested: uri => app.navigate(uri)
+    }
+
     // The desktop's light/dark preference and accent, live.
     Binding {
         target: Theme
@@ -784,6 +790,7 @@ Window {
 
             Sidebar {
                 app: app
+                drives: drives
                 visible: app.sidebar_visible
                 Layout.preferredWidth: app.sidebar_width
                 Layout.fillHeight: true
@@ -1040,9 +1047,18 @@ Window {
         app: app
     }
 
+    DriveDialog {
+        drives: drives
+    }
+
+    DrivePrompts {
+        drives: drives
+    }
+
     OperationDialog {
         id: ops
         app: app
+        otherPromptOpen: drives.dialog_open || drives.prompt_open || drives.remove_prompt
         onReleased: {
             const view = fileView.item as Item;
             if (view)

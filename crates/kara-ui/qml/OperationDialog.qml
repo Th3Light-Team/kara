@@ -32,7 +32,10 @@ Item {
     // The passphrase prompt and the application chooser count too: a
     // window shortcut takes its key before the focused field, and Supr typed
     // into a passphrase must not send the selection to the trash.
-    readonly property bool promptOpen: root.app.delete_prompt || root.app.op_state === "conflict" || root.app.op_state === "failure" || root.app.op_state === "summary" || root.app.unlock_prompt || root.app.chooser_open
+    // Another object's dialog that is up (the remote drives' ones).
+    property bool otherPromptOpen: false
+
+    readonly property bool promptOpen: root.otherPromptOpen || root.app.delete_prompt || root.app.op_state === "conflict" || root.app.op_state === "failure" || root.app.op_state === "summary" || root.app.unlock_prompt || root.app.chooser_open
 
     readonly property bool progressVisible: root.app.op_state === "calculating" || root.app.op_state === "running" || root.app.op_state === "conflict" || root.app.op_state === "failure"
 

@@ -18,6 +18,7 @@ Rectangle {
     id: panel
 
     required property var app
+    required property var drives
 
     color: Theme.sidebar
 
@@ -62,12 +63,23 @@ Rectangle {
         }
     }
 
+    // Remote drives sit between the folder tree and the trash.
+    DrivesSection {
+        id: remote
+        drives: panel.drives
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: trashRow.top
+        anchors.bottomMargin: 4
+        height: remote.implicitHeight
+    }
+
     ListView {
         id: rows
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        anchors.bottom: trashRow.top
+        anchors.bottom: remote.top
         anchors.topMargin: 6
         anchors.bottomMargin: 6
         clip: true
